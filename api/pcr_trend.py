@@ -1,4 +1,4 @@
-from backend.utils.db import get_supabase
+from utils.db import get_supabase
 from datetime import datetime, timezone
 
 def get_pcr_trend(symbol: str = "NIFTY"):

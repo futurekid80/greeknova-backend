@@ -1,4 +1,4 @@
-from backend.utils.db import get_supabase
+from utils.db import get_supabase
 
 def get_volume_spikes(threshold: float = 50.0):
     supabase = get_supabase()

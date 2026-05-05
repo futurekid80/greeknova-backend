@@ -1,4 +1,4 @@
-from backend.utils.db import get_supabase
+from utils.db import get_supabase
 from datetime import datetime, timezone
 
 def get_stock_oi(symbol: str):
@@ -58,7 +58,7 @@ def get_stock_oi(symbol: str):
 
     # Add IV calculations
     try:
-        from backend.api.iv_calc import add_iv_to_strikes
+        from api.iv_calc import add_iv_to_strikes
         expiry_str = data.data[0]["expiry"] if data.data else None
         if expiry_str and float(cmp) > 0:
             strike_data = add_iv_to_strikes(strike_data, float(cmp), expiry_str)

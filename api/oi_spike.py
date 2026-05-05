@@ -1,4 +1,4 @@
-from backend.utils.db import get_supabase
+from utils.db import get_supabase
 
 def get_oi_spikes(threshold: float = 10.0):
     supabase = get_supabase()

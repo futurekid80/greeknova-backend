@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
 
-sys.path.insert(0, '/Users/apple/optionspulse')
+
 
 INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
 TOP30 = [
@@ -39,8 +39,8 @@ def run_full_capture():
     if now.hour == 15 and now.minute > 30: return
     print(f"📸 Auto-capture at {now.strftime('%H:%M:%S')}...")
     try:
-        from backend.services.kite_auth import get_kite_client
-        from backend.utils.db import get_supabase
+        from services.kite_auth import get_kite_client
+        from utils.db import get_supabase
         kite = get_kite_client()
         supabase = get_supabase()
         timestamp = now.astimezone(timezone.utc).isoformat()
@@ -127,7 +127,7 @@ def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
 @app.get("/oi-spikes")
 def oi_spikes(threshold: float = 10.0):
-    from backend.api.oi_spike import get_oi_spikes
+    from api.oi_spike import get_oi_spikes
     return get_oi_spikes(threshold)
 
 if __name__ == "__main__":
@@ -135,32 +135,32 @@ if __name__ == "__main__":
 
 @app.get("/pcr-trend/{symbol}")
 def pcr_trend(symbol: str = "NIFTY"):
-    from backend.api.pcr_trend import get_pcr_trend
+    from api.pcr_trend import get_pcr_trend
     return get_pcr_trend(symbol.upper())
 
 @app.get("/stock-oi/{symbol}")
 def stock_oi(symbol: str):
-    from backend.api.stock_oi import get_stock_oi
+    from api.stock_oi import get_stock_oi
     return get_stock_oi(symbol.upper())
 
 @app.get("/oi-history/{symbol}")
 def oi_history(symbol: str):
-    from backend.api.oi_history import get_oi_history
+    from api.oi_history import get_oi_history
     return get_oi_history(symbol.upper())
 
 @app.get("/volume-spikes")
 def volume_spikes(threshold: float = 50.0):
-    from backend.api.volume_spike import get_volume_spikes
+    from api.volume_spike import get_volume_spikes
     return get_volume_spikes(threshold)
 
 @app.get("/confluence")
 def confluence():
-    from backend.api.confluence import get_confluence
+    from api.confluence import get_confluence
     return get_confluence()
 
 @app.get("/max-pain")
 def max_pain():
-    from backend.api.max_pain import get_max_pain_all
+    from api.max_pain import get_max_pain_all
     return get_max_pain_all()
 
 def auto_refresh_token():
@@ -176,7 +176,7 @@ def auto_refresh_token():
     except:
         pass
     try:
-        from backend.services.kite_auth import get_kite_client
+        from services.kite_auth import get_kite_client
         kite = get_kite_client()
         profile = kite.profile()
         print(f"✅ Auto-login successful: {profile['user_name']}")
@@ -185,5 +185,5 @@ def auto_refresh_token():
 
 @app.get("/uoa")
 def uoa():
-    from backend.api.uoa import get_uoa
+    from api.uoa import get_uoa
     return get_uoa()

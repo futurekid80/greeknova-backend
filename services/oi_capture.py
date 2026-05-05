@@ -2,8 +2,8 @@ import os
 import time
 from datetime import datetime
 from dotenv import load_dotenv
-from backend.utils.db import get_supabase
-from backend.services.kite_auth import get_kite_client
+from utils.db import get_supabase
+from services.kite_auth import get_kite_client
 
 load_dotenv()
 
