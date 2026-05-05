@@ -215,3 +215,8 @@ def oi_dates(symbol: str = "NIFTY"):
 def eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     from api.eod_analysis import get_eod_analysis
     return get_eod_analysis(symbol.upper(), date, expiry)
+
+@app.get("/oi-pulse")
+def oi_pulse(filter: str = "all"):
+    from api.oi_pulse import get_oi_pulse
+    return get_oi_pulse(filter)
