@@ -134,9 +134,19 @@ if __name__ == "__main__":
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=False)
 
 @app.get("/pcr-trend/{symbol}")
-def pcr_trend(symbol: str = "NIFTY"):
+def pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     from api.pcr_trend import get_pcr_trend
-    return get_pcr_trend(symbol.upper())
+    return get_pcr_trend(symbol.upper(), expiry)
+
+@app.get("/pcr-expiries/{symbol}")
+def pcr_expiries(symbol: str = "NIFTY"):
+    from utils.db import get_supabase
+    from datetime import datetime, timezone
+    supabase = get_supabase()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    result = supabase.from_("oi_snapshots").select("expiry").eq("symbol", symbol).gte("timestamp", f"{today}T00:00:00+00:00").execute()
+    expiries = sorted(set(r["expiry"] for r in result.data if r["expiry"]))
+    return {"symbol": symbol, "expiries": expiries}
 
 @app.get("/stock-oi/{symbol}")
 def stock_oi(symbol: str):

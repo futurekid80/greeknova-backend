@@ -1,19 +1,23 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone
 
-def get_pcr_trend(symbol: str = "NIFTY"):
+def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-    result = supabase.from_("oi_snapshots")\
-        .select("timestamp, option_type, oi")\
+    query = supabase.from_("oi_snapshots")\
+        .select("timestamp, option_type, oi, expiry")\
         .eq("symbol", symbol)\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .order("timestamp", desc=False)\
-        .execute()
+        .order("timestamp", desc=False)
+
+    if expiry:
+        query = query.eq("expiry", expiry)
+
+    result = query.execute()
 
     if not result.data:
-        return {"symbol": symbol, "points": []}
+        return {"symbol": symbol, "points": [], "expiry": expiry}
 
     ts_map: dict = {}
     for row in result.data:
@@ -31,7 +35,6 @@ def get_pcr_trend(symbol: str = "NIFTY"):
         pe = val["pe"]
         pcr = round(pe / ce, 3) if ce > 0 else 0
         try:
-            # Handle variable microsecond precision
             clean_ts = ts.split('+')[0].split('Z')[0]
             if '.' in clean_ts:
                 base, frac = clean_ts.split('.')
@@ -53,4 +56,4 @@ def get_pcr_trend(symbol: str = "NIFTY"):
             "pe_oi": pe,
         })
 
-    return {"symbol": symbol, "points": points, "total_snapshots": len(points)}
+    return {"symbol": symbol, "points": points, "total_snapshots": len(points), "expiry": expiry}
