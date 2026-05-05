@@ -155,10 +155,6 @@ def stock_oi(symbol: str):
     from api.stock_oi import get_stock_oi
     return get_stock_oi(symbol.upper())
 
-@app.get("/oi-history/{symbol}")
-def oi_history(symbol: str):
-    from api.oi_history import get_oi_history
-    return get_oi_history(symbol.upper())
 
 @app.get("/volume-spikes")
 def volume_spikes(threshold: float = 50.0):
