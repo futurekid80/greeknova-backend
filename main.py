@@ -204,3 +204,13 @@ def uoa():
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
     return get_option_chain(symbol.upper(), expiry)
+
+@app.get("/oi-history/{symbol}")
+def oi_history(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
+    from api.oi_history import get_oi_comparison
+    return get_oi_comparison(symbol.upper(), date_a, date_b, expiry)
+
+@app.get("/oi-dates/{symbol}")
+def oi_dates(symbol: str = "NIFTY"):
+    from api.oi_history import get_available_dates
+    return get_available_dates(symbol.upper())

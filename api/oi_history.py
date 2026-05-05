@@ -1,65 +1,103 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone
 
-def get_oi_history(symbol: str):
+def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
-    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-
-    # Get all today's snapshots for this symbol
     result = supabase.from_("oi_snapshots")\
-        .select("timestamp, strike, option_type, oi")\
+        .select("timestamp")\
         .eq("symbol", symbol)\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
         .order("timestamp", desc=False)\
         .execute()
+    dates = sorted(set(r["timestamp"][:10] for r in result.data)) if result.data else []
+    return {"symbol": symbol, "dates": dates}
 
-    if not result.data:
-        return {"symbol": symbol, "timestamps": [], "strikes": []}
+def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
+    """Get the last snapshot of the day for a given date"""
+    supabase = get_supabase()
+    ts_q = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", symbol)\
+        .gte("timestamp", f"{date}T00:00:00+00:00")\
+        .lt("timestamp", f"{date}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1)\
+        .execute()
 
-    # Get unique timestamps and strikes
-    timestamps = sorted(set(r["timestamp"] for r in result.data))
-    strikes = sorted(set(r["strike"] for r in result.data))
+    if not ts_q.data:
+        return {}
 
-    # Convert timestamps to IST labels
-    def to_ist(ts):
-        try:
-            clean = ts.split('+')[0]
-            if '.' in clean:
-                base, frac = clean.split('.')
-                frac = frac[:6].ljust(6, '0')
-                clean = f"{base}.{frac}"
-            dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
-            ist_min = dt.hour * 60 + dt.minute + 330
-            h, m = (ist_min // 60) % 24, ist_min % 60
-            return f"{h:02d}:{m:02d}"
-        except:
-            return ts[11:16]
+    latest_ts = ts_q.data[0]["timestamp"]
+    q = supabase.from_("oi_snapshots")\
+        .select("strike, option_type, oi, expiry")\
+        .eq("symbol", symbol)\
+        .eq("timestamp", latest_ts)
 
-    ts_labels = [to_ist(ts) for ts in timestamps]
+    if expiry:
+        q = q.eq("expiry", expiry)
 
-    # Build strike-level OI history
-    strike_history = []
-    for strike in strikes:
-        ce_series = []
-        pe_series = []
-        for ts in timestamps:
-            ce_row = next((r for r in result.data if r["timestamp"] == ts and r["strike"] == strike and r["option_type"] == "CE"), None)
-            pe_row = next((r for r in result.data if r["timestamp"] == ts and r["strike"] == strike and r["option_type"] == "PE"), None)
-            ce_series.append(ce_row["oi"] if ce_row else None)
-            pe_series.append(pe_row["oi"] if pe_row else None)
+    rows = q.execute().data
+    result = {}
+    for r in rows:
+        key = (r["strike"], r["option_type"])
+        result[key] = r["oi"] or 0
+    return result
 
-        # Only include strikes with meaningful OI
-        max_oi = max((v for v in ce_series + pe_series if v), default=0)
-        if max_oi > 10000:
-            strike_history.append({
-                "strike": strike,
-                "ce_series": ce_series,
-                "pe_series": pe_series,
-            })
+def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
+    supabase = get_supabase()
+
+    # Get available dates
+    dates_result = get_available_dates(symbol)
+    dates = dates_result["dates"]
+
+    if not dates:
+        return {"symbol": symbol, "dates": [], "rows": []}
+
+    # Default: latest two dates
+    if not date_a:
+        date_a = dates[-1] if len(dates) >= 1 else None
+    if not date_b:
+        date_b = dates[-2] if len(dates) >= 2 else dates[-1]
+
+    # Get available expiries for date_a
+    exp_q = supabase.from_("oi_snapshots")\
+        .select("expiry")\
+        .eq("symbol", symbol)\
+        .gte("timestamp", f"{date_a}T00:00:00+00:00")\
+        .lt("timestamp", f"{date_a}T23:59:59+00:00")\
+        .execute()
+    expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"])) if exp_q.data else []
+    active_expiry = expiry or (expiries[0] if expiries else None)
+
+    snap_a = get_eod_snapshot(symbol, date_a, active_expiry)
+    snap_b = get_eod_snapshot(symbol, date_b, active_expiry)
+
+    all_strikes = sorted(set(k[0] for k in list(snap_a.keys()) + list(snap_b.keys())))
+
+    rows = []
+    for strike in all_strikes:
+        ce_a = snap_a.get((strike, "CE"), 0)
+        ce_b = snap_b.get((strike, "CE"), 0)
+        pe_a = snap_a.get((strike, "PE"), 0)
+        pe_b = snap_b.get((strike, "PE"), 0)
+        ce_chg = ce_a - ce_b
+        pe_chg = pe_a - pe_b
+        rows.append({
+            "strike":   strike,
+            "ce_a":     ce_a,
+            "ce_b":     ce_b,
+            "ce_chg":   ce_chg,
+            "pe_a":     pe_a,
+            "pe_b":     pe_b,
+            "pe_chg":   pe_chg,
+            "net_chg":  pe_chg - ce_chg,
+        })
 
     return {
-        "symbol": symbol,
-        "timestamps": ts_labels,
-        "total_snapshots": len(timestamps),
-        "strikes": strike_history[:15],  # top 15 strikes
+        "symbol":   symbol,
+        "date_a":   date_a,
+        "date_b":   date_b,
+        "expiry":   active_expiry,
+        "expiries": expiries,
+        "dates":    dates,
+        "rows":     rows,
     }
