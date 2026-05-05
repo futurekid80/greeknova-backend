@@ -199,3 +199,8 @@ def auto_refresh_token():
 def uoa():
     from api.uoa import get_uoa
     return get_uoa()
+
+@app.get("/option-chain/{symbol}")
+def option_chain(symbol: str = "NIFTY", expiry: str = None):
+    from api.option_chain import get_option_chain
+    return get_option_chain(symbol.upper(), expiry)
