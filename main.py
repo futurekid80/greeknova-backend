@@ -210,3 +210,8 @@ def oi_history(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, ex
 def oi_dates(symbol: str = "NIFTY"):
     from api.oi_history import get_available_dates
     return get_available_dates(symbol.upper())
+
+@app.get("/eod-analysis/{symbol}")
+def eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
+    from api.eod_analysis import get_eod_analysis
+    return get_eod_analysis(symbol.upper(), date, expiry)
