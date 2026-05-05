@@ -54,7 +54,10 @@ def capture_oi_snapshot():
             if not found:
                 continue
             expiries = sorted(set(i["expiry"] for i in found))
-            nearest = [i for i in found if i["expiry"] == expiries[0]][:limit]
+            num_expiries = 3 if is_index else 2
+            nearest = []
+            for exp in expiries[:num_expiries]:
+                nearest.extend([i for i in found if i["expiry"] == exp][:limit])
 
             try:
                 quotes = kite.quote(["NFO:" + i["tradingsymbol"] for i in nearest])
