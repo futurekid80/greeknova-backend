@@ -79,8 +79,8 @@ def get_oi_pulse(filter_type: str = "all"):
         return {"items": [], "as_of": datetime.now(timezone.utc).isoformat(),
                 "count": 0, "message": f"Need 2+ snapshots today — have {len(timestamps)} so far"}
 
-    ts_old = timestamps[0]
-    ts_new = timestamps[-1]
+    ts_new = timestamps[-1]   # latest snapshot
+    ts_old = timestamps[-2]   # previous snapshot (ensures same stock coverage)
 
     # Batch fetch OI for both timestamps
     old_rows = fetch_all_paginated(supabase, ts_old)
