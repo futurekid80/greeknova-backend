@@ -15,12 +15,13 @@ STOCK_NSE_MAP = {
     "BAJAJFINSV":"NSE:BAJAJFINSV","TECHM":"NSE:TECHM",
 }
 INDEX_NSE_MAP = {
-    "NIFTY":"NSE:NIFTY 50",
-    "BANKNIFTY":"NSE:NIFTY BANK",
-    "FINNIFTY":"NSE:NIFTY FIN SERVICE",
+    "NIFTY":     "NSE:NIFTY 50",
+    "BANKNIFTY": "NSE:NIFTY BANK",
+    "FINNIFTY":  "NSE:NIFTY FIN SERVICE",
 }
+ALL_SYMBOLS = list(INDEX_NSE_MAP.keys()) + list(STOCK_NSE_MAP.keys())
 
-def classify(oi_chg_pct: float, price_chg_pct: float):
+def classify(oi_chg_pct, price_chg_pct):
     if oi_chg_pct > 0 and price_chg_pct > 0:
         return "LONG_BUILDUP",   "Long Buildup",   "text-emerald-400", "bg-emerald-950/30", "border-emerald-800/40"
     if oi_chg_pct > 0 and price_chg_pct < 0:
@@ -31,7 +32,7 @@ def classify(oi_chg_pct: float, price_chg_pct: float):
         return "LONG_UNWINDING", "Long Unwinding", "text-orange-400",  "bg-orange-950/30",  "border-orange-800/40"
     return "NEUTRAL", "Neutral", "text-gray-400", "bg-gray-900/30", "border-gray-800"
 
-def get_total_oi(supabase, symbol: str, timestamp: str):
+def get_total_oi_for_symbol(supabase, symbol, timestamp):
     result = supabase.from_("oi_snapshots")\
         .select("oi")\
         .eq("symbol", symbol)\
@@ -41,27 +42,23 @@ def get_total_oi(supabase, symbol: str, timestamp: str):
 
 def get_oi_pulse(filter_type: str = "all"):
     supabase = get_supabase()
-    now_utc   = datetime.now(timezone.utc)
-    today     = now_utc.strftime('%Y-%m-%d')
-    yesterday = (now_utc - timedelta(days=1)).strftime('%Y-%m-%d')
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-    # Get all symbols with data today or yesterday
-    recent = supabase.from_("oi_snapshots")\
-        .select("symbol, timestamp, is_index")\
-        .gte("timestamp", f"{yesterday}T00:00:00+00:00")\
-        .order("timestamp", desc=True)\
+    # Get distinct timestamps for today only
+    ts_result = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=False)\
         .execute()
 
-    if not recent.data:
-        return {"items": [], "as_of": None, "message": "No data yet"}
+    timestamps = sorted(set(r["timestamp"] for r in ts_result.data))
 
-    # Group by symbol — get latest and previous timestamps
-    from collections import defaultdict
-    sym_ts    = defaultdict(list)
-    sym_index = {}
-    for r in recent.data:
-        sym_ts[r["symbol"]].append(r["timestamp"])
-        sym_index[r["symbol"]] = r["is_index"]
+    if len(timestamps) < 2:
+        return {"items": [], "as_of": datetime.now(timezone.utc).isoformat(),
+                "count": 0, "message": f"Need 2+ snapshots today — have {len(timestamps)} so far"}
+
+    ts_old = timestamps[0]   # first snapshot (market open)
+    ts_new = timestamps[-1]  # latest snapshot
 
     # Get current prices from Kite
     prices = {}
@@ -69,58 +66,50 @@ def get_oi_pulse(filter_type: str = "all"):
         from services.kite_auth import get_kite_client
         kite = get_kite_client()
         all_map = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
-        symbols_to_fetch = [s for s in sym_ts.keys() if s in all_map]
-        kite_keys = [all_map[s] for s in symbols_to_fetch]
-        if kite_keys:
-            quotes = kite.quote(kite_keys)
-            for sym in symbols_to_fetch:
-                key = all_map[sym]
-                if key in quotes:
-                    prices[sym] = {
-                        "ltp":        quotes[key]["last_price"],
-                        "prev_close": quotes[key].get("ohlc", {}).get("close", quotes[key]["last_price"]),
-                    }
+        kite_keys = list(all_map.values())
+        quotes = kite.quote(kite_keys)
+        for sym, key in all_map.items():
+            if key in quotes:
+                q = quotes[key]
+                prev = q.get("ohlc", {}).get("close", q["last_price"])
+                prices[sym] = {
+                    "ltp":        q["last_price"],
+                    "prev_close": prev,
+                }
     except Exception as e:
         print(f"Price fetch failed: {e}")
 
     items = []
-    for sym, timestamps in sym_ts.items():
-        unique_ts = sorted(set(timestamps), reverse=True)
-        if len(unique_ts) < 2:
-            continue  # Need at least 2 snapshots to compare
+    for sym in ALL_SYMBOLS:
+        is_index = sym in INDEX_NSE_MAP
 
-        latest_ts = unique_ts[0]
-        prev_ts   = unique_ts[1]
+        if filter_type == "index"  and not is_index: continue
+        if filter_type == "stocks" and is_index:     continue
 
-        oi_now  = get_total_oi(supabase, sym, latest_ts)
-        oi_prev = get_total_oi(supabase, sym, prev_ts)
+        oi_old = get_total_oi_for_symbol(supabase, sym, ts_old)
+        oi_new = get_total_oi_for_symbol(supabase, sym, ts_new)
 
-        if oi_prev == 0:
+        if oi_old == 0:
             continue
 
-        oi_chg_pct = round((oi_now - oi_prev) / oi_prev * 100, 2)
-        oi_chg_abs = oi_now - oi_prev
+        oi_chg_pct = round((oi_new - oi_old) / oi_old * 100, 2)
+        oi_chg_abs = oi_new - oi_old
 
-        # Price change
         price_chg_pct = 0.0
         ltp = None
         if sym in prices:
             ltp       = prices[sym]["ltp"]
-            prev_close= prices[sym]["prev_close"]
-            if prev_close and prev_close > 0:
-                price_chg_pct = round((ltp - prev_close) / prev_close * 100, 2)
+            prev      = prices[sym]["prev_close"]
+            if prev and prev > 0:
+                price_chg_pct = round((ltp - prev) / prev * 100, 2)
 
         signal, label, color, bg, border = classify(oi_chg_pct, price_chg_pct)
-
-        is_index = sym_index.get(sym, False)
-        if filter_type == "index"  and not is_index: continue
-        if filter_type == "stocks" and is_index:     continue
 
         items.append({
             "symbol":        sym,
             "is_index":      is_index,
-            "oi_now":        oi_now,
-            "oi_prev":       oi_prev,
+            "oi_now":        oi_new,
+            "oi_prev":       oi_old,
             "oi_chg_abs":    oi_chg_abs,
             "oi_chg_pct":    oi_chg_pct,
             "ltp":           ltp,
@@ -132,11 +121,26 @@ def get_oi_pulse(filter_type: str = "all"):
             "border":        border,
         })
 
-    # Sort by absolute OI change %
     items.sort(key=lambda x: abs(x["oi_chg_pct"]), reverse=True)
 
+    # IST time labels
+    def to_ist(ts):
+        try:
+            clean = ts.split('+')[0].split('Z')[0]
+            if '.' in clean:
+                base, frac = clean.split('.')
+                clean = f"{base}.{frac[:6].ljust(6,'0')}"
+            dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+            ist = dt.hour * 60 + dt.minute + 330
+            return f"{(ist//60)%24:02d}:{ist%60:02d}"
+        except:
+            return ts[11:16]
+
     return {
-        "items":   items,
-        "as_of":   now_utc.isoformat(),
-        "count":   len(items),
+        "items":      items,
+        "as_of":      datetime.now(timezone.utc).isoformat(),
+        "count":      len(items),
+        "open_time":  to_ist(ts_old),
+        "close_time": to_ist(ts_new),
+        "snapshots":  len(timestamps),
     }
