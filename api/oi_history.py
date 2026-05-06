@@ -3,13 +3,21 @@ from datetime import datetime, timezone
 
 def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
-    result = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", symbol)\
-        .order("timestamp", desc=False)\
-        .execute()
-    dates = sorted(set(r["timestamp"][:10] for r in result.data)) if result.data else []
-    return {"symbol": symbol, "dates": dates}
+    all_dates = set()
+    for offset in range(0, 20000, 1000):
+        result = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", symbol)\
+            .order("timestamp", desc=False)\
+            .range(offset, offset + 999)\
+            .execute()
+        if not result.data:
+            break
+        for r in result.data:
+            all_dates.add(r["timestamp"][:10])
+        if len(result.data) < 1000:
+            break
+    return {"symbol": symbol, "dates": sorted(all_dates)}
 
 def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
     """Get the last snapshot of the day for a given date"""
