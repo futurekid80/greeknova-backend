@@ -65,7 +65,9 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
         .gte("timestamp", f"{date_a}T00:00:00+00:00")\
         .lt("timestamp", f"{date_a}T23:59:59+00:00")\
         .execute()
-    expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"])) if exp_q.data else []
+    from datetime import date as date_type
+    today_str = date_type.today().isoformat()
+    expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"] and r["expiry"] >= today_str)) if exp_q.data else []
     active_expiry = expiry or (expiries[0] if expiries else None)
 
     snap_a = get_eod_snapshot(symbol, date_a, active_expiry)
