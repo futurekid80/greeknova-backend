@@ -4,14 +4,11 @@ from datetime import datetime, timezone, date
 def get_uoa():
     supabase = get_supabase()
 
-    # Get latest two timestamps
-    latest = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .order("timestamp", desc=True)\
-        .limit(1000)\
-        .execute()
+    # Get latest two distinct timestamps via NIFTY (avoids row limit)
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    ts_result = supabase.from_("oi_snapshots")        .select("timestamp")        .eq("symbol", "NIFTY")        .gte("timestamp", f"{today}T00:00:00+00:00")        .order("timestamp", desc=True)        .limit(200)        .execute()
 
-    timestamps = sorted(set(r["timestamp"] for r in latest.data), reverse=True)
+    timestamps = sorted(set(r["timestamp"] for r in ts_result.data), reverse=True)
     if len(timestamps) < 2:
         return {"signals": [], "total": 0}
 
