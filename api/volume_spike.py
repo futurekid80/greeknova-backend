@@ -1,16 +1,30 @@
 from utils.db import get_supabase
+from datetime import datetime, timezone
 
-def get_volume_spikes(threshold: float = 50.0):
+def get_volume_spikes(threshold: float = 50.0, date: str = None):
     supabase = get_supabase()
 
-    result = supabase.from_("oi_snapshots").select("timestamp").order("timestamp", desc=True).limit(1000).execute()
-    timestamps = sorted(set(r["timestamp"] for r in result.data), reverse=True)
+    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    ts_result = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=False)\
+        .execute()
+
+    timestamps = sorted(set(r["timestamp"] for r in ts_result.data))
 
     if len(timestamps) < 2:
-        return {"error": "Need at least 2 snapshots", "spikes": []}
-
-    ts_new = timestamps[0]
-    ts_old = timestamps[1]
+        result = supabase.from_("oi_snapshots").select("timestamp").order("timestamp", desc=True).limit(1000).execute()
+        timestamps = sorted(set(r["timestamp"] for r in result.data), reverse=True)
+        if len(timestamps) < 2:
+            return {"error": "Need at least 2 snapshots", "spikes": []}
+        ts_old = timestamps[1]
+        ts_new = timestamps[0]
+    else:
+        ts_old = timestamps[0]
+        ts_new = timestamps[-1]
 
     new_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_new).execute().data
     old_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_old).execute().data
@@ -29,36 +43,53 @@ def get_volume_spikes(threshold: float = 50.0):
 
         old_vol = old_row["volume"] or 0
         new_vol = row["volume"] or 0
-        old_oi = old_row["oi"] or 0
-        new_oi = row["oi"] or 0
+        old_oi  = old_row["oi"] or 0
+        new_oi  = row["oi"] or 0
 
         if old_vol < 10000:
             continue
 
-        vol_pct = ((new_vol - old_vol) / old_vol * 100) if old_vol > 0 else 0
-        oi_pct = ((new_oi - old_oi) / old_oi * 100) if old_oi > 0 else 0
+        vol_pct = round(((new_vol - old_vol) / old_vol * 100), 2) if old_vol > 0 else 0
+        oi_pct  = round(((new_oi  - old_oi)  / old_oi  * 100), 2) if old_oi  > 0 else 0
 
         if vol_pct >= threshold:
             signal = "FRESH_BUILD" if oi_pct > 5 else "UNWINDING" if oi_pct < -5 else "CHURN"
             spikes.append({
-                "symbol": row["symbol"],
+                "symbol":        row["symbol"],
                 "tradingsymbol": row["tradingsymbol"],
-                "strike": row["strike"],
-                "option_type": row["option_type"],
-                "old_volume": old_vol,
-                "new_volume": new_vol,
-                "vol_pct": round(vol_pct, 2),
-                "oi_pct": round(oi_pct, 2),
-                "oi_signal": signal,
-                "last_price": row["last_price"],
-                "is_index": row.get("is_index", False),
+                "strike":        row["strike"],
+                "option_type":   row["option_type"],
+                "old_volume":    old_vol,
+                "new_volume":    new_vol,
+                "vol_pct":       vol_pct,
+                "oi_pct":        oi_pct,
+                "oi_signal":     signal,
+                "last_price":    row["last_price"],
+                "is_index":      row.get("is_index", False),
             })
 
     spikes.sort(key=lambda x: x["vol_pct"], reverse=True)
+
+    def to_ist(ts):
+        try:
+            clean = ts.split('+')[0].split('Z')[0]
+            if '.' in clean:
+                base, frac = clean.split('.')
+                clean = f"{base}.{frac[:6].ljust(6,'0')}"
+            dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+            ist = dt.hour * 60 + dt.minute + 330
+            return f"{(ist//60)%24:02d}:{ist%60:02d}"
+        except:
+            return ts[11:16]
+
     return {
-        "ts_new": ts_new,
-        "ts_old": ts_old,
-        "threshold": threshold,
+        "date":         today,
+        "ts_new":       ts_new,
+        "ts_old":       ts_old,
+        "open_time":    to_ist(ts_old),
+        "close_time":   to_ist(ts_new),
+        "snapshots":    len(timestamps),
+        "threshold":    threshold,
         "total_spikes": len(spikes),
-        "spikes": spikes[:50]
+        "spikes":       spikes[:50],
     }

@@ -128,9 +128,9 @@ def health(): return {"status": "ok"}
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
 @app.get("/oi-spikes")
-def oi_spikes(threshold: float = 10.0):
+def oi_spikes(threshold: float = 10.0, date: str = None):
     from api.oi_spike import get_oi_spikes
-    return get_oi_spikes(threshold)
+    return get_oi_spikes(threshold, date)
 
 if __name__ == "__main__":
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=False)
@@ -157,9 +157,9 @@ def stock_oi(symbol: str):
 
 
 @app.get("/volume-spikes")
-def volume_spikes(threshold: float = 50.0):
+def volume_spikes(threshold: float = 50.0, date: str = None):
     from api.volume_spike import get_volume_spikes
-    return get_volume_spikes(threshold)
+    return get_volume_spikes(threshold, date)
 
 @app.get("/confluence")
 def confluence():
