@@ -55,7 +55,8 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
         .eq("symbol", symbol)\
         .eq("timestamp", last_ts)\
         .execute()
-    expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"]))
+    today_str = (date or datetime.now(timezone.utc).strftime('%Y-%m-%d'))
+    expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"] and r["expiry"] >= today_str))
     active_expiry = expiry or (expiries[0] if expiries else None)
 
     # Re-fetch with expiry filter if needed
