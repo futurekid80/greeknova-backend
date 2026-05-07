@@ -126,11 +126,15 @@ def get_oi_pulse(filter_type: str = "all"):
 
         o_old = oi_old.get(sym, 0)
         o_new = oi_new.get(sym, 0)
-        if o_old == 0:
+        if o_new == 0:
             continue
+        if o_old == 0:
+            oi_chg_pct = 0.0
+            oi_chg_abs = 0
+        else:
+            oi_chg_pct = round((o_new - o_old) / o_old * 100, 2)
+            oi_chg_abs = o_new - o_old
 
-        oi_chg_pct = round((o_new - o_old) / o_old * 100, 2)
-        oi_chg_abs = o_new - o_old
 
         price_chg_pct = 0.0
         ltp = None
