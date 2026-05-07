@@ -50,6 +50,30 @@ def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
         result[key] = r["oi"] or 0
     return result
 
+def get_cmp(symbol: str) -> float | None:
+    """Fetch current market price from Kite"""
+    try:
+        from services.kite_auth import get_kite_client
+        INDEX_NSE_MAP = {
+            "NIFTY": "NSE:NIFTY 50",
+            "BANKNIFTY": "NSE:NIFTY BANK",
+            "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+        }
+        nse_symbol = INDEX_NSE_MAP.get(symbol, f"NSE:{symbol}")
+        kite = get_kite_client()
+        quotes = kite.quote([nse_symbol])
+        if nse_symbol in quotes:
+            return quotes[nse_symbol]["last_price"]
+    except Exception as e:
+        print(f"CMP fetch failed for {symbol}: {e}")
+    return None
+
+def get_atm_strike(cmp: float, strikes: list) -> float | None:
+    """Find the closest strike to CMP"""
+    if not cmp or not strikes:
+        return None
+    return min(strikes, key=lambda s: abs(s - cmp))
+
 def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
     supabase = get_supabase()
 
@@ -102,12 +126,18 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
             "net_chg":  pe_chg - ce_chg,
         })
 
+    # Fetch CMP and ATM strike
+    cmp = get_cmp(symbol)
+    atm_strike = get_atm_strike(cmp, all_strikes) if cmp else None
+
     return {
-        "symbol":   symbol,
-        "date_a":   date_a,
-        "date_b":   date_b,
-        "expiry":   active_expiry,
-        "expiries": expiries,
-        "dates":    dates,
-        "rows":     rows,
+        "symbol":     symbol,
+        "date_a":     date_a,
+        "date_b":     date_b,
+        "expiry":     active_expiry,
+        "expiries":   expiries,
+        "dates":      dates,
+        "cmp":        cmp,
+        "atm_strike": atm_strike,
+        "rows":       rows,
     }
