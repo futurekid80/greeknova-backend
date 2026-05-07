@@ -6,8 +6,10 @@ def get_volume_spikes(threshold: float = 50.0, date: str = None):
 
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
+    # Filter by NIFTY to avoid row limit on timestamp query
     ts_result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
+        .eq("symbol", "NIFTY")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
         .lt("timestamp",  f"{today}T23:59:59+00:00")\
         .order("timestamp", desc=False)\
@@ -16,18 +18,39 @@ def get_volume_spikes(threshold: float = 50.0, date: str = None):
     timestamps = sorted(set(r["timestamp"] for r in ts_result.data))
 
     if len(timestamps) < 2:
-        result = supabase.from_("oi_snapshots").select("timestamp").order("timestamp", desc=True).limit(1000).execute()
+        result = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .order("timestamp", desc=True)\
+            .limit(100)\
+            .execute()
         timestamps = sorted(set(r["timestamp"] for r in result.data), reverse=True)
         if len(timestamps) < 2:
             return {"error": "Need at least 2 snapshots", "spikes": []}
-        ts_old = timestamps[1]
         ts_new = timestamps[0]
+        ts_old = timestamps[1]
     else:
-        ts_old = timestamps[0]
+        ts_old = timestamps[-2]
         ts_new = timestamps[-1]
 
-    new_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_new).execute().data
-    old_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_old).execute().data
+    # Paginated snapshot fetch
+    def fetch_snapshot(ts):
+        all_data = []
+        for offset in range(0, 50000, 1000):
+            batch = supabase.from_("oi_snapshots")\
+                .select("*")\
+                .eq("timestamp", ts)\
+                .range(offset, offset + 999)\
+                .execute()
+            if not batch.data:
+                break
+            all_data.extend(batch.data)
+            if len(batch.data) < 1000:
+                break
+        return all_data
+
+    new_data = fetch_snapshot(ts_new)
+    old_data = fetch_snapshot(ts_old)
 
     old_map = {}
     for row in old_data:
