@@ -14,13 +14,21 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     if expiry:
         query = query.eq("expiry", expiry)
 
-    result = query.execute()
+    all_data = []
+    for offset in range(0, 50000, 1000):
+        batch = query.range(offset, offset + 999).execute()
+        if not batch.data:
+            break
+        all_data.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+    result_data = all_data
 
-    if not result.data:
+    if not result_data:
         return {"symbol": symbol, "points": [], "expiry": expiry}
 
     ts_map: dict = {}
-    for row in result.data:
+    for row in result_data:
         ts = row["timestamp"]
         if ts not in ts_map:
             ts_map[ts] = {"ce": 0, "pe": 0}
