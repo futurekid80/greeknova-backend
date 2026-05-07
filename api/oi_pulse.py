@@ -74,7 +74,16 @@ def get_oi_pulse(filter_type: str = "all"):
         .order("timestamp", desc=False)\
         .execute()
 
-    timestamps = sorted(set(r["timestamp"] for r in ts_result.data))
+    # Paginate to get all timestamps beyond 1000 row limit
+    all_ts_data = list(ts_result.data)
+    if len(ts_result.data) == 1000:
+        for offset in range(1000, 20000, 1000):
+            batch = supabase.from_("oi_snapshots")                .select("timestamp")                .eq("symbol", "NIFTY")                .gte("timestamp", f"{today}T00:00:00+00:00")                .order("timestamp", desc=False)                .range(offset, offset + 999)                .execute()
+            if not batch.data: break
+            all_ts_data.extend(batch.data)
+            if len(batch.data) < 1000: break
+
+    timestamps = sorted(set(r["timestamp"] for r in all_ts_data))
     if len(timestamps) < 2:
         return {"items": [], "as_of": datetime.now(timezone.utc).isoformat(),
                 "count": 0, "message": f"Need 2+ snapshots today — have {len(timestamps)} so far"}
