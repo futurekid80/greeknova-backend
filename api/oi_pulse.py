@@ -123,8 +123,8 @@ def get_oi_pulse(filter_type: str = "all"):
             "message": "No data found in the last 7 days"
         }
 
-    ts_new = timestamps[-1]   # latest snapshot
-    ts_old = timestamps[-2]   # previous snapshot
+    ts_old = timestamps[0]    # first capture of day (market open)
+    ts_new = timestamps[-1]   # last capture of day (market close)
 
     # ── Step 2: Fetch OI for both snapshots (2 calls) ─────────────────────────
     old_rows = fetch_all_paginated(supabase, ts_old)
