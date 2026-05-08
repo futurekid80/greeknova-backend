@@ -62,7 +62,7 @@ def run_full_capture():
     if not (9 <= now.hour <= 15): return
     if now.hour == 9 and now.minute < 15: return
     if now.hour == 15 and now.minute > 30: return
-    print(f"📸 Auto-capture at {now.strftime('%H:%M:%S')}...")
+    print(f"[CAPTURE] Auto-capture at {now.strftime('%H:%M:%S')}...")
     try:
         from services.kite_auth import get_kite_client
         from utils.db import get_supabase
