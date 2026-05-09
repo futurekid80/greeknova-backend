@@ -59,6 +59,7 @@ def run_full_capture():
     load_dotenv('/Users/apple/optionspulse/.env')
     from datetime import datetime, timezone
     now = datetime.now()
+    if now.weekday() >= 5: return          # Skip Saturday (5) and Sunday (6)
     if not (9 <= now.hour <= 15): return
     if now.hour == 9 and now.minute < 15: return
     if now.hour == 15 and now.minute > 30: return
@@ -181,7 +182,6 @@ def stock_oi(symbol: str):
     from api.stock_oi import get_stock_oi
     return get_stock_oi(symbol.upper())
 
-
 @app.get("/volume-spikes")
 def volume_spikes(threshold: float = 50.0, date: str = None):
     from api.volume_spike import get_volume_spikes
@@ -198,11 +198,12 @@ def max_pain():
     return get_max_pain_all()
 
 def auto_refresh_token():
-    """Auto-login every morning at 8:30 AM"""
+    """Auto-login every morning at 8:30 AM IST — weekdays only"""
     from datetime import datetime
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
+    if now.weekday() >= 5: return          # Skip Saturday and Sunday
     print(f"🔐 Auto token refresh at {now.strftime('%H:%M IST')}...")
     try:
         import os
