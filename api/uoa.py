@@ -1,23 +1,42 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date as date_type
 
-def get_uoa():
+def get_uoa(date: str = None):
     supabase = get_supabase()
 
-    # Get latest two distinct timestamps via NIFTY (avoids row limit)
-    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    ts_result = supabase.from_("oi_snapshots")        .select("timestamp")        .eq("symbol", "NIFTY")        .gte("timestamp", f"{today}T00:00:00+00:00")        .order("timestamp", desc=True)        .limit(200)        .execute()
+    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    # Get latest two distinct timestamps for the requested date via NIFTY filter
+    ts_result = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(200)\
+        .execute()
 
     timestamps = sorted(set(r["timestamp"] for r in ts_result.data), reverse=True)
+
+    # Fallback: if no data for requested date, use last available day
+    if len(timestamps) < 2:
+        fallback = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .order("timestamp", desc=True)\
+            .limit(200)\
+            .execute()
+        timestamps = sorted(set(r["timestamp"] for r in fallback.data), reverse=True)
+
     if len(timestamps) < 2:
         return {"signals": [], "total": 0}
 
     ts_new = timestamps[0]
     ts_old = timestamps[1]
 
-    # Get current and previous snapshots
-    new_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_new).execute().data
-    old_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_old).execute().data
+    # Get current and previous snapshots with limit to avoid silent truncation
+    new_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_new).limit(5000).execute().data
+    old_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_old).limit(5000).execute().data
 
     # Get CMPs
     cmp_res = supabase.from_("cmp_prices").select("*").order("timestamp", desc=True).limit(100).execute().data
@@ -28,28 +47,23 @@ def get_uoa():
             cmp_map[c["symbol"]] = c["cmp"]
             seen.add(c["symbol"])
 
-    # Build old OI map
     old_map = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in old_data}
 
-    # Get today's average volume per symbol for baseline
-    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    # Get today's volume history for baseline avg
     today_data = supabase.from_("oi_snapshots")\
         .select("symbol, tradingsymbol, volume")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .limit(5000)\
         .execute().data
 
-    # Calculate avg volume per tradingsymbol today
-    vol_history = {}
+    vol_history: dict = {}
     for r in today_data:
         k = f"{r['symbol']}_{r['tradingsymbol']}"
         if k not in vol_history:
             vol_history[k] = []
         vol_history[k].append(r["volume"] or 0)
 
-    avg_vol = {}
-    for k, vols in vol_history.items():
-        if len(vols) > 1:
-            avg_vol[k] = sum(vols) / len(vols)
+    avg_vol = {k: sum(v)/len(v) for k, v in vol_history.items() if len(v) > 1}
 
     uoa_signals = []
 
@@ -58,7 +72,6 @@ def get_uoa():
         ts = row["tradingsymbol"]
         key = f"{sym}_{ts}"
         old_row = old_map.get(key)
-
         if not old_row:
             continue
 
@@ -74,18 +87,12 @@ def get_uoa():
         if new_vol < 50000:
             continue
 
-        # Check avg volume baseline
         avg = avg_vol.get(key, new_vol)
         vol_ratio = new_vol / avg if avg > 0 else 1
-
-        # Volume/OI ratio - high means buyers dominating over writers
         vol_oi_ratio = new_vol / new_oi if new_oi > 0 else 0
-
-        # OI change
         oi_change_pct = ((new_oi - old_oi) / old_oi * 100) if old_oi > 0 else 0
         vol_change_pct = ((new_vol - old_vol) / old_vol * 100) if old_vol > 0 else 0
 
-        # Distance from ATM (how far OTM)
         if cmp > 0:
             dist_pct = ((strike - cmp) / cmp * 100)
             is_otm = (opt_type == 'CE' and strike > cmp) or (opt_type == 'PE' and strike < cmp)
@@ -94,27 +101,17 @@ def get_uoa():
             otm_pct = 0
             is_otm = False
 
-        # Scoring (1-5 conviction)
         score = 0
-
-        # High volume vs average (most important signal)
         if vol_ratio > 5: score += 2
         elif vol_ratio > 3: score += 1
-
-        # High vol/OI ratio suggests buyer activity
         if vol_oi_ratio > 3: score += 2
         elif vol_oi_ratio > 1.5: score += 1
-
-        # Far OTM with big volume = unusual
         if otm_pct > 3 and new_vol > 100000: score += 1
-
-        # OI building with volume = conviction
         if oi_change_pct > 15 and vol_change_pct > 20: score += 1
 
         if score < 2:
             continue
 
-        # Classify signal
         if vol_oi_ratio > 2 and oi_change_pct < 5:
             signal_type = "BUYER_DOMINATED"
             signal_desc = "High vol vs OI — buyers absorbing sellers"
@@ -152,11 +149,11 @@ def get_uoa():
             "is_index": sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
         })
 
-    # Sort by score then volume
     uoa_signals.sort(key=lambda x: (x["score"], x["volume"]), reverse=True)
 
     return {
         "timestamp": ts_new,
+        "date": today,
         "total": len(uoa_signals),
         "signals": uoa_signals[:50]
     }
