@@ -1,5 +1,5 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 STOCK_NSE_MAP = {
@@ -49,10 +49,6 @@ def classify(oi_chg_pct, price_chg_pct):
 
 
 def fetch_all_paginated(supabase, timestamp):
-    """Fetch all OI data for a timestamp — single large query, no loop needed.
-    Max rows per timestamp: ~66 symbols × ~40 strikes × 2 types = ~5280 rows.
-    Limit 10000 covers this safely in one call.
-    """
     rows = supabase.from_("oi_snapshots") \
         .select("symbol, oi") \
         .eq("timestamp", timestamp) \
@@ -62,7 +58,6 @@ def fetch_all_paginated(supabase, timestamp):
 
 
 def get_timestamps_for_date(supabase, date_str: str) -> list:
-    """Get all distinct timestamps for a given date via NIFTY filter."""
     result = supabase.from_("oi_snapshots") \
         .select("timestamp") \
         .eq("symbol", "NIFTY") \
@@ -74,20 +69,15 @@ def get_timestamps_for_date(supabase, date_str: str) -> list:
     return sorted(set(r["timestamp"] for r in (result.data or [])))
 
 
-def get_last_trading_day_timestamps(supabase) -> tuple[list, str]:
-    """Find the most recent date that has 2+ snapshots.
-    Looks back up to 7 days to handle weekends and holidays.
-    Returns (timestamps, date_str).
-    """
-    from datetime import timedelta
-    today = datetime.now(timezone.utc).date()
-    for days_back in range(0, 7):
-        check_date = today - timedelta(days=days_back)
-        date_str = check_date.isoformat()
-        timestamps = get_timestamps_for_date(supabase, date_str)
-        if len(timestamps) >= 2:
-            return timestamps, date_str
-    return [], ""
+def get_last_full_trading_day(supabase, before_date: str) -> list:
+    """Find the most recent date BEFORE before_date that has 5+ snapshots (full session)."""
+    base = datetime.strptime(before_date, '%Y-%m-%d')
+    for days_back in range(1, 8):
+        check = (base - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        ts = get_timestamps_for_date(supabase, check)
+        if len(ts) >= 5:
+            return ts
+    return []
 
 
 def to_ist(ts: str) -> str:
@@ -107,46 +97,41 @@ def get_oi_pulse(filter_type: str = "all"):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-    # ── Step 1: Try today first, fall back to last trading day ───────────────
-    timestamps = get_timestamps_for_date(supabase, today)
-    active_date = today
-    is_live = True
+    # ── Step 1: Find active date (today or last trading day) ─────────────────
+    today_ts = get_timestamps_for_date(supabase, today)
 
-    if len(timestamps) < 2:
-        timestamps, active_date = get_last_trading_day_timestamps(supabase)
+    if len(today_ts) >= 5:
+        # Full trading day today
+        active_date = today
+        ts_new = today_ts[-1]
+        # Compare vs previous trading day close
+        prev_ts = get_last_full_trading_day(supabase, today)
+        ts_old = prev_ts[-1] if prev_ts else today_ts[0]
+        is_live = True
+    elif len(today_ts) >= 1:
+        # Partial day today (weekend capture / pre-market) — use latest snapshot
+        # and compare vs last full trading day
+        active_date = today
+        ts_new = today_ts[-1]
+        prev_ts = get_last_full_trading_day(supabase, today)
+        ts_old = prev_ts[-1] if prev_ts else today_ts[0]
+        is_live = False
+    else:
+        # No data today — find last full trading day
+        prev_ts = get_last_full_trading_day(supabase, today)
+        if not prev_ts:
+            return {
+                "items": [], "as_of": datetime.now(timezone.utc).isoformat(),
+                "count": 0, "message": "No data found in the last 7 days"
+            }
+        active_date = prev_ts[-1][:10]
+        ts_new = prev_ts[-1]
+        # Compare vs the day before that
+        prev_prev_ts = get_last_full_trading_day(supabase, active_date)
+        ts_old = prev_prev_ts[-1] if prev_prev_ts else prev_ts[0]
         is_live = False
 
-    if len(timestamps) < 2:
-        return {
-            "items": [], "as_of": datetime.now(timezone.utc).isoformat(),
-            "count": 0,
-            "message": "No data found in the last 7 days"
-        }
-
-    # If fewer than 5 snapshots, not a real trading day (weekend/holiday test run)
-    # Compare against previous trading day's last snapshot instead
-    if len(timestamps) < 5 and not is_live:
-        ts_new = timestamps[-1]
-        # Find previous trading day
-        from datetime import timedelta
-        prev_date = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-        for days_back in range(1, 7):
-            check = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=days_back)).strftime('%Y-%m-%d')
-            prev_ts = get_timestamps_for_date(supabase, check)
-            if len(prev_ts) >= 5:
-                ts_old = prev_ts[-1]
-                break
-        else:
-            ts_old = timestamps[0]
-    elif len(timestamps) < 5:
-        # Live but thin data — use earliest vs latest
-        ts_old = timestamps[0]
-        ts_new = timestamps[-1]
-    else:
-        ts_old = timestamps[0]    # first capture of day (market open)
-        ts_new = timestamps[-1]   # last capture of day (market close)
-
-    # ── Step 2: Fetch OI for both snapshots (2 calls) ─────────────────────────
+    # ── Step 2: Fetch OI for both snapshots ───────────────────────────────────
     old_rows = fetch_all_paginated(supabase, ts_old)
     new_rows = fetch_all_paginated(supabase, ts_new)
 
@@ -158,7 +143,7 @@ def get_oi_pulse(filter_type: str = "all"):
     for r in new_rows:
         oi_new[r["symbol"]] += r["oi"] or 0
 
-    # ── Step 4: Get prices from Kite (live) or cmp_prices table (EOD) ────────
+    # ── Step 4: Get prices ────────────────────────────────────────────────────
     prices = {}
     if is_live:
         try:
@@ -173,8 +158,9 @@ def get_oi_pulse(filter_type: str = "all"):
                     prices[sym] = {"ltp": q["last_price"], "prev_close": prev}
         except Exception as e:
             print(f"[OI Pulse] Live price fetch failed: {e}")
-    else:
-        # Weekend/holiday — use last captured CMP prices
+
+    if not prices:
+        # Fallback: use stored CMP prices for active date
         try:
             cmp_result = supabase.from_("cmp_prices") \
                 .select("symbol, cmp") \
@@ -220,30 +206,30 @@ def get_oi_pulse(filter_type: str = "all"):
         signal, label, color, bg, border = classify(oi_chg_pct, price_chg_pct)
 
         items.append({
-            "symbol":      sym,
-            "is_index":    is_index,
-            "oi_now":      o_new,
-            "oi_prev":     o_old,
-            "oi_chg_abs":  oi_chg_abs,
-            "oi_chg_pct":  oi_chg_pct,
-            "ltp":         ltp,
+            "symbol":        sym,
+            "is_index":      is_index,
+            "oi_now":        o_new,
+            "oi_prev":       o_old,
+            "oi_chg_abs":    oi_chg_abs,
+            "oi_chg_pct":    oi_chg_pct,
+            "ltp":           ltp,
             "price_chg_pct": price_chg_pct,
-            "signal":      signal,
-            "label":       label,
-            "color":       color,
-            "bg":          bg,
-            "border":      border,
+            "signal":        signal,
+            "label":         label,
+            "color":         color,
+            "bg":            bg,
+            "border":        border,
         })
 
     items.sort(key=lambda x: abs(x["oi_chg_pct"]), reverse=True)
 
     return {
-        "items":      items,
-        "count":      len(items),
-        "as_of":      datetime.now(timezone.utc).isoformat(),
+        "items":       items,
+        "count":       len(items),
+        "as_of":       datetime.now(timezone.utc).isoformat(),
         "active_date": active_date,
-        "is_live":    is_live,
-        "open_time":  to_ist(ts_old),
-        "close_time": to_ist(ts_new),
-        "snapshots":  len(timestamps),
+        "is_live":     is_live,
+        "open_time":   to_ist(ts_old),
+        "close_time":  to_ist(ts_new),
+        "snapshots":   len(today_ts),
     }
