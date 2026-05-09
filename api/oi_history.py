@@ -4,11 +4,9 @@ from datetime import datetime, timezone, timedelta, date as date_type
 
 def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
-    since = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%d')
     result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", symbol)\
-        .gte("timestamp", f"{since}T00:00:00+00:00")\
         .order("timestamp", desc=True)\
         .limit(5000)\
         .execute()
