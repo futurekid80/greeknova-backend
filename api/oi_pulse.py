@@ -70,7 +70,7 @@ def get_timestamps_for_date(supabase, date_str: str) -> list:
 
 
 def get_last_full_trading_day(supabase, before_date: str) -> list:
-    """Find the most recent date BEFORE before_date that has 5+ snapshots (full session)."""
+    """Find the most recent date BEFORE before_date that has 5+ snapshots."""
     base = datetime.strptime(before_date, '%Y-%m-%d')
     for days_back in range(1, 8):
         check = (base - timedelta(days=days_back)).strftime('%Y-%m-%d')
@@ -78,6 +78,24 @@ def get_last_full_trading_day(supabase, before_date: str) -> list:
         if len(ts) >= 5:
             return ts
     return []
+
+
+def get_eod_prices(supabase, date_str: str) -> dict:
+    """Get last CMP per symbol for a given date."""
+    result = supabase.from_("cmp_prices") \
+        .select("symbol, cmp") \
+        .gte("timestamp", f"{date_str}T00:00:00+00:00") \
+        .lt("timestamp", f"{date_str}T23:59:59+00:00") \
+        .order("timestamp", desc=True) \
+        .limit(500) \
+        .execute()
+    price_map = {}
+    seen = set()
+    for r in (result.data or []):
+        if r["symbol"] not in seen:
+            price_map[r["symbol"]] = r["cmp"]
+            seen.add(r["symbol"])
+    return price_map
 
 
 def to_ist(ts: str) -> str:
@@ -97,27 +115,24 @@ def get_oi_pulse(filter_type: str = "all"):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-    # ── Step 1: Find active date (today or last trading day) ─────────────────
+    # ── Step 1: Find active date and snapshots ────────────────────────────────
     today_ts = get_timestamps_for_date(supabase, today)
 
     if len(today_ts) >= 5:
-        # Full trading day today
         active_date = today
         ts_new = today_ts[-1]
-        # Compare vs previous trading day close
         prev_ts = get_last_full_trading_day(supabase, today)
         ts_old = prev_ts[-1] if prev_ts else today_ts[0]
+        prev_date = prev_ts[-1][:10] if prev_ts else today
         is_live = True
     elif len(today_ts) >= 1:
-        # Partial day today (weekend capture / pre-market) — use latest snapshot
-        # and compare vs last full trading day
         active_date = today
         ts_new = today_ts[-1]
         prev_ts = get_last_full_trading_day(supabase, today)
         ts_old = prev_ts[-1] if prev_ts else today_ts[0]
+        prev_date = prev_ts[-1][:10] if prev_ts else today
         is_live = False
     else:
-        # No data today — find last full trading day
         prev_ts = get_last_full_trading_day(supabase, today)
         if not prev_ts:
             return {
@@ -126,9 +141,9 @@ def get_oi_pulse(filter_type: str = "all"):
             }
         active_date = prev_ts[-1][:10]
         ts_new = prev_ts[-1]
-        # Compare vs the day before that
         prev_prev_ts = get_last_full_trading_day(supabase, active_date)
         ts_old = prev_prev_ts[-1] if prev_prev_ts else prev_ts[0]
+        prev_date = prev_prev_ts[-1][:10] if prev_prev_ts else active_date
         is_live = False
 
     # ── Step 2: Fetch OI for both snapshots ───────────────────────────────────
@@ -160,22 +175,14 @@ def get_oi_pulse(filter_type: str = "all"):
             print(f"[OI Pulse] Live price fetch failed: {e}")
 
     if not prices:
-        # Fallback: use stored CMP prices for active date
-        try:
-            cmp_result = supabase.from_("cmp_prices") \
-                .select("symbol, cmp") \
-                .gte("timestamp", f"{active_date}T00:00:00+00:00") \
-                .lt("timestamp", f"{active_date}T23:59:59+00:00") \
-                .order("timestamp", desc=True) \
-                .limit(500) \
-                .execute()
-            seen = set()
-            for r in (cmp_result.data or []):
-                if r["symbol"] not in seen:
-                    prices[r["symbol"]] = {"ltp": r["cmp"], "prev_close": r["cmp"]}
-                    seen.add(r["symbol"])
-        except Exception as e:
-            print(f"[OI Pulse] EOD price fetch failed: {e}")
+        # EOD fallback: ltp = active_date close, prev_close = previous trading day close
+        ltp_map = get_eod_prices(supabase, active_date)
+        prev_close_map = get_eod_prices(supabase, prev_date)
+        for sym in ltp_map:
+            prices[sym] = {
+                "ltp": ltp_map[sym],
+                "prev_close": prev_close_map.get(sym, ltp_map[sym])
+            }
 
     # ── Step 5: Build items ───────────────────────────────────────────────────
     items = []
