@@ -4,11 +4,6 @@ from datetime import datetime, timezone, timedelta, date as date_type
 
 def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
-    # Query distinct dates via NIFTY timestamps only - one row per snapshot
-    result = supabase.rpc("get_distinct_dates", {"sym": symbol}).execute()
-    if result.data:
-        return {"symbol": symbol, "dates": sorted(set(r["date"] for r in result.data))}
-    # Fallback: manual distinct via small targeted queries per recent date
     from datetime import datetime, timezone, timedelta
     dates = set()
     base = datetime.now(timezone.utc).date()
@@ -20,9 +15,7 @@ def get_available_dates(symbol: str = "NIFTY"):
     return {"symbol": symbol, "dates": sorted(dates)}
 
 
-
 def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
-    """Get the last snapshot of the day for a given date"""
     supabase = get_supabase()
     ts_q = supabase.from_("oi_snapshots")\
         .select("timestamp")\
@@ -32,19 +25,15 @@ def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
         .order("timestamp", desc=True)\
         .limit(1)\
         .execute()
-
     if not ts_q.data:
         return {}
-
     latest_ts = ts_q.data[0]["timestamp"]
     q = supabase.from_("oi_snapshots")\
         .select("strike, option_type, oi, expiry")\
         .eq("symbol", symbol)\
         .eq("timestamp", latest_ts)
-
     if expiry:
         q = q.eq("expiry", expiry)
-
     rows = q.execute().data
     result = {}
     for r in rows:
@@ -54,7 +43,6 @@ def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
 
 
 def get_cmp(symbol: str) -> float | None:
-    """Fetch current market price from Kite"""
     try:
         from services.kite_auth import get_kite_client
         INDEX_NSE_MAP = {
@@ -73,7 +61,6 @@ def get_cmp(symbol: str) -> float | None:
 
 
 def get_atm_strike(cmp: float, strikes: list) -> float | None:
-    """Find the closest strike to CMP"""
     if not cmp or not strikes:
         return None
     return min(strikes, key=lambda s: abs(s - cmp))
@@ -81,37 +68,29 @@ def get_atm_strike(cmp: float, strikes: list) -> float | None:
 
 def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
     supabase = get_supabase()
-
     dates_result = get_available_dates(symbol)
     dates = dates_result["dates"]
-
     if not dates:
         return {"symbol": symbol, "dates": [], "rows": []}
-
     if not date_a:
         date_a = dates[-1] if len(dates) >= 1 else None
     if not date_b:
         date_b = dates[-2] if len(dates) >= 2 else dates[-1]
-
     exp_q = supabase.from_("oi_snapshots")\
         .select("expiry")\
         .eq("symbol", symbol)\
         .gte("timestamp", f"{date_a}T00:00:00+00:00")\
         .lt("timestamp", f"{date_a}T23:59:59+00:00")\
         .execute()
-
     today_str = date_type.today().isoformat()
     expiries = sorted(set(
         r["expiry"] for r in exp_q.data
         if r["expiry"] and r["expiry"] >= today_str
     )) if exp_q.data else []
     active_expiry = expiry or (expiries[0] if expiries else None)
-
     snap_a = get_eod_snapshot(symbol, date_a, active_expiry)
     snap_b = get_eod_snapshot(symbol, date_b, active_expiry)
-
     all_strikes = sorted(set(k[0] for k in list(snap_a.keys()) + list(snap_b.keys())))
-
     rows = []
     for strike in all_strikes:
         ce_a = snap_a.get((strike, "CE"), 0)
@@ -130,10 +109,8 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
             "pe_chg":  pe_chg,
             "net_chg": pe_chg - ce_chg,
         })
-
     cmp = get_cmp(symbol)
     atm_strike = get_atm_strike(cmp, all_strikes) if cmp else None
-
     return {
         "symbol":     symbol,
         "date_a":     date_a,
