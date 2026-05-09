@@ -4,16 +4,21 @@ from datetime import datetime, timezone, timedelta, date as date_type
 
 def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
-    result = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", symbol)\
-        .order("timestamp", desc=True)\
-        .limit(50000)\
-        .execute()
-    all_dates = set()
-    for r in (result.data or []):
-        all_dates.add(r["timestamp"][:10])
-    return {"symbol": symbol, "dates": sorted(all_dates)}
+    # Query distinct dates via NIFTY timestamps only - one row per snapshot
+    result = supabase.rpc("get_distinct_dates", {"sym": symbol}).execute()
+    if result.data:
+        return {"symbol": symbol, "dates": sorted(set(r["date"] for r in result.data))}
+    # Fallback: manual distinct via small targeted queries per recent date
+    from datetime import datetime, timezone, timedelta
+    dates = set()
+    base = datetime.now(timezone.utc).date()
+    for i in range(30):
+        d = (base - timedelta(days=i)).isoformat()
+        r = supabase.from_("oi_snapshots").select("timestamp").eq("symbol", symbol).gte("timestamp", f"{d}T00:00:00+00:00").lt("timestamp", f"{d}T23:59:59+00:00").limit(1).execute()
+        if r.data:
+            dates.add(d)
+    return {"symbol": symbol, "dates": sorted(dates)}
+
 
 
 def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
