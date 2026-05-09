@@ -4,19 +4,19 @@ from datetime import datetime, timezone
 def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
     all_dates = set()
-    for offset in range(0, 10000, 1000):
-        result = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not result.data:
-            break
-        for r in result.data:
-            all_dates.add(r["timestamp"][:10])
-        if len(result.data) < 1000:
-            break
+    # Fetch timestamps spanning 60 days back, NIFTY only
+    from datetime import datetime, timedelta, timezone
+    since = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%d')
+    result = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", symbol)\
+        .gte("timestamp", f"{since}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(5000)\
+        .execute()
+    for r in (result.data or []):
+        all_dates.add(r["timestamp"][:10])
+    return {"symbol": symbol, "dates": sorted(all_dates)}
         # Stop once we have enough dates — no need to scan all history
         if len(all_dates) >= 30:
             break
