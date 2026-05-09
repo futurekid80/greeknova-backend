@@ -4,13 +4,15 @@ from datetime import datetime, timezone, date as date_type
 def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     supabase = get_supabase()
 
-    # Get available dates via NIFTY-filtered paginated query
+    # ── Get available dates ───────────────────────────────────────────────────
+    # Fetch DESC so latest dates are always in first page — avoids missing
+    # recent dates when total rows exceed pagination depth.
     all_dates = set()
-    for offset in range(0, 20000, 1000):
+    for offset in range(0, 10000, 1000):
         result = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", symbol)\
-            .order("timestamp", desc=False)\
+            .order("timestamp", desc=True)\
             .range(offset, offset + 999)\
             .execute()
         if not result.data:
@@ -19,14 +21,17 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
             all_dates.add(r["timestamp"][:10])
         if len(result.data) < 1000:
             break
+        # Stop once we have enough distinct dates (no need to scan all history)
+        if len(all_dates) >= 30:
+            break
 
     if not all_dates:
         return {"symbol": symbol, "dates": [], "rows": []}
 
-    dates = sorted(all_dates)
-    active_date = date or dates[-1]
+    dates = sorted(all_dates)          # ascending for dropdown display
+    active_date = date or dates[-1]    # default = most recent
 
-    # Get timestamps for this date via symbol filter (avoids row limit)
+    # ── Get timestamps for selected date ─────────────────────────────────────
     day_ts = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", symbol)\
@@ -42,25 +47,26 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
     first_ts = timestamps[0]
     last_ts  = timestamps[-1]
 
-    # Get expiries — always filter by TODAY's date, not the selected date
+    # ── Get expiries ──────────────────────────────────────────────────────────
     today_str = date_type.today().isoformat()
     exp_q = supabase.from_("oi_snapshots")\
         .select("expiry")\
         .eq("symbol", symbol)\
         .eq("timestamp", last_ts)\
         .execute()
+
     expiries = sorted(set(
         r["expiry"] for r in exp_q.data
         if r["expiry"] and r["expiry"] >= today_str
     )) if exp_q.data else []
 
-    # If viewing a past date, also include that date's expiry even if already expired
+    # For past dates include expired expiries too
     if not expiries:
         expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"]))
 
     active_expiry = expiry or (expiries[0] if expiries else None)
 
-    # Paginated snapshot fetch
+    # ── Fetch a single snapshot (open or close) ───────────────────────────────
     def fetch_snap(ts):
         all_data = []
         for offset in range(0, 10000, 1000):
@@ -86,7 +92,7 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
 
     all_strikes = sorted(set(k[0] for k in list(snap_open.keys()) + list(snap_close.keys())))
 
-    # Build intraday journey — fetch ALL timestamps in ONE query instead of N queries
+    # ── Intraday journey — all timestamps in one paginated query ──────────────
     journey_q = supabase.from_("oi_snapshots")\
         .select("timestamp, option_type, oi")\
         .eq("symbol", symbol)\
@@ -95,7 +101,6 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
     if active_expiry:
         journey_q = journey_q.eq("expiry", active_expiry)
 
-    # Paginate journey fetch
     journey_raw = []
     for offset in range(0, 50000, 1000):
         batch = journey_q.range(offset, offset + 999).execute()
@@ -105,7 +110,6 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
         if len(batch.data) < 1000:
             break
 
-    # Group by timestamp
     ts_groups: dict = {}
     for r in journey_raw:
         ts = r["timestamp"]
