@@ -8,7 +8,7 @@ def get_available_dates(symbol: str = "NIFTY"):
         .select("timestamp")\
         .eq("symbol", symbol)\
         .order("timestamp", desc=True)\
-        .limit(5000)\
+        .limit(50000)\
         .execute()
     all_dates = set()
     for r in (result.data or []):
