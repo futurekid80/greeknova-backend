@@ -1,47 +1,60 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone, date as date_type
+from datetime import datetime, timezone, timedelta, date as date_type
+
 
 def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     supabase = get_supabase()
 
-    # ── Get available dates ───────────────────────────────────────────────────
-    # Fetch DESC so latest dates are always in first page — avoids missing
-    # recent dates when total rows exceed pagination depth.
-    all_dates = set()
-    for offset in range(0, 10000, 1000):
-        result = supabase.from_("oi_snapshots")\
+    # ── Get available dates via per-day probe (avoids row limit issues) ───────
+    dates = set()
+    base = datetime.now(timezone.utc).date()
+    for i in range(60):
+        d = (base - timedelta(days=i)).isoformat()
+        r = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .range(offset, offset + 999)\
+            .gte("timestamp", f"{d}T00:00:00+00:00")\
+            .lt("timestamp", f"{d}T23:59:59+00:00")\
+            .limit(1)\
             .execute()
-        if not result.data:
-            break
-        for r in result.data:
-            all_dates.add(r["timestamp"][:10])
-        if len(result.data) < 1000:
-            break
-        # Stop once we have enough distinct dates (no need to scan all history)
-        if len(all_dates) >= 30:
+        if r.data:
+            dates.add(d)
+        if len(dates) >= 30:
             break
 
-    if not all_dates:
+    if not dates:
         return {"symbol": symbol, "dates": [], "rows": []}
 
-    dates = sorted(all_dates)          # ascending for dropdown display
-    active_date = date or dates[-1]    # default = most recent
+    sorted_dates = sorted(dates)  # ascending for dropdown
+
+    # ── Default to last FULL trading day (5+ snapshots) ──────────────────────
+    if date:
+        active_date = date
+    else:
+        active_date = sorted_dates[-1]  # fallback
+        for d in reversed(sorted_dates):
+            ts_check = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", symbol)\
+                .gte("timestamp", f"{d}T00:00:00+00:00")\
+                .lt("timestamp", f"{d}T23:59:59+00:00")\
+                .limit(10)\
+                .execute()
+            if len(ts_check.data or []) >= 5:
+                active_date = d
+                break
 
     # ── Get timestamps for selected date ─────────────────────────────────────
     day_ts = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", symbol)\
         .gte("timestamp", f"{active_date}T00:00:00+00:00")\
-        .lt("timestamp",  f"{active_date}T23:59:59+00:00")\
+        .lt("timestamp", f"{active_date}T23:59:59+00:00")\
         .order("timestamp", desc=False)\
         .execute()
 
     if not day_ts.data:
-        return {"symbol": symbol, "dates": dates, "date": active_date, "rows": []}
+        return {"symbol": symbol, "dates": sorted_dates, "date": active_date, "rows": []}
 
     timestamps = sorted(set(r["timestamp"] for r in day_ts.data))
     first_ts = timestamps[0]
@@ -60,13 +73,12 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
         if r["expiry"] and r["expiry"] >= today_str
     )) if exp_q.data else []
 
-    # For past dates include expired expiries too
     if not expiries:
         expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"]))
 
     active_expiry = expiry or (expiries[0] if expiries else None)
 
-    # ── Fetch a single snapshot (open or close) ───────────────────────────────
+    # ── Fetch open/close snapshots ────────────────────────────────────────────
     def fetch_snap(ts):
         all_data = []
         for offset in range(0, 10000, 1000):
@@ -92,12 +104,12 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
 
     all_strikes = sorted(set(k[0] for k in list(snap_open.keys()) + list(snap_close.keys())))
 
-    # ── Intraday journey — all timestamps in one paginated query ──────────────
+    # ── Intraday journey ──────────────────────────────────────────────────────
     journey_q = supabase.from_("oi_snapshots")\
         .select("timestamp, option_type, oi")\
         .eq("symbol", symbol)\
         .gte("timestamp", f"{active_date}T00:00:00+00:00")\
-        .lt("timestamp",  f"{active_date}T23:59:59+00:00")
+        .lt("timestamp", f"{active_date}T23:59:59+00:00")
     if active_expiry:
         journey_q = journey_q.eq("expiry", active_expiry)
 
@@ -148,25 +160,25 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
         ce_chg   = ce_close - ce_open
         pe_chg   = pe_close - pe_open
         rows.append({
-            "strike":   strike,
-            "ce_open":  ce_open,
-            "ce_close": ce_close,
-            "ce_chg":   ce_chg,
-            "pe_open":  pe_open,
-            "pe_close": pe_close,
-            "pe_chg":   pe_chg,
-            "net_chg":  pe_chg - ce_chg,
+            "strike":    strike,
+            "ce_open":   ce_open,
+            "ce_close":  ce_close,
+            "ce_chg":    ce_chg,
+            "pe_open":   pe_open,
+            "pe_close":  pe_close,
+            "pe_chg":    pe_chg,
+            "net_chg":   pe_chg - ce_chg,
         })
 
     return {
-        "symbol":    symbol,
-        "date":      active_date,
-        "dates":     dates,
-        "expiry":    active_expiry,
-        "expiries":  expiries,
-        "open_time": to_ist(first_ts),
+        "symbol":     symbol,
+        "date":       active_date,
+        "dates":      sorted_dates,
+        "expiry":     active_expiry,
+        "expiries":   expiries,
+        "open_time":  to_ist(first_ts),
         "close_time": to_ist(last_ts),
-        "snapshots": len(timestamps),
-        "journey":   journey_data,
-        "rows":      rows,
+        "snapshots":  len(timestamps),
+        "journey":    journey_data,
+        "rows":       rows,
     }
