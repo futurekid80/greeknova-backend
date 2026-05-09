@@ -183,3 +183,4 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
         "journey":    journey_data,
         "rows":       rows,
     }
+# eod fix
