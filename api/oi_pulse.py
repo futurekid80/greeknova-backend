@@ -56,7 +56,7 @@ def fetch_all_paginated(supabase, timestamp):
     rows = supabase.from_("oi_snapshots") \
         .select("symbol, oi") \
         .eq("timestamp", timestamp) \
-        .limit(10000) \
+        .limit(50000) \
         .execute()
     return rows.data or []
 
