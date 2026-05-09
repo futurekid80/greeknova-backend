@@ -1,11 +1,9 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date as date_type
+
 
 def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
-    all_dates = set()
-    # Fetch timestamps spanning 60 days back, NIFTY only
-    from datetime import datetime, timedelta, timezone
     since = (datetime.now(timezone.utc) - timedelta(days=60)).strftime('%Y-%m-%d')
     result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
@@ -14,13 +12,11 @@ def get_available_dates(symbol: str = "NIFTY"):
         .order("timestamp", desc=True)\
         .limit(5000)\
         .execute()
+    all_dates = set()
     for r in (result.data or []):
         all_dates.add(r["timestamp"][:10])
     return {"symbol": symbol, "dates": sorted(all_dates)}
-        # Stop once we have enough dates — no need to scan all history
-        if len(all_dates) >= 30:
-            break
-    return {"symbol": symbol, "dates": sorted(all_dates)}
+
 
 def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
     """Get the last snapshot of the day for a given date"""
@@ -53,6 +49,7 @@ def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
         result[key] = r["oi"] or 0
     return result
 
+
 def get_cmp(symbol: str) -> float | None:
     """Fetch current market price from Kite"""
     try:
@@ -71,11 +68,13 @@ def get_cmp(symbol: str) -> float | None:
         print(f"CMP fetch failed for {symbol}: {e}")
     return None
 
+
 def get_atm_strike(cmp: float, strikes: list) -> float | None:
     """Find the closest strike to CMP"""
     if not cmp or not strikes:
         return None
     return min(strikes, key=lambda s: abs(s - cmp))
+
 
 def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
     supabase = get_supabase()
@@ -97,9 +96,12 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
         .gte("timestamp", f"{date_a}T00:00:00+00:00")\
         .lt("timestamp", f"{date_a}T23:59:59+00:00")\
         .execute()
-    from datetime import date as date_type
+
     today_str = date_type.today().isoformat()
-    expiries = sorted(set(r["expiry"] for r in exp_q.data if r["expiry"] and r["expiry"] >= today_str)) if exp_q.data else []
+    expiries = sorted(set(
+        r["expiry"] for r in exp_q.data
+        if r["expiry"] and r["expiry"] >= today_str
+    )) if exp_q.data else []
     active_expiry = expiry or (expiries[0] if expiries else None)
 
     snap_a = get_eod_snapshot(symbol, date_a, active_expiry)
@@ -116,14 +118,14 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
         ce_chg = ce_a - ce_b
         pe_chg = pe_a - pe_b
         rows.append({
-            "strike":   strike,
-            "ce_a":     ce_a,
-            "ce_b":     ce_b,
-            "ce_chg":   ce_chg,
-            "pe_a":     pe_a,
-            "pe_b":     pe_b,
-            "pe_chg":   pe_chg,
-            "net_chg":  pe_chg - ce_chg,
+            "strike":  strike,
+            "ce_a":    ce_a,
+            "ce_b":    ce_b,
+            "ce_chg":  ce_chg,
+            "pe_a":    pe_a,
+            "pe_b":    pe_b,
+            "pe_chg":  pe_chg,
+            "net_chg": pe_chg - ce_chg,
         })
 
     cmp = get_cmp(symbol)
