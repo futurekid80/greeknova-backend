@@ -26,9 +26,10 @@ def get_confluence():
 
     ts_prev = prev.data[1]["timestamp"] if len(prev.data) > 1 else None
 
-    # Get current snapshot
-    data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts).execute().data
-    prev_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_prev).execute().data if ts_prev else []
+    # Get current snapshot — limit(5000) prevents Supabase 1000-row silent truncation
+    # ~66 symbols × ~40 strikes × 2 types = ~5280 rows max
+    data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts).limit(5000).execute().data
+    prev_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_prev).limit(5000).execute().data if ts_prev else []
 
     # Get CMPs
     cmp_data = supabase.from_("cmp_prices")\
