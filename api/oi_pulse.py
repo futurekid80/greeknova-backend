@@ -123,8 +123,28 @@ def get_oi_pulse(filter_type: str = "all"):
             "message": "No data found in the last 7 days"
         }
 
-    ts_old = timestamps[0]    # first capture of day (market open)
-    ts_new = timestamps[-1]   # last capture of day (market close)
+    # If fewer than 5 snapshots, not a real trading day (weekend/holiday test run)
+    # Compare against previous trading day's last snapshot instead
+    if len(timestamps) < 5 and not is_live:
+        ts_new = timestamps[-1]
+        # Find previous trading day
+        from datetime import timedelta
+        prev_date = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
+        for days_back in range(1, 7):
+            check = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            prev_ts = get_timestamps_for_date(supabase, check)
+            if len(prev_ts) >= 5:
+                ts_old = prev_ts[-1]
+                break
+        else:
+            ts_old = timestamps[0]
+    elif len(timestamps) < 5:
+        # Live but thin data — use earliest vs latest
+        ts_old = timestamps[0]
+        ts_new = timestamps[-1]
+    else:
+        ts_old = timestamps[0]    # first capture of day (market open)
+        ts_new = timestamps[-1]   # last capture of day (market close)
 
     # ── Step 2: Fetch OI for both snapshots (2 calls) ─────────────────────────
     old_rows = fetch_all_paginated(supabase, ts_old)
