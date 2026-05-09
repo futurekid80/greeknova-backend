@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 def get_available_dates(symbol: str = "NIFTY"):
     supabase = get_supabase()
     all_dates = set()
-    for offset in range(0, 20000, 1000):
+    for offset in range(0, 10000, 1000):
         result = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", symbol)\
-            .order("timestamp", desc=False)\
+            .order("timestamp", desc=True)\
             .range(offset, offset + 999)\
             .execute()
         if not result.data:
@@ -16,6 +16,9 @@ def get_available_dates(symbol: str = "NIFTY"):
         for r in result.data:
             all_dates.add(r["timestamp"][:10])
         if len(result.data) < 1000:
+            break
+        # Stop once we have enough dates — no need to scan all history
+        if len(all_dates) >= 30:
             break
     return {"symbol": symbol, "dates": sorted(all_dates)}
 
@@ -77,20 +80,17 @@ def get_atm_strike(cmp: float, strikes: list) -> float | None:
 def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
     supabase = get_supabase()
 
-    # Get available dates
     dates_result = get_available_dates(symbol)
     dates = dates_result["dates"]
 
     if not dates:
         return {"symbol": symbol, "dates": [], "rows": []}
 
-    # Default: latest two dates
     if not date_a:
         date_a = dates[-1] if len(dates) >= 1 else None
     if not date_b:
         date_b = dates[-2] if len(dates) >= 2 else dates[-1]
 
-    # Get available expiries for date_a
     exp_q = supabase.from_("oi_snapshots")\
         .select("expiry")\
         .eq("symbol", symbol)\
@@ -126,7 +126,6 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
             "net_chg":  pe_chg - ce_chg,
         })
 
-    # Fetch CMP and ATM strike
     cmp = get_cmp(symbol)
     atm_strike = get_atm_strike(cmp, all_strikes) if cmp else None
 
