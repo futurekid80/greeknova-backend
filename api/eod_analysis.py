@@ -47,10 +47,11 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
     # ── Get timestamps for selected date ─────────────────────────────────────
     day_ts = supabase.from_("oi_snapshots")\
         .select("timestamp")\
-        .eq("symbol", symbol)\
+        .eq("symbol", "NIFTY")\
         .gte("timestamp", f"{active_date}T00:00:00+00:00")\
-        .lt("timestamp", f"{active_date}T23:59:59+00:00")\
+        .lt("timestamp",  f"{active_date}T23:59:59+00:00")\
         .order("timestamp", desc=False)\
+        .limit(5000)\
         .execute()
 
     if not day_ts.data:
