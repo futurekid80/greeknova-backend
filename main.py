@@ -218,9 +218,9 @@ def auto_refresh_token():
         print(f"❌ Auto-login failed: {e}")
 
 @app.get("/uoa")
-def uoa():
+def uoa(date: str = None):
     from api.uoa import get_uoa
-    return get_uoa()
+    return get_uoa(date)
 
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
