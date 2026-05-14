@@ -80,7 +80,7 @@ def fetch_oi_for_timestamp(supabase, timestamp):
     return rows.data or []
 
 
-def get_latest_market_timestamp(supabase) -> str | None:
+def get_latest_market_timestamp(supabase):
     """Get the most recent timestamp that falls within market hours."""
     from datetime import datetime, timezone, timedelta
     # Look back 7 days, filter to UTC hour < 11 (before 16:30 IST)
@@ -98,7 +98,7 @@ def get_latest_market_timestamp(supabase) -> str | None:
     return None
 
 
-def get_prev_market_timestamp(supabase, before_ts: str) -> str | None:
+def get_prev_market_timestamp(supabase, before_ts: str):
     """Get last market-hours timestamp from a different date than before_ts."""
     current_date = before_ts[:10]
     result = supabase.from_("oi_snapshots") \
@@ -114,7 +114,7 @@ def get_prev_market_timestamp(supabase, before_ts: str) -> str | None:
     return result.data[0]["timestamp"] if result.data else None
 
 
-def get_prices_for_timestamp(supabase, timestamp: str) -> dict:
+def get_prices_for_timestamp(supabase, timestamp: str):
     """Get last_price per symbol from oi_snapshots for a given timestamp."""
     result = supabase.from_("oi_snapshots") \
         .select("symbol, last_price") \
