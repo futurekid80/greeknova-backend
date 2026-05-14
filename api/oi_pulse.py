@@ -84,13 +84,13 @@ def get_latest_market_timestamp(supabase) -> str | None:
     """Get the most recent timestamp that falls within market hours."""
     from datetime import datetime, timezone, timedelta
     # Look back 7 days, filter to UTC hour < 11 (before 16:30 IST)
-    since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime('%Y-%m-%d')
+    since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
     result = supabase.from_("oi_snapshots") \
         .select("timestamp") \
         .eq("symbol", "NIFTY") \
         .gte("timestamp", f"{since}T00:00:00+00:00") \
         .order("timestamp", desc=True) \
-        .limit(5000) \
+        .limit(50000) \
         .execute()
     for r in (result.data or []):
         if is_market_ts(r["timestamp"]):
