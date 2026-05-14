@@ -58,8 +58,10 @@ def run_full_capture():
     from dotenv import load_dotenv
     load_dotenv('/Users/apple/optionspulse/.env')
     from datetime import datetime, timezone
-    now = datetime.now()
-    if now.weekday() >= 5: return          # Skip Saturday (5) and Sunday (6)
+    from datetime import timezone, timedelta
+    ist = timezone(timedelta(hours=5, minutes=30))
+    now = datetime.now(ist)
+    if now.weekday() >= 5: return          # Skip Saturday and Sunday
     if not (9 <= now.hour <= 15): return
     if now.hour == 9 and now.minute < 15: return
     if now.hour == 15 and now.minute > 30: return
