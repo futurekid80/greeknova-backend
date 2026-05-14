@@ -45,7 +45,6 @@ def get_stock_oi(symbol: str):
         r["expiry"] for r in data.data
         if r["expiry"] and r["expiry"] >= today_str
     ))
-    # Use nearest expiry for PCR and bar chart
     nearest_expiry = all_expiries[0] if all_expiries else None
 
     # Filter to nearest expiry only for display
@@ -58,24 +57,33 @@ def get_stock_oi(symbol: str):
     pe_rows = [r for r in display_rows if r["option_type"] == "PE"]
     strikes = sorted(set(r["strike"] for r in display_rows))
 
+    # Build strike data for display (all strikes)
     strike_data = []
     for strike in strikes:
         ce = next((r for r in ce_rows if r["strike"] == strike), None)
         pe = next((r for r in pe_rows if r["strike"] == strike), None)
         strike_data.append({
-            "strike": strike,
-            "ce_oi": ce["oi"] if ce else 0,
-            "pe_oi": pe["oi"] if pe else 0,
-            "ce_ltp": ce["last_price"] if ce else 0,
-            "pe_ltp": pe["last_price"] if pe else 0,
+            "strike":    strike,
+            "ce_oi":     ce["oi"] if ce else 0,
+            "pe_oi":     pe["oi"] if pe else 0,
+            "ce_ltp":    ce["last_price"] if ce else 0,
+            "pe_ltp":    pe["last_price"] if pe else 0,
             "ce_volume": ce["volume"] if ce else 0,
             "pe_volume": pe["volume"] if pe else 0,
-            "is_atm": abs(strike - cmp) == min(abs(s - cmp) for s in strikes) if cmp > 0 else False,
+            "is_atm":    abs(strike - cmp) == min(abs(s - cmp) for s in strikes) if cmp > 0 else False,
         })
 
-    # PCR from nearest expiry only — accurate, not inflated by monthly hedges
-    total_ce = sum(r["ce_oi"] for r in strike_data)
-    total_pe = sum(r["pe_oi"] for r in strike_data)
+    # ── PCR: use ATM ±10 strikes only (matches Sensibull methodology) ─────────
+    if cmp > 0 and strikes:
+        atm_strike = min(strikes, key=lambda s: abs(s - cmp))
+        atm_idx = strikes.index(atm_strike)
+        pcr_strike_set = set(strikes[max(0, atm_idx - 10):atm_idx + 11])
+        total_ce = sum(r["ce_oi"] for r in strike_data if r["strike"] in pcr_strike_set)
+        total_pe = sum(r["pe_oi"] for r in strike_data if r["strike"] in pcr_strike_set)
+    else:
+        total_ce = sum(r["ce_oi"] for r in strike_data)
+        total_pe = sum(r["pe_oi"] for r in strike_data)
+
     pcr = round(total_pe / total_ce, 3) if total_ce > 0 else 0
 
     # IV calculations
