@@ -118,10 +118,12 @@ def get_oi_pulse(filter_type: str = "all"):
     # ── Step 1: Find active date and snapshots ────────────────────────────────
     today_ts = get_timestamps_for_date(supabase, today)
 
+    # Always use absolute latest timestamp from Supabase
+    latest_q = supabase.from_("oi_snapshots").select("timestamp").eq("symbol","NIFTY").order("timestamp", desc=True).limit(1).execute()
+    ts_new = latest_q.data[0]["timestamp"] if latest_q.data else (today_ts[-1] if today_ts else None)
+
     if len(today_ts) >= 5:
         active_date = today
-        latest_q = supabase.from_("oi_snapshots").select("timestamp").eq("symbol","NIFTY").order("timestamp", desc=True).limit(1).execute()
-    ts_new = latest_q.data[0]["timestamp"] if latest_q.data else today_ts[-1]
         prev_ts = get_last_full_trading_day(supabase, today)
         ts_old = prev_ts[-1] if prev_ts else today_ts[0]
         prev_date = prev_ts[-1][:10] if prev_ts else today
