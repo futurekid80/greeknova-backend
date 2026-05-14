@@ -36,6 +36,14 @@ INDEX_NSE_MAP = {
 ALL_SYMBOLS = list(INDEX_NSE_MAP.keys()) + list(STOCK_NSE_MAP.keys())
 
 
+def is_market_hours() -> bool:
+    now_utc = datetime.now(timezone.utc)
+    if now_utc.weekday() >= 5:
+        return False
+    ist_total = (now_utc.hour * 60 + now_utc.minute + 330) % (24 * 60)
+    return 9 * 60 + 15 <= ist_total <= 15 * 60 + 30
+
+
 def classify(oi_chg_pct, price_chg_pct):
     if oi_chg_pct > 0 and price_chg_pct > 0:
         return "LONG_BUILDUP",   "Long Buildup",   "text-emerald-400", "bg-emerald-950/30", "border-emerald-800/40"
@@ -48,13 +56,24 @@ def classify(oi_chg_pct, price_chg_pct):
     return "NEUTRAL", "Neutral", "text-gray-400", "bg-gray-900/30", "border-gray-800"
 
 
-def fetch_all_paginated(supabase, timestamp):
+def fetch_oi_for_timestamp(supabase, timestamp):
     rows = supabase.from_("oi_snapshots") \
         .select("symbol, oi") \
         .eq("timestamp", timestamp) \
         .limit(50000) \
         .execute()
     return rows.data or []
+
+
+def get_latest_timestamp(supabase) -> str | None:
+    """Get absolute latest NIFTY timestamp across all dates."""
+    result = supabase.from_("oi_snapshots") \
+        .select("timestamp") \
+        .eq("symbol", "NIFTY") \
+        .order("timestamp", desc=True) \
+        .limit(1) \
+        .execute()
+    return result.data[0]["timestamp"] if result.data else None
 
 
 def get_timestamps_for_date(supabase, date_str: str) -> list:
@@ -64,38 +83,49 @@ def get_timestamps_for_date(supabase, date_str: str) -> list:
         .gte("timestamp", f"{date_str}T00:00:00+00:00") \
         .lt("timestamp", f"{date_str}T23:59:59+00:00") \
         .order("timestamp", desc=False) \
-        .limit(200) \
+        .limit(500) \
         .execute()
     return sorted(set(r["timestamp"] for r in (result.data or [])))
 
 
-def get_last_full_trading_day(supabase, before_date: str) -> list:
-    """Find the most recent date BEFORE before_date that has 5+ snapshots."""
-    base = datetime.strptime(before_date, '%Y-%m-%d')
-    for days_back in range(1, 8):
-        check = (base - timedelta(days=days_back)).strftime('%Y-%m-%d')
-        ts = get_timestamps_for_date(supabase, check)
-        if len(ts) >= 5:
-            return ts
-    return []
-
-
-def get_eod_prices(supabase, date_str: str) -> dict:
-    """Get last CMP per symbol for a given date."""
-    result = supabase.from_("cmp_prices") \
-        .select("symbol, cmp") \
-        .gte("timestamp", f"{date_str}T00:00:00+00:00") \
-        .lt("timestamp", f"{date_str}T23:59:59+00:00") \
+def get_prev_trading_day_last_ts(supabase, before_ts: str) -> str | None:
+    """Get last snapshot of the previous full trading day before a given timestamp."""
+    result = supabase.from_("oi_snapshots") \
+        .select("timestamp") \
+        .eq("symbol", "NIFTY") \
+        .lt("timestamp", before_ts[:10] + "T00:00:00+00:00") \
         .order("timestamp", desc=True) \
-        .limit(500) \
+        .limit(200) \
         .execute()
-    price_map = {}
+    if not result.data:
+        return None
+    timestamps = sorted(set(r["timestamp"] for r in result.data), reverse=True)
+    # Find a date with 5+ snapshots
+    from collections import Counter
+    date_counts = Counter(ts[:10] for ts in timestamps)
+    for ts in timestamps:
+        if date_counts[ts[:10]] >= 5:
+            # Return last timestamp of that date
+            date = ts[:10]
+            day_ts = [t for t in timestamps if t[:10] == date]
+            return max(day_ts)
+    return timestamps[0] if timestamps else None
+
+
+def get_prices_for_timestamp(supabase, timestamp: str) -> dict:
+    """Get last_price per symbol from oi_snapshots for a given timestamp."""
+    result = supabase.from_("oi_snapshots") \
+        .select("symbol, last_price") \
+        .eq("timestamp", timestamp) \
+        .limit(5000) \
+        .execute()
+    prices = {}
     seen = set()
     for r in (result.data or []):
-        if r["symbol"] not in seen:
-            price_map[r["symbol"]] = r["cmp"]
+        if r["symbol"] not in seen and r.get("last_price"):
+            prices[r["symbol"]] = r["last_price"]
             seen.add(r["symbol"])
-    return price_map
+    return prices
 
 
 def to_ist(ts: str) -> str:
@@ -114,46 +144,25 @@ def to_ist(ts: str) -> str:
 def get_oi_pulse(filter_type: str = "all"):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    live = is_market_hours()
 
-    # ── Step 1: Find active date and snapshots ────────────────────────────────
-    today_ts = get_timestamps_for_date(supabase, today)
+    # ── Step 1: Get latest snapshot (absolute, not filtered by today) ─────────
+    ts_new = get_latest_timestamp(supabase)
+    if not ts_new:
+        return {"items": [], "count": 0, "message": "No data available"}
 
-    # Always use absolute latest timestamp from Supabase
-    latest_q = supabase.from_("oi_snapshots").select("timestamp").eq("symbol","NIFTY").order("timestamp", desc=True).limit(1).execute()
-    ts_new = latest_q.data[0]["timestamp"] if latest_q.data else (today_ts[-1] if today_ts else None)
+    active_date = ts_new[:10]
+    today_ts = get_timestamps_for_date(supabase, active_date)
 
-    if len(today_ts) >= 5:
-        active_date = today
-        prev_ts = get_last_full_trading_day(supabase, today)
-        ts_old = prev_ts[-1] if prev_ts else today_ts[0]
-        prev_date = prev_ts[-1][:10] if prev_ts else today
-        is_live = True
-    elif len(today_ts) >= 1:
-        active_date = today
-        ts_new = today_ts[-1]
-        prev_ts = get_last_full_trading_day(supabase, today)
-        ts_old = prev_ts[-1] if prev_ts else today_ts[0]
-        prev_date = prev_ts[-1][:10] if prev_ts else today
-        is_live = False
-    else:
-        prev_ts = get_last_full_trading_day(supabase, today)
-        if not prev_ts:
-            return {
-                "items": [], "as_of": datetime.now(timezone.utc).isoformat(),
-                "count": 0, "message": "No data found in the last 7 days"
-            }
-        active_date = prev_ts[-1][:10]
-        ts_new = prev_ts[-1]
-        prev_prev_ts = get_last_full_trading_day(supabase, active_date)
-        ts_old = prev_prev_ts[-1] if prev_prev_ts else prev_ts[0]
-        prev_date = prev_prev_ts[-1][:10] if prev_prev_ts else active_date
-        is_live = False
+    # ── Step 2: Get previous trading day's last snapshot ──────────────────────
+    ts_old = get_prev_trading_day_last_ts(supabase, ts_new)
+    if not ts_old:
+        ts_old = today_ts[0] if len(today_ts) > 1 else ts_new
 
-    # ── Step 2: Fetch OI for both snapshots ───────────────────────────────────
-    old_rows = fetch_all_paginated(supabase, ts_old)
-    new_rows = fetch_all_paginated(supabase, ts_new)
+    # ── Step 3: Fetch OI for both snapshots ───────────────────────────────────
+    old_rows = fetch_oi_for_timestamp(supabase, ts_old)
+    new_rows = fetch_oi_for_timestamp(supabase, ts_new)
 
-    # ── Step 3: Aggregate OI per symbol ───────────────────────────────────────
     oi_old = defaultdict(int)
     oi_new = defaultdict(int)
     for r in old_rows:
@@ -163,7 +172,8 @@ def get_oi_pulse(filter_type: str = "all"):
 
     # ── Step 4: Get prices ────────────────────────────────────────────────────
     prices = {}
-    if is_live:
+
+    if live:
         try:
             from services.kite_auth import get_kite_client
             kite = get_kite_client()
@@ -178,31 +188,15 @@ def get_oi_pulse(filter_type: str = "all"):
             print(f"[OI Pulse] Live price fetch failed: {e}")
 
     if not prices:
-        # EOD fallback: ltp = active_date close, prev_close = previous trading day close
-        ltp_map = get_eod_prices(supabase, active_date)
-        prev_close_map = get_eod_prices(supabase, prev_date)
-
-        # If cmp_prices is incomplete (<60 symbols), supplement from oi_snapshots last_price
-        if len(ltp_map) < 60:
-            try:
-                snap_prices = supabase.from_("oi_snapshots")                     .select("symbol, last_price")                     .eq("timestamp", ts_new)                     .limit(5000)                     .execute()
-                seen = set()
-                for r in (snap_prices.data or []):
-                    sym = r["symbol"]
-                    if sym not in seen and r.get("last_price") and sym not in ltp_map:
-                        ltp_map[sym] = r["last_price"]
-                        seen.add(sym)
-                print(f"[OI Pulse] Supplemented prices from snapshots: {len(ltp_map)} total")
-            except Exception as e:
-                print(f"[OI Pulse] Snapshot price supplement failed: {e}")
-
-        for sym in set(list(ltp_map.keys()) + list(oi_new.keys())):
-            ltp = ltp_map.get(sym)
-            if ltp:
-                prices[sym] = {
-                    "ltp": ltp,
-                    "prev_close": prev_close_map.get(sym, ltp)
-                }
+        # EOD: use last_price from oi_snapshots directly — works for all 66 symbols
+        ltp_map  = get_prices_for_timestamp(supabase, ts_new)
+        prev_map = get_prices_for_timestamp(supabase, ts_old)
+        for sym in ltp_map:
+            prices[sym] = {
+                "ltp": ltp_map[sym],
+                "prev_close": prev_map.get(sym, ltp_map[sym])
+            }
+        print(f"[OI Pulse] EOD prices from snapshots: {len(prices)} symbols")
 
     # ── Step 5: Build items ───────────────────────────────────────────────────
     items = []
@@ -255,7 +249,7 @@ def get_oi_pulse(filter_type: str = "all"):
         "count":       len(items),
         "as_of":       datetime.now(timezone.utc).isoformat(),
         "active_date": active_date,
-        "is_live":     is_live,
+        "is_live":     live,
         "open_time":   to_ist(ts_old),
         "close_time":  to_ist(ts_new),
         "snapshots":   len(today_ts),
