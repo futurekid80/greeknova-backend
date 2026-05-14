@@ -89,7 +89,6 @@ def get_latest_market_timestamp(supabase) -> str | None:
         .select("timestamp") \
         .eq("symbol", "NIFTY") \
         .gte("timestamp", f"{since}T00:00:00+00:00") \
-        .lt("timestamp", "2099-01-01T10:30:00+00:00") \
         .order("timestamp", desc=True) \
         .limit(5000) \
         .execute()
