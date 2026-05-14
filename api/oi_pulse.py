@@ -91,8 +91,7 @@ def get_latest_market_timestamp(supabase) -> str | None:
     for r in (result.data or []):
         if is_market_ts(r["timestamp"]):
             return r["timestamp"]
-    # fallback: return latest regardless
-    return result.data[0]["timestamp"] if result.data else None
+    return None
 
 
 def get_prev_market_timestamp(supabase, before_ts: str) -> str | None:
