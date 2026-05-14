@@ -178,11 +178,28 @@ def get_oi_pulse(filter_type: str = "all"):
         # EOD fallback: ltp = active_date close, prev_close = previous trading day close
         ltp_map = get_eod_prices(supabase, active_date)
         prev_close_map = get_eod_prices(supabase, prev_date)
-        for sym in ltp_map:
-            prices[sym] = {
-                "ltp": ltp_map[sym],
-                "prev_close": prev_close_map.get(sym, ltp_map[sym])
-            }
+
+        # If cmp_prices is incomplete (<60 symbols), supplement from oi_snapshots last_price
+        if len(ltp_map) < 60:
+            try:
+                snap_prices = supabase.from_("oi_snapshots")                     .select("symbol, last_price")                     .eq("timestamp", ts_new)                     .limit(5000)                     .execute()
+                seen = set()
+                for r in (snap_prices.data or []):
+                    sym = r["symbol"]
+                    if sym not in seen and r.get("last_price") and sym not in ltp_map:
+                        ltp_map[sym] = r["last_price"]
+                        seen.add(sym)
+                print(f"[OI Pulse] Supplemented prices from snapshots: {len(ltp_map)} total")
+            except Exception as e:
+                print(f"[OI Pulse] Snapshot price supplement failed: {e}")
+
+        for sym in set(list(ltp_map.keys()) + list(oi_new.keys())):
+            ltp = ltp_map.get(sym)
+            if ltp:
+                prices[sym] = {
+                    "ltp": ltp,
+                    "prev_close": prev_close_map.get(sym, ltp)
+                }
 
     # ── Step 5: Build items ───────────────────────────────────────────────────
     items = []
