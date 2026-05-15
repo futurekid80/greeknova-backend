@@ -1,5 +1,6 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
+from collections import defaultdict
 
 def get_confluence():
     supabase = get_supabase()
@@ -26,7 +27,7 @@ def get_confluence():
 
     ts_prev = prev.data[1]["timestamp"] if len(prev.data) > 1 else None
 
-    # ── Paginated fetch for current snapshot ─────────────────────────────────
+    # ── Paginated fetch for current snapshot ──────────────────────────────────
     data = []
     for offset in range(0, 200000, 1000):
         batch = supabase.from_("oi_snapshots")\
@@ -220,25 +221,25 @@ def get_confluence():
     confluence_signals.sort(key=lambda x: (x["signal_count"], abs(x["pcr"] - 1)), reverse=True)
 
     # ── MOMENTUM SCANNER ──────────────────────────────────────────────────────
-    # Uses cmp_prices table: compare latest CMP vs CMP from ~25 mins ago
-    # Threshold: >2% move with OI and/or volume confirmation
+    # Compares today's open (first CMP snapshot) vs latest CMP
+    # Shows stocks moving ≥2% from market open (9:15 IST) to now
+    # Much more useful than 25-min window — user sees day's winners/losers instantly
     momentum_signals = []
     try:
-        # Fetch last 8 CMP snapshots per symbol (covers ~40 mins at 5-min intervals)
-        cmp_history_raw = supabase.from_("cmp_prices")\
+        # Fetch ALL of today's CMP snapshots for all symbols
+        cmp_today = supabase.from_("cmp_prices")\
             .select("symbol, cmp, timestamp")\
             .gte("timestamp", today + "T00:00:00+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(1000)\
+            .order("timestamp", desc=False)\
+            .limit(5000)\
             .execute().data or []
 
-        # Group by symbol, keep last 8 snapshots each
-        from collections import defaultdict
+        # Group by symbol — ascending order so first = open, last = latest
         cmp_by_symbol: dict = defaultdict(list)
-        for row in cmp_history_raw:
-            cmp_by_symbol[row["symbol"]].append(row)
+        for row in cmp_today:
+            cmp_by_symbol[row["symbol"]].append(float(row["cmp"]))
 
-        # Build OI change map from prev_data vs data for confirmation
+        # Build OI change map for confirmation (latest vs prev snapshot)
         oi_chg_map: dict = {}
         for sym in symbols:
             sym_new = [r for r in data if r["symbol"] == sym]
@@ -246,66 +247,62 @@ def get_confluence():
             new_total = sum(r["oi"] for r in sym_new)
             old_total = sum(r["oi"] for r in sym_old)
             if old_total > 0:
-                oi_chg_map[sym] = (new_total - old_total) / old_total * 100
+                oi_chg_map[sym] = round((new_total - old_total) / old_total * 100, 2)
             else:
                 oi_chg_map[sym] = 0.0
 
-        for sym, history in cmp_by_symbol.items():
-            if len(history) < 2:
+        for sym, prices in cmp_by_symbol.items():
+            if len(prices) < 2:
                 continue
 
-            # Sort descending by timestamp (already is, but ensure)
-            history = sorted(history, key=lambda x: x["timestamp"], reverse=True)
+            # First price of day = open, last price = current
+            open_cmp = prices[0]
+            current_cmp = prices[-1]
 
-            latest_cmp = float(history[0]["cmp"])
-
-            # Use snapshot ~25 mins ago (5th snapshot back at 5-min intervals)
-            # Fall back to whatever we have if fewer snapshots
-            idx_25min = min(5, len(history) - 1)
-            old_cmp = float(history[idx_25min]["cmp"])
-
-            if old_cmp <= 0:
+            if open_cmp <= 0:
                 continue
 
-            price_chg_pct = round((latest_cmp - old_cmp) / old_cmp * 100, 2)
+            # Open-to-now move
+            price_chg_pct = round((current_cmp - open_cmp) / open_cmp * 100, 2)
 
-            # Threshold: 2% move in 25 mins
+            # Only show stocks moving ≥2% from open
             if abs(price_chg_pct) < 2.0:
                 continue
 
             direction = "BULLISH" if price_chg_pct > 0 else "BEARISH"
-            oi_chg = oi_chg_map.get(sym, 0)
+            oi_chg = oi_chg_map.get(sym, 0.0)
 
-            # OI confirms if rising (fresh positions in direction of move)
+            # OI confirms: rising OI = fresh positions supporting the move
             oi_confirms = oi_chg > 3.0
 
-            # Vol confirms via vol_spike from confluence data
+            # Vol confirms: check if this symbol has a vol spike in confluence
             sym_conf = next((s for s in confluence_signals if s["symbol"] == sym), None)
-            vol_confirms = sym_conf["vol_spike"] is not None if sym_conf else False
+            vol_confirms = bool(sym_conf and sym_conf.get("vol_spike"))
 
-            # PCR from confluence or cmp_map
-            sym_pcr = sym_conf["pcr"] if sym_conf else 0
+            # PCR from confluence data if available
+            sym_pcr = sym_conf["pcr"] if sym_conf else 0.0
 
             # Conviction score 1-4
             conviction = 1
-            if abs(price_chg_pct) >= 3: conviction += 1
-            if oi_confirms: conviction += 1
-            if vol_confirms: conviction += 1
+            if abs(price_chg_pct) >= 3.0: conviction += 1  # strong move
+            if oi_confirms: conviction += 1                  # OI backing move
+            if vol_confirms: conviction += 1                 # volume spike too
 
             momentum_signals.append({
                 "symbol": sym,
-                "cmp": latest_cmp,
+                "cmp": current_cmp,
+                "open_cmp": open_cmp,
                 "price_chg_pct": price_chg_pct,
                 "direction": direction,
                 "pcr": sym_pcr,
                 "oi_confirms": oi_confirms,
-                "oi_chg_pct": round(oi_chg, 2),
+                "oi_chg_pct": oi_chg,
                 "vol_confirms": vol_confirms,
                 "conviction": conviction,
                 "is_index": sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
             })
 
-        # Sort by absolute price move descending
+        # Sort by absolute move size — biggest movers first
         momentum_signals.sort(key=lambda x: abs(x["price_chg_pct"]), reverse=True)
 
     except Exception as e:
@@ -319,5 +316,6 @@ def get_confluence():
             "total": len(momentum_signals),
             "signals": momentum_signals,
             "threshold_pct": 2.0,
+            "window": "open_to_now",
         }
     }
