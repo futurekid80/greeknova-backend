@@ -26,9 +26,7 @@ def get_confluence():
 
     ts_prev = prev.data[1]["timestamp"] if len(prev.data) > 1 else None
 
-    # ── FIX: Paginated fetch for current snapshot ────────────────────────────
-    # 66 symbols × ~40 strikes × 2 types × 3 expiries ≈ 15,840 rows
-    # Old limit(5000) was silently truncating to ~19 stocks
+    # ── Paginated fetch for current snapshot ─────────────────────────────────
     data = []
     for offset in range(0, 200000, 1000):
         batch = supabase.from_("oi_snapshots")\
@@ -42,7 +40,7 @@ def get_confluence():
         if len(batch.data) < 1000:
             break
 
-    # ── FIX: Paginated fetch for previous snapshot ───────────────────────────
+    # ── Paginated fetch for previous snapshot ─────────────────────────────────
     prev_data = []
     if ts_prev:
         for offset in range(0, 200000, 1000):
@@ -57,8 +55,7 @@ def get_confluence():
             if len(batch.data) < 1000:
                 break
 
-    # ── FIX: CMP — paginate to cover all 66 symbols ──────────────────────────
-    # Old limit(100) missed many symbols since each symbol has multiple rows
+    # ── CMP — paginate to cover all 66 symbols ───────────────────────────────
     cmp_raw = []
     for offset in range(0, 10000, 1000):
         batch = supabase.from_("cmp_prices")\
@@ -84,7 +81,7 @@ def get_confluence():
     for row in prev_data:
         prev_map[f"{row['symbol']}_{row['tradingsymbol']}"] = row
 
-    # ── Nearest expiry filter (matches dashboard + stock page methodology) ────
+    # ── Nearest expiry filter ─────────────────────────────────────────────────
     today_str = date_type.today().isoformat()
 
     symbols = list(set(r["symbol"] for r in data))
@@ -93,7 +90,7 @@ def get_confluence():
     for symbol in symbols:
         rows = [r for r in data if r["symbol"] == symbol]
 
-        # Filter to nearest expiry only (avoids monthly hedge inflation)
+        # Filter to nearest expiry only
         expiries = sorted(set(
             r["expiry"] for r in rows
             if r.get("expiry") and r["expiry"] >= today_str
@@ -112,7 +109,7 @@ def get_confluence():
 
         cmp = cmp_map.get(symbol, 0)
 
-        # ── PCR: ATM ±10 strikes only (matches all other pages) ──────────────
+        # PCR: ATM ±10 strikes only
         strikes = sorted(set(r["strike"] for r in rows))
         if cmp > 0 and strikes:
             atm = min(strikes, key=lambda s: abs(s - cmp))
@@ -147,11 +144,10 @@ def get_confluence():
         elif dist_pe < dist_ce: structure = "Lower Range"
         else: structure = "Mid Range"
 
-        # Signal 3: OI spike (vs previous snapshot)
+        # Signal 3: OI spike vs previous snapshot
         oi_spike = None
         vol_spike = None
         if prev_data:
-            # Use all rows (not just nearest expiry) for spike detection
             all_sym_rows = [r for r in data if r["symbol"] == symbol]
             for row in all_sym_rows:
                 key = f"{symbol}_{row['tradingsymbol']}"
@@ -192,7 +188,6 @@ def get_confluence():
         if oi_spike: active_signals.append(f"OI {oi_spike['direction']} {oi_spike['option_type']} {oi_spike['strike']}")
         if vol_spike: active_signals.append(f"Vol {vol_spike['signal']} {vol_spike['option_type']} {vol_spike['strike']}")
 
-        # Require at least 2 signals for confluence
         if len(active_signals) < 2:
             continue
 
@@ -222,11 +217,107 @@ def get_confluence():
             "is_index": symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
         })
 
-    # Sort by signal count then PCR extremity
     confluence_signals.sort(key=lambda x: (x["signal_count"], abs(x["pcr"] - 1)), reverse=True)
+
+    # ── MOMENTUM SCANNER ──────────────────────────────────────────────────────
+    # Uses cmp_prices table: compare latest CMP vs CMP from ~25 mins ago
+    # Threshold: >2% move with OI and/or volume confirmation
+    momentum_signals = []
+    try:
+        # Fetch last 8 CMP snapshots per symbol (covers ~40 mins at 5-min intervals)
+        cmp_history_raw = supabase.from_("cmp_prices")\
+            .select("symbol, cmp, timestamp")\
+            .gte("timestamp", today + "T00:00:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1000)\
+            .execute().data or []
+
+        # Group by symbol, keep last 8 snapshots each
+        from collections import defaultdict
+        cmp_by_symbol: dict = defaultdict(list)
+        for row in cmp_history_raw:
+            cmp_by_symbol[row["symbol"]].append(row)
+
+        # Build OI change map from prev_data vs data for confirmation
+        oi_chg_map: dict = {}
+        for sym in symbols:
+            sym_new = [r for r in data if r["symbol"] == sym]
+            sym_old = [r for r in prev_data if r["symbol"] == sym]
+            new_total = sum(r["oi"] for r in sym_new)
+            old_total = sum(r["oi"] for r in sym_old)
+            if old_total > 0:
+                oi_chg_map[sym] = (new_total - old_total) / old_total * 100
+            else:
+                oi_chg_map[sym] = 0.0
+
+        for sym, history in cmp_by_symbol.items():
+            if len(history) < 2:
+                continue
+
+            # Sort descending by timestamp (already is, but ensure)
+            history = sorted(history, key=lambda x: x["timestamp"], reverse=True)
+
+            latest_cmp = float(history[0]["cmp"])
+
+            # Use snapshot ~25 mins ago (5th snapshot back at 5-min intervals)
+            # Fall back to whatever we have if fewer snapshots
+            idx_25min = min(5, len(history) - 1)
+            old_cmp = float(history[idx_25min]["cmp"])
+
+            if old_cmp <= 0:
+                continue
+
+            price_chg_pct = round((latest_cmp - old_cmp) / old_cmp * 100, 2)
+
+            # Threshold: 2% move in 25 mins
+            if abs(price_chg_pct) < 2.0:
+                continue
+
+            direction = "BULLISH" if price_chg_pct > 0 else "BEARISH"
+            oi_chg = oi_chg_map.get(sym, 0)
+
+            # OI confirms if rising (fresh positions in direction of move)
+            oi_confirms = oi_chg > 3.0
+
+            # Vol confirms via vol_spike from confluence data
+            sym_conf = next((s for s in confluence_signals if s["symbol"] == sym), None)
+            vol_confirms = sym_conf["vol_spike"] is not None if sym_conf else False
+
+            # PCR from confluence or cmp_map
+            sym_pcr = sym_conf["pcr"] if sym_conf else 0
+
+            # Conviction score 1-4
+            conviction = 1
+            if abs(price_chg_pct) >= 3: conviction += 1
+            if oi_confirms: conviction += 1
+            if vol_confirms: conviction += 1
+
+            momentum_signals.append({
+                "symbol": sym,
+                "cmp": latest_cmp,
+                "price_chg_pct": price_chg_pct,
+                "direction": direction,
+                "pcr": sym_pcr,
+                "oi_confirms": oi_confirms,
+                "oi_chg_pct": round(oi_chg, 2),
+                "vol_confirms": vol_confirms,
+                "conviction": conviction,
+                "is_index": sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            })
+
+        # Sort by absolute price move descending
+        momentum_signals.sort(key=lambda x: abs(x["price_chg_pct"]), reverse=True)
+
+    except Exception as e:
+        print(f"[Momentum] Error: {e}")
 
     return {
         "timestamp": ts,
         "total": len(confluence_signals),
-        "signals": confluence_signals
+        "signals": confluence_signals,
+        "momentum": {
+            "total": len(momentum_signals),
+            "signals": momentum_signals,
+            "threshold_pct": 2.0,
+        }
     }
