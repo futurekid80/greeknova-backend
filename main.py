@@ -248,8 +248,8 @@ def eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 @app.get("/oi-pulse")
 def oi_pulse(filter: str = "all"):
     from api.oi_pulse import get_oi_pulse
-    return get_oi_pulse(filter)
-
+    return get_oi_pulse()
+    
 @app.get("/relative-strength")
 def relative_strength(benchmark: str = "NIFTY"):
     from api.relative_strength import get_relative_strength
