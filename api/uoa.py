@@ -220,7 +220,7 @@ def get_uoa(date: str = None):
         day_high_pct = None
         if stock_day_high > 0 and cmp > 0:
             day_high_pct = round((stock_day_high - cmp) / cmp * 100, 2)
-            at_day_high  = day_high_pct <= 0.5  # within 0.5% of day high
+            at_day_high = day_high_pct <= 0.5 and opt_type == 'CE'  # within 0.5% of day high
 
         # Volume metrics
         avg = avg_vol.get(key, new_vol)
