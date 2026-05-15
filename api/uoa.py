@@ -1,11 +1,55 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
 
+STOCK_NSE_MAP = {
+    "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
+    "INFY":"NSE:INFY","ICICIBANK":"NSE:ICICIBANK","HINDUNILVR":"NSE:HINDUNILVR",
+    "ITC":"NSE:ITC","SBIN":"NSE:SBIN","BHARTIARTL":"NSE:BHARTIARTL",
+    "KOTAKBANK":"NSE:KOTAKBANK","LT":"NSE:LT","AXISBANK":"NSE:AXISBANK",
+    "ASIANPAINT":"NSE:ASIANPAINT","MARUTI":"NSE:MARUTI","TITAN":"NSE:TITAN",
+    "SUNPHARMA":"NSE:SUNPHARMA","ULTRACEMCO":"NSE:ULTRACEMCO",
+    "BAJFINANCE":"NSE:BAJFINANCE","WIPRO":"NSE:WIPRO","HCLTECH":"NSE:HCLTECH",
+    "TATACONSUM":"NSE:TATACONSUM","TATASTEEL":"NSE:TATASTEEL",
+    "ADANIENT":"NSE:ADANIENT","POWERGRID":"NSE:POWERGRID","NTPC":"NSE:NTPC",
+    "ONGC":"NSE:ONGC","JSWSTEEL":"NSE:JSWSTEEL","COALINDIA":"NSE:COALINDIA",
+    "BAJAJFINSV":"NSE:BAJAJFINSV","TECHM":"NSE:TECHM",
+    "APOLLOHOSP":"NSE:APOLLOHOSP","BAJAJ-AUTO":"NSE:BAJAJ-AUTO",
+    "BPCL":"NSE:BPCL","BRITANNIA":"NSE:BRITANNIA","CIPLA":"NSE:CIPLA",
+    "DRREDDY":"NSE:DRREDDY","EICHERMOT":"NSE:EICHERMOT","GRASIM":"NSE:GRASIM",
+    "HEROMOTOCO":"NSE:HEROMOTOCO","HINDALCO":"NSE:HINDALCO",
+    "HDFCLIFE":"NSE:HDFCLIFE","INDUSINDBK":"NSE:INDUSINDBK",
+    "JIOFIN":"NSE:JIOFIN","M&M":"NSE:M&M","NESTLEIND":"NSE:NESTLEIND",
+    "SBILIFE":"NSE:SBILIFE","SHRIRAMFIN":"NSE:SHRIRAMFIN","TRENT":"NSE:TRENT",
+    "ADANIPORTS":"NSE:ADANIPORTS","BANKBARODA":"NSE:BANKBARODA",
+    "BEL":"NSE:BEL","CANBK":"NSE:CANBK","CHOLAFIN":"NSE:CHOLAFIN",
+    "DLF":"NSE:DLF","GAIL":"NSE:GAIL","HAVELLS":"NSE:HAVELLS",
+    "HAL":"NSE:HAL","INDIGO":"NSE:INDIGO","PFC":"NSE:PFC",
+    "RECLTD":"NSE:RECLTD","SAIL":"NSE:SAIL","TATAPOWER":"NSE:TATAPOWER",
+    "VEDL":"NSE:VEDL",
+}
+INDEX_NSE_MAP = {
+    "NIFTY": "NSE:NIFTY 50",
+    "BANKNIFTY": "NSE:NIFTY BANK",
+    "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+}
+ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
+
+MARKET_OPEN_UTC  = 3 * 60 + 45
+MARKET_CLOSE_UTC = 10 * 60 + 0
+
+def is_market_hours() -> bool:
+    now_utc = datetime.now(timezone.utc)
+    if now_utc.weekday() >= 5:
+        return False
+    total = now_utc.hour * 60 + now_utc.minute
+    return MARKET_OPEN_UTC <= total <= MARKET_CLOSE_UTC
+
 def get_uoa(date: str = None):
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    live = is_market_hours()
 
-    # ── Get ALL distinct timestamps for today (NIFTY as proxy) ───────────────
+    # ── Get ALL distinct timestamps for today ────────────────────────────────
     ts_result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", "NIFTY")\
@@ -17,7 +61,7 @@ def get_uoa(date: str = None):
 
     timestamps = sorted(set(r["timestamp"] for r in ts_result.data))
 
-    # Fallback: use last available day if not enough data
+    # Fallback to last available day
     if len(timestamps) < 2:
         fallback = supabase.from_("oi_snapshots")\
             .select("timestamp")\
@@ -31,21 +75,18 @@ def get_uoa(date: str = None):
         return {"signals": [], "total": 0}
 
     # ── A+B snapshot selection ────────────────────────────────────────────────
-    # ts_open  = first snapshot of day (9:20-9:25 AM) — price direction baseline
-    # ts_30min = 30 mins ago (6 snapshots back) — OI momentum window
-    # ts_new   = latest snapshot — current state
-    ts_open  = timestamps[0]                          # first of day
-    ts_new   = timestamps[-1]                         # latest
-    ts_30min = timestamps[max(0, len(timestamps) - 7)]  # ~30 mins ago (6 back), fallback to oldest
+    ts_open  = timestamps[0]
+    ts_new   = timestamps[-1]
+    ts_30min = timestamps[max(0, len(timestamps) - 7)]
 
-    # ── Minutes to market close (15:30 IST = 10:00 UTC) ──────────────────────
+    # ── Minutes to close ──────────────────────────────────────────────────────
     now_utc = datetime.now(timezone.utc)
-    market_close_utc = now_utc.replace(hour=10, minute=0, second=0, microsecond=0)
-    mins_to_close = int((market_close_utc - now_utc).total_seconds() / 60)
-    is_near_close = 0 < mins_to_close <= 30
+    market_close = now_utc.replace(hour=10, minute=0, second=0, microsecond=0)
+    mins_to_close = int((market_close - now_utc).total_seconds() / 60)
+    is_near_close      = 0 < mins_to_close <= 30
     is_very_near_close = 0 < mins_to_close <= 15
 
-    # ── Paginated fetch for 3 key snapshots ───────────────────────────────────
+    # ── Fetch 3 key snapshots ─────────────────────────────────────────────────
     def fetch_snapshot(ts):
         rows = []
         for offset in range(0, 200000, 1000):
@@ -62,8 +103,8 @@ def get_uoa(date: str = None):
         return rows
 
     new_data   = fetch_snapshot(ts_new)
-    open_data  = fetch_snapshot(ts_open)   # for price direction (A)
-    min30_data = fetch_snapshot(ts_30min)  # for OI momentum (B)
+    open_data  = fetch_snapshot(ts_open)
+    min30_data = fetch_snapshot(ts_30min)
 
     # ── CMP map ───────────────────────────────────────────────────────────────
     cmp_raw = []
@@ -86,18 +127,54 @@ def get_uoa(date: str = None):
             cmp_map[c["symbol"]] = c["cmp"]
             seen_cmp.add(c["symbol"])
 
-    # Build lookup maps
+    # ── Day high for underlying stock ─────────────────────────────────────────
+    # Option B: Kite OHLC during market hours (accurate)
+    # Fallback: max(cmp) from today's cmp_prices snapshots
+    day_high_map: dict = {}
+
+    if live:
+        try:
+            from services.kite_auth import get_kite_client
+            kite = get_kite_client()
+            # Get unique symbols in UOA candidates
+            candidate_syms = list(set(r["symbol"] for r in new_data))
+            nse_keys = [ALL_NSE_MAP[s] for s in candidate_syms if s in ALL_NSE_MAP]
+            if nse_keys:
+                ohlc = kite.ohlc(nse_keys)
+                for sym, nse_key in ALL_NSE_MAP.items():
+                    if nse_key in ohlc:
+                        day_high_map[sym] = ohlc[nse_key]["ohlc"]["high"]
+            print(f"[UOA] Day high from Kite: {len(day_high_map)} symbols")
+        except Exception as e:
+            print(f"[UOA] Kite OHLC failed, using cmp fallback: {e}")
+
+    # Fallback: compute day high from today's cmp_prices
+    if not day_high_map:
+        try:
+            cmp_today = supabase.from_("cmp_prices")\
+                .select("symbol, cmp")\
+                .gte("timestamp", f"{today}T00:00:00+00:00")\
+                .limit(5000)\
+                .execute().data or []
+            from collections import defaultdict
+            sym_prices: dict = defaultdict(list)
+            for r in cmp_today:
+                sym_prices[r["symbol"]].append(float(r["cmp"]))
+            day_high_map = {sym: max(prices) for sym, prices in sym_prices.items()}
+            print(f"[UOA] Day high from cmp_prices: {len(day_high_map)} symbols")
+        except Exception as e:
+            print(f"[UOA] Day high fallback failed: {e}")
+
     open_map  = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in open_data}
     min30_map = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in min30_data}
 
-    # ── Avg volume from 3 snapshots only (fast — no full day fetch) ───────────
-    # open + 30min + new = enough to detect unusual volume vs baseline
+    # ── Avg vol from 3 snapshots only ─────────────────────────────────────────
     avg_vol: dict = {}
     for key in set(list(open_map.keys()) + list(min30_map.keys())):
         vols = []
-        if key in open_map and open_map[key]["volume"]:
+        if key in open_map and open_map[key].get("volume"):
             vols.append(open_map[key]["volume"])
-        if key in min30_map and min30_map[key]["volume"]:
+        if key in min30_map and min30_map[key].get("volume"):
             vols.append(min30_map[key]["volume"])
         if vols:
             avg_vol[key] = sum(vols) / len(vols)
@@ -105,40 +182,45 @@ def get_uoa(date: str = None):
     uoa_signals = []
 
     for row in new_data:
-        sym      = row["symbol"]
-        ts       = row["tradingsymbol"]
-        key      = f"{sym}_{ts}"
-        open_row = open_map.get(key)
+        sym       = row["symbol"]
+        ts        = row["tradingsymbol"]
+        key       = f"{sym}_{ts}"
+        open_row  = open_map.get(key)
         min30_row = min30_map.get(key)
 
         if not open_row or not min30_row:
             continue
 
-        cmp      = cmp_map.get(sym, 0)
-        strike   = row["strike"]
-        opt_type = row["option_type"]
-        new_vol  = row["volume"] or 0
-        new_oi   = row["oi"] or 0
-        new_ltp  = row["last_price"] or 0
-
+        cmp       = cmp_map.get(sym, 0)
+        strike    = row["strike"]
+        opt_type  = row["option_type"]
+        new_vol   = row["volume"] or 0
+        new_oi    = row["oi"] or 0
+        new_ltp   = row["last_price"] or 0
         open_ltp  = open_row["last_price"] or 0
-        open_oi   = open_row["oi"] or 0
         min30_oi  = min30_row["oi"] or 0
         min30_vol = min30_row["volume"] or 0
 
-        # Minimum volume gate
         if new_vol < 100000:
             continue
 
-        # ── A: Price direction — open of day vs now ───────────────────────────
+        # ── A: Price direction — open vs now ─────────────────────────────────
         ltp_chg_from_open = ((new_ltp - open_ltp) / open_ltp * 100) if open_ltp > 0 else 0
-        price_rising  = ltp_chg_from_open > 2.0   # up >2% from open
-        price_falling = ltp_chg_from_open < -2.0  # down >2% from open
+        price_rising  = ltp_chg_from_open > 2.0
+        price_falling = ltp_chg_from_open < -2.0
 
         # ── B: OI momentum — 30 mins ago vs now ──────────────────────────────
         oi_chg_30min = ((new_oi - min30_oi) / min30_oi * 100) if min30_oi > 0 else 0
-        oi_rising  = oi_chg_30min > 2.0
-        oi_falling = oi_chg_30min < -2.0
+        oi_rising    = oi_chg_30min > 2.0
+        oi_falling   = oi_chg_30min < -2.0
+
+        # ── Day high proximity for underlying stock ───────────────────────────
+        stock_day_high = day_high_map.get(sym, 0)
+        at_day_high = False
+        day_high_pct = None
+        if stock_day_high > 0 and cmp > 0:
+            day_high_pct = round((stock_day_high - cmp) / cmp * 100, 2)
+            at_day_high  = day_high_pct <= 0.5  # within 0.5% of day high
 
         # Volume metrics
         avg = avg_vol.get(key, new_vol)
@@ -146,7 +228,7 @@ def get_uoa(date: str = None):
         vol_oi_ratio = new_vol / new_oi if new_oi > 0 else 0
         vol_chg_30m  = ((new_vol - min30_vol) / min30_vol * 100) if min30_vol > 0 else 0
 
-        # OTM calculation
+        # OTM
         if cmp > 0:
             dist_pct = ((strike - cmp) / cmp * 100)
             is_otm   = (opt_type == 'CE' and strike > cmp) or (opt_type == 'PE' and strike < cmp)
@@ -157,19 +239,18 @@ def get_uoa(date: str = None):
 
         # ── Scoring ───────────────────────────────────────────────────────────
         score = 0
-        if vol_ratio > 6:    score += 2
-        elif vol_ratio > 4:  score += 1
-        if vol_oi_ratio > 4: score += 2
+        if vol_ratio > 6:      score += 2
+        elif vol_ratio > 4:    score += 1
+        if vol_oi_ratio > 4:   score += 2
         elif vol_oi_ratio > 2: score += 1
         if otm_pct > 3 and new_vol > 200000: score += 1
         if abs(oi_chg_30min) > 10 and vol_chg_30m > 20: score += 1
+        if at_day_high and oi_rising: score += 1  # bonus: at day high with fresh OI
 
         if score < 3:
             continue
 
-        # ── Signal classification: A (price from open) + B (OI 30-min) ───────
-        # SEBI compliant: describe WHAT is happening, not what trader should do
-
+        # ── Signal classification ─────────────────────────────────────────────
         if oi_rising and price_rising:
             if opt_type == 'CE':
                 signal_type = "LONG_BUILDUP"
@@ -211,7 +292,6 @@ def get_uoa(date: str = None):
                 bias = "BEARISH"
 
         elif vol_oi_ratio > 2 and not oi_rising and not oi_falling:
-            # High volume but OI flat = positions changing hands, not building
             if price_rising:
                 signal_type = "BUYER_DOMINATED"
                 signal_desc = "High volume · flat OI · price above open · buying interest observed"
@@ -221,7 +301,7 @@ def get_uoa(date: str = None):
                 signal_desc = "High volume · flat OI · price below open · selling pressure observed"
                 bias = "BEARISH" if opt_type == "CE" else "BULLISH"
             else:
-                continue  # flat price + flat OI = no clear activity
+                continue
 
         elif otm_pct > 3 and new_vol > 200000:
             signal_type = "FAR_OTM_ACTIVITY"
@@ -237,39 +317,42 @@ def get_uoa(date: str = None):
             ) else "BEARISH"
 
         else:
-            continue  # no clear signal — skip noise
+            continue
 
-        # ── Time-based advisory tag (SEBI safe) ───────────────────────────────
+        # Time tag
         if is_very_near_close:
-            time_tag = "market_closing"      # < 15 mins
+            time_tag = "market_closing"
         elif is_near_close:
-            time_tag = "positional_only"     # 15-30 mins
+            time_tag = "positional_only"
         else:
             time_tag = "normal"
 
         uoa_signals.append({
-            "symbol":           sym,
-            "tradingsymbol":    ts,
-            "strike":           strike,
-            "option_type":      opt_type,
-            "cmp":              float(cmp),
-            "ltp":              float(new_ltp),
-            "open_ltp":         float(open_ltp),
-            "ltp_chg_from_open": round(ltp_chg_from_open, 2),
-            "volume":           new_vol,
-            "oi":               new_oi,
-            "oi_chg_30min":     round(oi_chg_30min, 2),
-            "vol_oi_ratio":     round(vol_oi_ratio, 2),
-            "vol_ratio":        round(vol_ratio, 2),
-            "vol_chg_30min":    round(vol_chg_30m, 2),
-            "otm_pct":          round(otm_pct, 2),
-            "is_otm":           is_otm,
-            "signal_type":      signal_type,
-            "signal_desc":      signal_desc,
-            "bias":             bias,
-            "score":            min(score, 5),
-            "time_tag":         time_tag,
-            "is_index":         sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "symbol":             sym,
+            "tradingsymbol":      ts,
+            "strike":             strike,
+            "option_type":        opt_type,
+            "cmp":                float(cmp),
+            "ltp":                float(new_ltp),
+            "open_ltp":           float(open_ltp),
+            "ltp_chg_from_open":  round(ltp_chg_from_open, 2),
+            "volume":             new_vol,
+            "oi":                 new_oi,
+            "oi_chg_30min":       round(oi_chg_30min, 2),
+            "vol_oi_ratio":       round(vol_oi_ratio, 2),
+            "vol_ratio":          round(vol_ratio, 2),
+            "vol_chg_30min":      round(vol_chg_30m, 2),
+            "otm_pct":            round(otm_pct, 2),
+            "is_otm":             is_otm,
+            "signal_type":        signal_type,
+            "signal_desc":        signal_desc,
+            "bias":               bias,
+            "score":              min(score, 5),
+            "time_tag":           time_tag,
+            "is_index":           sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "day_high":           float(stock_day_high) if stock_day_high else None,
+            "day_high_pct":       day_high_pct,
+            "at_day_high":        at_day_high,
         })
 
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
@@ -281,5 +364,5 @@ def get_uoa(date: str = None):
         "total":           len(uoa_signals),
         "signals":         uoa_signals[:50],
         "snapshot_count":  len(timestamps),
-        "mins_to_close":   mins_to_close if mins_to_close > 0 else 0,
+        "mins_to_close":   max(0, mins_to_close),
     }
