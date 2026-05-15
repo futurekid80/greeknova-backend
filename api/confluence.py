@@ -266,7 +266,7 @@ def get_confluence():
             price_chg_pct = round((current_cmp - open_cmp) / open_cmp * 100, 2)
 
             # Only show stocks moving ≥2% from open
-            if abs(price_chg_pct) < 2.0:
+            if abs(price_chg_pct) < 1.5:
                 continue
 
             direction = "BULLISH" if price_chg_pct > 0 else "BEARISH"
@@ -315,7 +315,7 @@ def get_confluence():
         "momentum": {
             "total": len(momentum_signals),
             "signals": momentum_signals,
-            "threshold_pct": 2.0,
+            "threshold_pct": 1.5,
             "window": "open_to_now",
         }
     }
