@@ -35,13 +35,11 @@ INDEX_NSE_MAP = {
 }
 ALL_SYMBOLS = list(INDEX_NSE_MAP.keys()) + list(STOCK_NSE_MAP.keys())
 
-# Market hours in UTC: 03:45 to 10:00 (IST 09:15 to 15:30)
-MARKET_OPEN_UTC  = 3 * 60 + 45   # 03:45 UTC
-MARKET_CLOSE_UTC = 10 * 60 + 0   # 10:00 UTC
+MARKET_OPEN_UTC  = 3 * 60 + 45   # 03:45 UTC = 09:15 IST
+MARKET_CLOSE_UTC = 10 * 60 + 0   # 10:00 UTC = 15:30 IST
 
 
 def is_market_ts(ts: str) -> bool:
-    """Check if a timestamp falls within NSE market hours."""
     try:
         hour = int(ts[11:13])
         minute = int(ts[14:16])
@@ -71,26 +69,32 @@ def classify(oi_chg_pct, price_chg_pct):
     return "NEUTRAL", "Neutral", "text-gray-400", "bg-gray-900/30", "border-gray-800"
 
 
+# ── FIX: Paginated fetch — old limit(50000) was cutting off at ~30 stocks
+# 66 symbols × 1280 rows = 84,480 rows needed, well over 50k
 def fetch_oi_for_timestamp(supabase, timestamp):
-    rows = supabase.from_("oi_snapshots") \
-        .select("symbol, oi") \
-        .eq("timestamp", timestamp) \
-        .limit(50000) \
-        .execute()
-    return rows.data or []
+    all_rows = []
+    for offset in range(0, 500000, 1000):
+        batch = supabase.from_("oi_snapshots") \
+            .select("symbol, oi") \
+            .eq("timestamp", timestamp) \
+            .range(offset, offset + 999) \
+            .execute()
+        if not batch.data:
+            break
+        all_rows.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+    return all_rows
 
 
 def get_latest_market_timestamp(supabase):
-    """Get the most recent timestamp that falls within market hours."""
-    from datetime import datetime, timezone, timedelta
-    # Look back 7 days, filter to UTC hour < 11 (before 16:30 IST)
     since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
     result = supabase.from_("oi_snapshots") \
         .select("timestamp") \
         .eq("symbol", "NIFTY") \
         .gte("timestamp", f"{since}T00:00:00+00:00") \
         .order("timestamp", desc=True) \
-        .limit(50000) \
+        .limit(500) \
         .execute()
     for r in (result.data or []):
         if is_market_ts(r["timestamp"]):
@@ -99,7 +103,6 @@ def get_latest_market_timestamp(supabase):
 
 
 def get_prev_market_timestamp(supabase, before_ts: str):
-    """Get last market-hours timestamp from a different date than before_ts."""
     current_date = before_ts[:10]
     result = supabase.from_("oi_snapshots") \
         .select("timestamp") \
@@ -115,7 +118,6 @@ def get_prev_market_timestamp(supabase, before_ts: str):
 
 
 def get_prices_for_timestamp(supabase, timestamp: str):
-    """Get last_price per symbol from oi_snapshots for a given timestamp."""
     result = supabase.from_("oi_snapshots") \
         .select("symbol, last_price") \
         .eq("timestamp", timestamp) \
@@ -155,24 +157,26 @@ def to_ist(ts: str) -> str:
         return ts[11:16]
 
 
-def get_oi_pulse(filter_type: str = "all"):
+# ── FIX: Removed filter_type param — backend now always returns ALL symbols
+# Frontend handles All/Index/Stocks filtering locally (no extra API calls)
+def get_oi_pulse():
     supabase = get_supabase()
     live = is_market_hours()
 
-    # ── Step 1: Get latest market-hours snapshot ──────────────────────────────
+    # Step 1: Get latest market-hours snapshot
     ts_new = get_latest_market_timestamp(supabase)
     if not ts_new:
-        return {"items": [], "count": 0, "message": "No data available"}
+        return {"items": [], "count": 0, "message": "No market data found for today"}
 
     active_date = ts_new[:10]
     today_ts = get_timestamps_for_date(supabase, active_date)
 
-    # ── Step 2: Get previous trading day's last market-hours snapshot ─────────
+    # Step 2: Get previous trading day's last snapshot
     ts_old = get_prev_market_timestamp(supabase, ts_new)
     if not ts_old:
         ts_old = today_ts[0] if today_ts else ts_new
 
-    # ── Step 3: Fetch OI ──────────────────────────────────────────────────────
+    # Step 3: Fetch OI — paginated to get all 66 symbols
     old_rows = fetch_oi_for_timestamp(supabase, ts_old)
     new_rows = fetch_oi_for_timestamp(supabase, ts_new)
 
@@ -183,9 +187,8 @@ def get_oi_pulse(filter_type: str = "all"):
     for r in new_rows:
         oi_new[r["symbol"]] += r["oi"] or 0
 
-    # ── Step 4: Get prices ────────────────────────────────────────────────────
+    # Step 4: Get prices
     prices = {}
-
     if live:
         try:
             from services.kite_auth import get_kite_client
@@ -208,14 +211,11 @@ def get_oi_pulse(filter_type: str = "all"):
                 "ltp": ltp_map[sym],
                 "prev_close": prev_map.get(sym, ltp_map[sym])
             }
-        print(f"[OI Pulse] EOD prices: {len(prices)} symbols")
 
-    # ── Step 5: Build items ───────────────────────────────────────────────────
+    # Step 5: Build items for ALL symbols — no filter here
     items = []
     for sym in ALL_SYMBOLS:
         is_index = sym in INDEX_NSE_MAP
-        if filter_type == "index"  and not is_index: continue
-        if filter_type == "stocks" and is_index:     continue
 
         o_old = oi_old.get(sym, 0)
         o_new = oi_new.get(sym, 0)
