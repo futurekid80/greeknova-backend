@@ -1,5 +1,5 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as date_type
 
 def get_confluence():
     supabase = get_supabase()
@@ -26,21 +26,55 @@ def get_confluence():
 
     ts_prev = prev.data[1]["timestamp"] if len(prev.data) > 1 else None
 
-    # Get current snapshot — limit(5000) prevents Supabase 1000-row silent truncation
-    # ~66 symbols × ~40 strikes × 2 types = ~5280 rows max
-    data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts).limit(5000).execute().data
-    prev_data = supabase.from_("oi_snapshots").select("*").eq("timestamp", ts_prev).limit(5000).execute().data if ts_prev else []
+    # ── FIX: Paginated fetch for current snapshot ────────────────────────────
+    # 66 symbols × ~40 strikes × 2 types × 3 expiries ≈ 15,840 rows
+    # Old limit(5000) was silently truncating to ~19 stocks
+    data = []
+    for offset in range(0, 200000, 1000):
+        batch = supabase.from_("oi_snapshots")\
+            .select("*")\
+            .eq("timestamp", ts)\
+            .range(offset, offset + 999)\
+            .execute()
+        if not batch.data:
+            break
+        data.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
 
-    # Get CMPs
-    cmp_data = supabase.from_("cmp_prices")\
-        .select("*")\
-        .order("timestamp", desc=True)\
-        .limit(100)\
-        .execute().data
+    # ── FIX: Paginated fetch for previous snapshot ───────────────────────────
+    prev_data = []
+    if ts_prev:
+        for offset in range(0, 200000, 1000):
+            batch = supabase.from_("oi_snapshots")\
+                .select("*")\
+                .eq("timestamp", ts_prev)\
+                .range(offset, offset + 999)\
+                .execute()
+            if not batch.data:
+                break
+            prev_data.extend(batch.data)
+            if len(batch.data) < 1000:
+                break
+
+    # ── FIX: CMP — paginate to cover all 66 symbols ──────────────────────────
+    # Old limit(100) missed many symbols since each symbol has multiple rows
+    cmp_raw = []
+    for offset in range(0, 10000, 1000):
+        batch = supabase.from_("cmp_prices")\
+            .select("*")\
+            .order("timestamp", desc=True)\
+            .range(offset, offset + 999)\
+            .execute()
+        if not batch.data:
+            break
+        cmp_raw.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
 
     cmp_map = {}
     seen = set()
-    for c in cmp_data:
+    for c in cmp_raw:
         if c["symbol"] not in seen:
             cmp_map[c["symbol"]] = c["cmp"]
             seen.add(c["symbol"])
@@ -50,11 +84,24 @@ def get_confluence():
     for row in prev_data:
         prev_map[f"{row['symbol']}_{row['tradingsymbol']}"] = row
 
+    # ── Nearest expiry filter (matches dashboard + stock page methodology) ────
+    today_str = date_type.today().isoformat()
+
     symbols = list(set(r["symbol"] for r in data))
     confluence_signals = []
 
     for symbol in symbols:
         rows = [r for r in data if r["symbol"] == symbol]
+
+        # Filter to nearest expiry only (avoids monthly hedge inflation)
+        expiries = sorted(set(
+            r["expiry"] for r in rows
+            if r.get("expiry") and r["expiry"] >= today_str
+        ))
+        nearest_expiry = expiries[0] if expiries else None
+        if nearest_expiry:
+            rows = [r for r in rows if r["expiry"] == nearest_expiry]
+
         ce_rows = [r for r in rows if r["option_type"] == "CE"]
         pe_rows = [r for r in rows if r["option_type"] == "PE"]
 
@@ -63,8 +110,21 @@ def get_confluence():
         if not total_ce and not total_pe:
             continue
 
-        pcr = total_pe / total_ce if total_ce > 0 else 0
         cmp = cmp_map.get(symbol, 0)
+
+        # ── PCR: ATM ±10 strikes only (matches all other pages) ──────────────
+        strikes = sorted(set(r["strike"] for r in rows))
+        if cmp > 0 and strikes:
+            atm = min(strikes, key=lambda s: abs(s - cmp))
+            atm_idx = strikes.index(atm)
+            pcr_set = set(strikes[max(0, atm_idx - 10):atm_idx + 11])
+            pcr_ce = sum(r["oi"] for r in ce_rows if r["strike"] in pcr_set)
+            pcr_pe = sum(r["oi"] for r in pe_rows if r["strike"] in pcr_set)
+        else:
+            pcr_ce = total_ce
+            pcr_pe = total_pe
+
+        pcr = pcr_pe / pcr_ce if pcr_ce > 0 else 0
 
         # Signal 1: Scanner signal
         ratio = total_pe / (total_ce + total_pe) if (total_ce + total_pe) > 0 else 0
@@ -91,7 +151,9 @@ def get_confluence():
         oi_spike = None
         vol_spike = None
         if prev_data:
-            for row in rows:
+            # Use all rows (not just nearest expiry) for spike detection
+            all_sym_rows = [r for r in data if r["symbol"] == symbol]
+            for row in all_sym_rows:
                 key = f"{symbol}_{row['tradingsymbol']}"
                 prev_row = prev_map.get(key)
                 if not prev_row:
@@ -130,9 +192,8 @@ def get_confluence():
         if oi_spike: active_signals.append(f"OI {oi_spike['direction']} {oi_spike['option_type']} {oi_spike['strike']}")
         if vol_spike: active_signals.append(f"Vol {vol_spike['signal']} {vol_spike['option_type']} {vol_spike['strike']}")
 
-        # Determine confluence strength
-        strength = len(active_signals)
-        if strength < 2:
+        # Require at least 2 signals for confluence
+        if len(active_signals) < 2:
             continue
 
         # Determine overall bias
@@ -152,7 +213,7 @@ def get_confluence():
             "oi_spike": oi_spike,
             "vol_spike": vol_spike,
             "active_signals": active_signals,
-            "signal_count": strength,
+            "signal_count": len(active_signals),
             "bias": bias,
             "ce_wall": ce_wall,
             "pe_wall": pe_wall,
@@ -161,8 +222,9 @@ def get_confluence():
             "is_index": symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
         })
 
-    # Sort by signal count then by PCR extremity
+    # Sort by signal count then PCR extremity
     confluence_signals.sort(key=lambda x: (x["signal_count"], abs(x["pcr"] - 1)), reverse=True)
+
     return {
         "timestamp": ts,
         "total": len(confluence_signals),
