@@ -127,7 +127,10 @@ def get_uoa(date: str = None):
         new_ltp = row["last_price"] or 0
         old_ltp = old_row["last_price"] or 0
 
-        if new_vol < 50000:
+        # ── FIX: Raised minimum volume threshold from 50k to 100k ─────────────
+        # 50k was too low — created too many low-quality signals (431 signals)
+        # 100k filters to genuinely significant activity only
+        if new_vol < 100000:
             continue
 
         avg = avg_vol.get(key, new_vol)
@@ -136,11 +139,10 @@ def get_uoa(date: str = None):
         oi_change_pct = ((new_oi - old_oi) / old_oi * 100) if old_oi > 0 else 0
         vol_change_pct = ((new_vol - old_vol) / old_vol * 100) if old_vol > 0 else 0
 
-        # ── KEY FIX: option price direction ───────────────────────────────────
-        # This is what was missing — we must know if option price rose or fell
+        # ── Option price direction — key to correct signal classification ──────
         ltp_change_pct = ((new_ltp - old_ltp) / old_ltp * 100) if old_ltp > 0 else 0
-        price_rising = ltp_change_pct > 0
-        price_falling = ltp_change_pct < 0
+        price_rising = ltp_change_pct > 0.5   # small buffer to avoid noise
+        price_falling = ltp_change_pct < -0.5
         oi_rising = oi_change_pct > 2
         oi_falling = oi_change_pct < -2
 
@@ -153,55 +155,52 @@ def get_uoa(date: str = None):
             otm_pct = 0
             is_otm = False
 
-        # ── Score calculation ─────────────────────────────────────────────────
+        # ── Tightened scoring ─────────────────────────────────────────────────
         score = 0
-        if vol_ratio > 5: score += 2
-        elif vol_ratio > 3: score += 1
-        if vol_oi_ratio > 3: score += 2
-        elif vol_oi_ratio > 1.5: score += 1
-        if otm_pct > 3 and new_vol > 100000: score += 1
+        if vol_ratio > 6: score += 2      # was 5
+        elif vol_ratio > 4: score += 1    # was 3
+        if vol_oi_ratio > 4: score += 2   # was 3
+        elif vol_oi_ratio > 2: score += 1 # was 1.5
+        if otm_pct > 3 and new_vol > 200000: score += 1  # was 100k
         if abs(oi_change_pct) > 15 and vol_change_pct > 20: score += 1
 
-        if score < 2:
+        # ── Backend minimum score filter — reduces noise before sending to FE ──
+        # Previously only UI had score filter; now enforce min 3 in backend too
+        if score < 3:
             continue
 
-        # ── FIXED: Signal classification using OI + Price direction ───────────
-        # Previously BUYER_DOMINATED ignored price direction — now fully fixed
+        # ── FIXED signal classification using OI + option price direction ──────
         if oi_rising and price_rising:
-            # OI up + option price up = fresh longs / buyers in control
             if opt_type == 'CE':
                 signal_type = "LONG_BUILDUP"
-                signal_desc = "OI ↑ + CE price ↑ — fresh call buyers, bullish bet"
+                signal_desc = "OI ↑ + CE price ↑ — fresh call buyers, bullish directional bet"
                 bias = "BULLISH"
             else:
                 signal_type = "SHORT_BUILDUP"
-                signal_desc = "OI ↑ + PE price ↑ — fresh put buyers, bearish bet"
+                signal_desc = "OI ↑ + PE price ↑ — fresh put buyers, bearish directional bet"
                 bias = "BEARISH"
 
         elif oi_rising and price_falling:
-            # OI up + option price down = writers dominating
             if opt_type == 'CE':
                 signal_type = "CALL_WRITING"
-                signal_desc = "OI ↑ + CE price ↓ — call writers adding shorts, bearish on stock"
+                signal_desc = "OI ↑ + CE price ↓ — call writers shorting, bearish on stock"
                 bias = "BEARISH"
             else:
                 signal_type = "PUT_WRITING"
-                signal_desc = "OI ↑ + PE price ↓ — put writers adding shorts, bullish on stock"
+                signal_desc = "OI ↑ + PE price ↓ — put writers shorting, bullish on stock"
                 bias = "BULLISH"
 
         elif oi_falling and price_rising:
-            # OI down + option price up = short covering
             if opt_type == 'CE':
                 signal_type = "SHORT_COVERING"
                 signal_desc = "OI ↓ + CE price ↑ — call shorts covering, bullish squeeze"
                 bias = "BULLISH"
             else:
                 signal_type = "LONG_UNWINDING"
-                signal_desc = "OI ↓ + PE price ↑ — put longs unwinding, bullish for stock"
+                signal_desc = "OI ↓ + PE price ↑ — put longs exiting, bullish for stock"
                 bias = "BULLISH"
 
         elif oi_falling and price_falling:
-            # OI down + option price down = long unwinding
             if opt_type == 'CE':
                 signal_type = "LONG_UNWINDING"
                 signal_desc = "OI ↓ + CE price ↓ — call longs exiting, bearish for stock"
@@ -211,8 +210,8 @@ def get_uoa(date: str = None):
                 signal_desc = "OI ↓ + PE price ↓ — put shorts covering, bearish squeeze"
                 bias = "BEARISH"
 
-        elif vol_oi_ratio > 2 and not oi_rising and not oi_falling:
-            # High volume but OI not changing much = buyer/seller battle
+        elif vol_oi_ratio > 2:
+            # High volume, OI not moving much = buyer/seller battle at current price
             if price_rising:
                 signal_type = "BUYER_DOMINATED"
                 signal_desc = "High vol + price ↑ + flat OI — buyers absorbing sellers"
@@ -222,9 +221,8 @@ def get_uoa(date: str = None):
                 signal_desc = "High vol + price ↓ + flat OI — sellers absorbing buyers"
                 bias = "BEARISH"
             else:
-                signal_type = "UNUSUAL_ACTIVITY"
-                signal_desc = "High vol vs OI — directional unclear"
-                bias = "NEUTRAL"
+                # Price flat with high vol — skip, not actionable
+                continue
 
         elif otm_pct > 3 and new_vol > 200000:
             bias = "BULLISH" if opt_type == "PE" else "BEARISH"
@@ -237,14 +235,13 @@ def get_uoa(date: str = None):
             elif price_falling:
                 bias = "BEARISH" if opt_type == "CE" else "BULLISH"
             else:
-                bias = "NEUTRAL"
+                continue  # volume surge with no price direction = skip
             signal_type = "VOLUME_SURGE"
-            signal_desc = f"{vol_ratio:.1f}x normal volume — unusual interest"
+            signal_desc = f"{vol_ratio:.1f}x normal volume — strong directional interest"
 
         else:
-            signal_type = "UNUSUAL_ACTIVITY"
-            signal_desc = "Multiple unusual signals detected"
-            bias = "NEUTRAL"
+            # No clear signal — skip rather than show noise
+            continue
 
         uoa_signals.append({
             "symbol":         sym,
