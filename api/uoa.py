@@ -245,7 +245,9 @@ def get_uoa(date: str = None):
         elif vol_oi_ratio > 2: score += 1
         if otm_pct > 3 and new_vol > 200000: score += 1
         if abs(oi_chg_30min) > 10 and vol_chg_30m > 20: score += 1
-        if at_day_high and oi_rising: score += 1  # bonus: at day high with fresh OI
+        # FIXED — day high bonus only for CE, put writing bonus for PE
+if at_day_high and oi_rising and opt_type == 'CE': score += 1
+if opt_type == 'PE' and oi_rising and price_falling: score += 1  # put writing bonus
 
         if score < 3:
             continue
