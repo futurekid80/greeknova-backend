@@ -249,6 +249,11 @@ def eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 def oi_pulse():
     from api.oi_pulse import get_oi_pulse
     return get_oi_pulse()
+
+@app.get("/options-jungle")
+def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
+    from api.options_jungle import get_options_jungle
+    return get_options_jungle(oi_threshold, vol_threshold, date)
     
 @app.get("/relative-strength")
 def relative_strength(benchmark: str = "NIFTY"):
