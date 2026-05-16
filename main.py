@@ -276,18 +276,36 @@ def iv_analysis_symbol(symbol: str, date: str = None):
     from api.iv_analysis import get_iv_analysis
     return get_iv_analysis(symbol=symbol.upper(), date=date)
 
-# Add to main.py
+# Add these to main.py — replaces the earlier ask-claude route
 
 @app.post("/ask-claude")
 async def ask_claude(request: dict):
+    """Proxy endpoint — calls Claude API securely from backend"""
+    import os
     import anthropic
-    from api.ask_context import SYSTEM_PROMPT_TEXT
-    
-    client = anthropic.Anthropic()
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        system=request.get("system"),
-        messages=request.get("messages"),
-    )
-    return {"content": response.content[0].text}
+
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"error": "ANTHROPIC_API_KEY not set in environment"}
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=1000,
+            system=request.get("system", ""),
+            messages=request.get("messages", []),
+        )
+        return {"content": response.content[0].text}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/ask-context/{symbol}")
+def ask_context(symbol: str = "NIFTY"):
+    from api.ask_context import get_ask_context
+    return get_ask_context(symbol.upper())
+
+@app.get("/ask-context")
+def ask_context_default():
+    from api.ask_context import get_ask_context
+    return get_ask_context("NIFTY")
