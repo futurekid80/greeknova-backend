@@ -309,3 +309,10 @@ def ask_context(symbol: str = "NIFTY"):
 def ask_context_default():
     from api.ask_context import get_ask_context
     return get_ask_context("NIFTY")
+
+# Add to main.py
+
+@app.get("/positional-radar")
+def positional_radar(days: int = 5):
+    from api.positional_radar import get_positional_radar
+    return get_positional_radar(days=min(days, 10))
