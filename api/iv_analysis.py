@@ -1,6 +1,21 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta
 import math
+import time
+
+# ── Simple in-memory cache (5 min TTL) ───────────────────────────────────────
+_cache: dict = {}
+_cache_ttl = 300  # 5 minutes
+
+def _get_cache(key: str):
+    if key in _cache:
+        val, ts = _cache[key]
+        if time.time() - ts < _cache_ttl:
+            return val
+    return None
+
+def _set_cache(key: str, val):
+    _cache[key] = (val, time.time())
 
 # ── Black-Scholes IV via Newton-Raphson ──────────────────────────────────────
 
@@ -86,6 +101,13 @@ def get_iv_analysis(symbol: str = None, date: str = None):
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     symbols = [symbol.upper()] if symbol else SYMBOLS
 
+    # Check cache first
+    cache_key = f"iv_{','.join(symbols)}_{today}"
+    cached = _get_cache(cache_key)
+    if cached:
+        print(f"[IV] Serving from cache: {cache_key}")
+        return cached
+
     # ── Latest snapshot timestamp ─────────────────────────────────────────────
     ts_q = supabase.from_("oi_snapshots")\
         .select("timestamp")\
@@ -147,31 +169,23 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         sym_options[row["symbol"]].append(row)
 
     # ── Historical IV for IVR calculation ─────────────────────────────────────
-    # NIFTY has ~145 snapshots/day. limit(200) only covers 1-2 days.
-    # Fix: paginate to get all timestamps, then extract one per day.
-    sixty_ago = (datetime.now(timezone.utc).date() - timedelta(days=60)).isoformat()
-    hist_ts_all = []
-    for _off in range(0, 50000, 1000):
-        _batch = supabase.from_("oi_snapshots")\
+    # Probe one EOD timestamp per day — fast, avoids timeout
+    # For each of last 30 days, get the LAST snapshot of that day (15:30 IST)
+    hist_dates: dict = {}
+    base_date = datetime.now(timezone.utc).date()
+    for i in range(1, 31):  # last 30 days, skip today
+        d = (base_date - timedelta(days=i)).isoformat()
+        day_ts = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{sixty_ago}T00:00:00+00:00")\
+            .gte("timestamp", f"{d}T00:00:00+00:00")\
+            .lt("timestamp",  f"{d}T23:59:59+00:00")\
             .order("timestamp", desc=True)\
-            .range(_off, _off + 999).execute()
-        if not _batch.data:
-            break
-        hist_ts_all.extend(_batch.data)
-        if len(_batch.data) < 1000:
-            break
+            .limit(1).execute()
+        if day_ts.data:
+            hist_dates[d] = day_ts.data[0]["timestamp"]
 
-    # Get one timestamp per day (EOD — last of each day, desc order = first seen)
-    hist_dates: dict = {}
-    for r in hist_ts_all:
-        d = r["timestamp"][:10]
-        if d not in hist_dates:
-            hist_dates[d] = r["timestamp"]
-
-    hist_timestamps = list(hist_dates.values())  # one per day, most recent first
+    hist_timestamps = list(hist_dates.values())  # one EOD timestamp per day
 
     results = []
 
@@ -402,9 +416,11 @@ def get_iv_analysis(symbol: str = None, date: str = None):
     # Sort by IVR descending (highest IV first — most actionable)
     results.sort(key=lambda x: (x["ivr"] or 0), reverse=True)
 
-    return {
+    result = {
         "date":      today,
         "timestamp": latest_ts,
         "total":     len(results),
         "results":   results,
     }
+    _set_cache(cache_key, result)
+    return result
