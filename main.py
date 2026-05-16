@@ -278,12 +278,16 @@ def iv_analysis_symbol(symbol: str, date: str = None):
 
 # Add to main.py
 
-@app.get("/ask-context/{symbol}")
-def ask_context(symbol: str = "NIFTY"):
-    from api.ask_context import get_ask_context
-    return get_ask_context(symbol.upper())
-
-@app.get("/ask-context")
-def ask_context_default():
-    from api.ask_context import get_ask_context
-    return get_ask_context("NIFTY")
+@app.post("/ask-claude")
+async def ask_claude(request: dict):
+    import anthropic
+    from api.ask_context import SYSTEM_PROMPT_TEXT
+    
+    client = anthropic.Anthropic()
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1000,
+        system=request.get("system"),
+        messages=request.get("messages"),
+    )
+    return {"content": response.content[0].text}
