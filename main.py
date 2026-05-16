@@ -275,3 +275,15 @@ def iv_analysis_all(date: str = None):
 def iv_analysis_symbol(symbol: str, date: str = None):
     from api.iv_analysis import get_iv_analysis
     return get_iv_analysis(symbol=symbol.upper(), date=date)
+
+# Add to main.py
+
+@app.get("/ask-context/{symbol}")
+def ask_context(symbol: str = "NIFTY"):
+    from api.ask_context import get_ask_context
+    return get_ask_context(symbol.upper())
+
+@app.get("/ask-context")
+def ask_context_default():
+    from api.ask_context import get_ask_context
+    return get_ask_context("NIFTY")
