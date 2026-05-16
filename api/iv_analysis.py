@@ -168,12 +168,15 @@ def get_iv_analysis(symbol: str = None, date: str = None):
     for row in snap_data:
         sym_options[row["symbol"]].append(row)
 
-    # ── Historical IV for IVR calculation ─────────────────────────────────────
-    # Probe one EOD timestamp per day — fast, avoids timeout
-    # For each of last 30 days, get the LAST snapshot of that day (15:30 IST)
-    hist_dates: dict = {}
+    # ── Historical IV — PRE-FETCH ALL DATA UPFRONT (batch approach) ─────────────
+    # Old approach: 66 symbols × 30 days × 2 queries = ~4000 Supabase calls → timeout
+    # New approach: 30 days × 2 queries (all symbols at once) = ~60 queries total
+
     base_date = datetime.now(timezone.utc).date()
-    for i in range(1, 31):  # last 30 days, skip today
+
+    # Step 1: Get one EOD timestamp per day (30 fast queries)
+    hist_dates: dict = {}
+    for i in range(1, 31):
         d = (base_date - timedelta(days=i)).isoformat()
         day_ts = supabase.from_("oi_snapshots")\
             .select("timestamp")\
@@ -185,7 +188,47 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         if day_ts.data:
             hist_dates[d] = day_ts.data[0]["timestamp"]
 
-    hist_timestamps = list(hist_dates.values())  # one EOD timestamp per day
+    # Step 2: For each day, fetch ALL symbols' CMP in one query
+    # Result: {date -> {symbol -> cmp}}
+    hist_cmp_by_date: dict = {}
+    for hist_d in list(hist_dates.keys()):
+        cmp_q = supabase.from_("cmp_prices")\
+            .select("symbol, cmp")\
+            .gte("timestamp", f"{hist_d}T00:00:00+00:00")\
+            .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(500).execute().data or []
+        day_cmp: dict = {}
+        seen_syms: set = set()
+        for r in cmp_q:
+            if r["symbol"] not in seen_syms:
+                day_cmp[r["symbol"]] = float(r["cmp"])
+                seen_syms.add(r["symbol"])
+        hist_cmp_by_date[hist_d] = day_cmp
+
+    # Step 3: For each day, fetch ALL symbols' ATM options in one query
+    # Result: {date -> {symbol -> [option rows]}}
+    hist_opts_by_date: dict = {}
+    for hist_d in list(hist_dates.keys()):
+        opts_q = supabase.from_("oi_snapshots")\
+            .select("symbol, strike, option_type, last_price, expiry")\
+            .gte("timestamp", f"{hist_d}T09:00:00+00:00")\
+            .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(5000).execute().data or []
+        day_opts: dict = {}
+        seen_keys: set = set()
+        for r in opts_q:
+            key = f"{r['symbol']}_{r['strike']}_{r['option_type']}"
+            if key not in seen_keys:
+                sym_k = r["symbol"]
+                if sym_k not in day_opts:
+                    day_opts[sym_k] = []
+                day_opts[sym_k].append(r)
+                seen_keys.add(key)
+        hist_opts_by_date[hist_d] = day_opts
+
+    hist_timestamps = list(hist_dates.values())  # kept for compatibility
 
     results = []
 
@@ -263,61 +306,47 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         # Sample IV from historical EOD snapshots
         hist_ivs = []
 
-        # We compute IV for up to 30 historical days
-        for hist_ts in hist_timestamps[:30]:
-            hist_d = hist_ts[:10]
+        # Use pre-fetched data — no Supabase calls here!
+        # All historical data was fetched upfront in batch queries
+        for hist_d in list(hist_dates.keys()):
             if hist_d == today:
-                continue  # skip today — already have current_iv
+                continue
 
             try:
-                # Get ATM options for this historical timestamp
-                hist_opts = supabase.from_("oi_snapshots")\
-                    .select("strike, option_type, last_price, expiry")\
-                    .eq("symbol", sym)\
-                    .gte("timestamp", f"{hist_d}T00:00:00+00:00")\
-                    .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
-                    .order("timestamp", desc=True)\
-                    .limit(200).execute().data or []
+                # Get pre-fetched CMP for this symbol on this day
+                h_cmp = hist_cmp_by_date.get(hist_d, {}).get(sym, cmp)
 
+                # Get pre-fetched options for this symbol on this day
+                hist_opts = hist_opts_by_date.get(hist_d, {}).get(sym, [])
                 if not hist_opts:
                     continue
 
-                # Use same expiry structure logic
-                hist_expiries = sorted(set(r["expiry"] for r in hist_opts if r["expiry"] and r["expiry"] >= hist_d))
+                # Find nearest expiry
+                hist_expiries = sorted(set(
+                    r["expiry"] for r in hist_opts
+                    if r["expiry"] and r["expiry"] >= hist_d
+                ))
                 if not hist_expiries:
                     hist_expiries = sorted(set(r["expiry"] for r in hist_opts if r["expiry"]))
                 if not hist_expiries:
                     continue
 
                 h_expiry = hist_expiries[0]
-                try:
-                    h_exp_dt = datetime.strptime(h_expiry, "%Y-%m-%d")
-                    h_now_dt = datetime.strptime(hist_d, "%Y-%m-%d")
-                    h_dte = (h_exp_dt - h_now_dt).days
-                    h_T = max(h_dte / 365, 1/365)
-                except:
-                    continue
-
-                # Get historical CMP — use date range not exact timestamp
-                hist_cmp_q = supabase.from_("cmp_prices")\
-                    .select("cmp")\
-                    .eq("symbol", sym)\
-                    .gte("timestamp", f"{hist_d}T00:00:00+00:00")\
-                    .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
-                    .order("timestamp", desc=True)\
-                    .limit(1).execute()
-                h_cmp = float(hist_cmp_q.data[0]["cmp"]) if hist_cmp_q.data else cmp
+                h_exp_dt = datetime.strptime(h_expiry, "%Y-%m-%d")
+                h_now_dt = datetime.strptime(hist_d, "%Y-%m-%d")
+                h_dte    = (h_exp_dt - h_now_dt).days
+                h_T      = max(h_dte / 365, 1/365)
 
                 h_expiry_opts = [r for r in hist_opts if r["expiry"] == h_expiry]
                 h_strikes = sorted(set(r["strike"] for r in h_expiry_opts))
                 if not h_strikes:
                     continue
-                h_atm = min(h_strikes, key=lambda x: abs(x - h_cmp))
 
-                h_ce = next((float(r["last_price"]) for r in h_expiry_opts
-                             if r["strike"] == h_atm and r["option_type"] == "CE"), None)
-                h_pe = next((float(r["last_price"]) for r in h_expiry_opts
-                             if r["strike"] == h_atm and r["option_type"] == "PE"), None)
+                h_atm = min(h_strikes, key=lambda x: abs(x - h_cmp))
+                h_ce  = next((float(r["last_price"]) for r in h_expiry_opts
+                              if r["strike"] == h_atm and r["option_type"] == "CE"), None)
+                h_pe  = next((float(r["last_price"]) for r in h_expiry_opts
+                              if r["strike"] == h_atm and r["option_type"] == "PE"), None)
 
                 h_iv_vals = []
                 if h_ce:
@@ -329,10 +358,10 @@ def get_iv_analysis(symbol: str = None, date: str = None):
 
                 if h_iv_vals:
                     avg_iv = round(sum(h_iv_vals) / len(h_iv_vals), 2)
-                    if avg_iv >= 5.0:  # filter bad data — holidays, low liquidity
+                    if avg_iv >= 5.0:  # filter bad data
                         hist_ivs.append(avg_iv)
 
-            except Exception as e:
+            except Exception:
                 continue
 
         # ── IVR and IVP calculation ───────────────────────────────────────────
