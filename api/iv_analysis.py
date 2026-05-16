@@ -47,7 +47,7 @@ def calculate_iv(market_price, S, K, T, r, opt_type, max_iter=100, tol=1e-6):
     sigma = math.sqrt(2 * math.pi / T) * market_price / S
 
     for _ in range(max_iter):
-        price = bs_price(S, K, T, r, sigma)
+        price = bs_price(S, K, T, r, sigma, opt_type)
         vega  = bs_vega(S, K, T, r, sigma)
         if vega < 1e-10:
             break
