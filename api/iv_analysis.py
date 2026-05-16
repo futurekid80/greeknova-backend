@@ -328,7 +328,9 @@ def get_iv_analysis(symbol: str = None, date: str = None):
                     if h_iv: h_iv_vals.append(h_iv)
 
                 if h_iv_vals:
-                    hist_ivs.append(round(sum(h_iv_vals) / len(h_iv_vals), 2))
+                    avg_iv = round(sum(h_iv_vals) / len(h_iv_vals), 2)
+                    if avg_iv >= 5.0:  # filter bad data — holidays, low liquidity
+                        hist_ivs.append(avg_iv)
 
             except Exception as e:
                 continue
