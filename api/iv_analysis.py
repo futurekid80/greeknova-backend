@@ -252,7 +252,9 @@ def get_iv_analysis(symbol: str = None, date: str = None):
                 hist_opts = supabase.from_("oi_snapshots")\
                     .select("strike, option_type, last_price, expiry")\
                     .eq("symbol", sym)\
-                    .eq("timestamp", hist_ts)\
+                    .gte("timestamp", f"{hist_d}T00:00:00+00:00")\
+                    .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
+                    .order("timestamp", desc=True)\
                     .limit(200).execute().data or []
 
                 if not hist_opts:
@@ -274,11 +276,13 @@ def get_iv_analysis(symbol: str = None, date: str = None):
                 except:
                     continue
 
-                # Get historical CMP (use yesterday's CMP from cmp_prices)
+                # Get historical CMP — use date range not exact timestamp
                 hist_cmp_q = supabase.from_("cmp_prices")\
                     .select("cmp")\
                     .eq("symbol", sym)\
-                    .eq("timestamp", hist_ts)\
+                    .gte("timestamp", f"{hist_d}T00:00:00+00:00")\
+                    .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
+                    .order("timestamp", desc=True)\
                     .limit(1).execute()
                 h_cmp = float(hist_cmp_q.data[0]["cmp"]) if hist_cmp_q.data else cmp
 
