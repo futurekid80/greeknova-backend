@@ -237,13 +237,22 @@ def get_positional_radar(min_consec: int = 0):
 
         # Overall % changes (series start → today)
         oi_chg_pct  = round((oi_series[-1]  - oi_series[0])  / oi_series[0]  * 100, 2) if oi_series[0]  > 0 else 0
-        vol_chg_pct = round((vol_series[-1] - vol_series[0]) / vol_series[0] * 100, 2) if vol_series[0] > 0 else 0
         cmp_chg_pct = round((cmp_series[-1] - cmp_series[0]) / cmp_series[0] * 100, 2) if cmp_series[0] > 0 else 0
+
+        # ── Volume: today vs 7-day rolling average (not series start) ─────────
+        # Avoids distortion when series-start volume is abnormally low
+        # e.g. May 1 (first day of series) always has lower volume than mid-series
+        vol_window   = vol_series[-7:] if len(vol_series) >= 7 else vol_series[:-1]
+        vol_avg_7d   = sum(vol_window) / len(vol_window) if vol_window else 0
+        vol_today    = vol_series[-1]
+        vol_chg_pct  = round((vol_today - vol_avg_7d) / vol_avg_7d * 100, 2) if vol_avg_7d > 0 else 0
+        # Also keep series-start comparison for display context
+        vol_series_chg = round((vol_series[-1] - vol_series[0]) / vol_series[0] * 100, 2) if vol_series[0] > 0 else 0
 
         # ── Classify overall signal ───────────────────────────────────────────
         oi_rising    = oi_chg_pct  >  3.0
         oi_falling   = oi_chg_pct  < -3.0
-        vol_rising   = vol_chg_pct >  5.0
+        vol_rising   = vol_chg_pct >  20.0  # today > 7d avg by 20% = genuine surge
         price_rising = cmp_chg_pct >  0.5
         price_falling= cmp_chg_pct < -0.5
 
@@ -328,7 +337,9 @@ def get_positional_radar(min_consec: int = 0):
 
             # Overall % changes
             "oi_chg_pct":        oi_chg_pct,
-            "vol_chg_pct":       vol_chg_pct,
+            "vol_chg_pct":       vol_chg_pct,       # today vs 7d avg (meaningful)
+            "vol_series_chg":    vol_series_chg,    # series start vs today (context only)
+            "vol_avg_7d":        round(vol_avg_7d / 100000, 1),  # in Lakhs
             "cmp_chg_pct":       cmp_chg_pct,
 
             # Sparklines
