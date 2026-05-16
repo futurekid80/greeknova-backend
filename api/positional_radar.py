@@ -1,7 +1,6 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta
 
-
 SYMBOLS = [
     "NIFTY", "BANKNIFTY", "FINNIFTY",
     "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
@@ -15,25 +14,26 @@ SYMBOLS = [
     "HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL",
 ]
 
-def fmtoi(n):
-    if abs(n) >= 10000000: return f"{n/10000000:.2f}Cr"
-    if abs(n) >= 100000:   return f"{n/100000:.1f}L"
-    return str(n)
+
+def count_consecutive(series: list, direction: str) -> int:
+    count = 0
+    for i in range(len(series) - 1, 0, -1):
+        if direction == 'up' and series[i] > series[i - 1]:
+            count += 1
+        elif direction == 'down' and series[i] < series[i - 1]:
+            count += 1
+        else:
+            break
+    return count
 
 
 def get_positional_radar(days: int = 5):
-    """
-    For each symbol, compare OI and price over last N trading days.
-    Returns trend direction (rising/falling) and % change for each.
-    Signals: LONG_BUILDUP, SHORT_BUILDUP, SHORT_COVERING, LONG_UNWINDING
-    """
     supabase = get_supabase()
     today = datetime.now(timezone.utc).date()
 
-    # ── Step 1: Find last N+1 trading dates ──────────────────────────────────
-    # We need N days of change so we need N+1 data points
+    # Find last N+1 trading dates
     trading_dates = []
-    for i in range(60):  # look back up to 60 calendar days
+    for i in range(90):
         d = (today - timedelta(days=i)).isoformat()
         check = supabase.from_("oi_snapshots")\
             .select("timestamp")\
@@ -49,17 +49,13 @@ def get_positional_radar(days: int = 5):
     if len(trading_dates) < 2:
         return {"error": "Not enough trading days data", "results": []}
 
-    # Most recent first → reverse for chronological order
-    trading_dates = list(reversed(trading_dates))
-    # We use last N+1 dates: index 0 = oldest, index -1 = today
-    analysis_dates = trading_dates[-(days + 1):]
+    analysis_dates = list(reversed(trading_dates[:days + 1]))
 
-    # ── Step 2: Get EOD OI for each date (one timestamp per day) ─────────────
-    # {date -> {symbol -> total_oi}}
-    oi_by_date: dict = {}
+    oi_by_date:  dict = {}
+    vol_by_date: dict = {}
+    cmp_by_date: dict = {}
 
     for d in analysis_dates:
-        # Get last timestamp of the day (EOD snapshot)
         ts_q = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
@@ -73,31 +69,28 @@ def get_positional_radar(days: int = 5):
 
         eod_ts = ts_q.data[0]["timestamp"]
 
-        # Fetch total OI per symbol at EOD
-        oi_q = []
-        for offset in range(0, 50000, 1000):
+        raw = []
+        for offset in range(0, 100000, 1000):
             batch = supabase.from_("oi_snapshots")\
-                .select("symbol, oi")\
+                .select("symbol, oi, volume")\
                 .eq("timestamp", eod_ts)\
                 .range(offset, offset + 999).execute()
             if not batch.data:
                 break
-            oi_q.extend(batch.data)
+            raw.extend(batch.data)
             if len(batch.data) < 1000:
                 break
 
-        sym_oi: dict = {}
-        for r in oi_q:
+        sym_oi:  dict = {}
+        sym_vol: dict = {}
+        for r in raw:
             sym = r["symbol"]
-            sym_oi[sym] = sym_oi.get(sym, 0) + (r["oi"] or 0)
+            sym_oi[sym]  = sym_oi.get(sym, 0)  + (r["oi"]     or 0)
+            sym_vol[sym] = sym_vol.get(sym, 0) + (r["volume"] or 0)
 
-        oi_by_date[d] = sym_oi
+        oi_by_date[d]  = sym_oi
+        vol_by_date[d] = sym_vol
 
-    # ── Step 3: Get EOD CMP for each date ────────────────────────────────────
-    # {date -> {symbol -> cmp}}
-    cmp_by_date: dict = {}
-
-    for d in analysis_dates:
         cmp_q = supabase.from_("cmp_prices")\
             .select("symbol, cmp")\
             .gte("timestamp", f"{d}T00:00:00+00:00")\
@@ -113,152 +106,128 @@ def get_positional_radar(days: int = 5):
                 seen.add(r["symbol"])
         cmp_by_date[d] = day_cmp
 
-    # ── Step 4: Build daily OI and price series per symbol ───────────────────
-    results = []
     available_dates = [d for d in analysis_dates if d in oi_by_date]
-
     if len(available_dates) < 2:
         return {"error": "Insufficient data points", "results": []}
 
+    results = []
+
     for sym in SYMBOLS:
-        # Build series
         oi_series  = []
+        vol_series = []
         cmp_series = []
         date_labels = []
 
         for d in available_dates:
             oi_val  = oi_by_date.get(d, {}).get(sym, 0)
+            vol_val = vol_by_date.get(d, {}).get(sym, 0)
             cmp_val = cmp_by_date.get(d, {}).get(sym, 0)
-            if oi_val > 0:
+            if oi_val > 0 and cmp_val > 0:
                 oi_series.append(oi_val)
+                vol_series.append(vol_val)
                 cmp_series.append(cmp_val)
                 date_labels.append(d)
 
         if len(oi_series) < 2:
             continue
 
-        # ── OI trend ─────────────────────────────────────────────────────────
-        oi_start  = oi_series[0]
-        oi_end    = oi_series[-1]
-        oi_chg_pct = round((oi_end - oi_start) / oi_start * 100, 2) if oi_start > 0 else 0
+        actual_days = len(oi_series) - 1
 
-        # Count how many consecutive days OI was rising
-        oi_rising_days = 0
-        for i in range(len(oi_series) - 1, 0, -1):
-            if oi_series[i] > oi_series[i-1]:
-                oi_rising_days += 1
-            else:
-                break
+        oi_chg_pct  = round((oi_series[-1]  - oi_series[0])  / oi_series[0]  * 100, 2) if oi_series[0]  > 0 else 0
+        vol_chg_pct = round((vol_series[-1] - vol_series[0]) / vol_series[0] * 100, 2) if vol_series[0] > 0 else 0
+        cmp_chg_pct = round((cmp_series[-1] - cmp_series[0]) / cmp_series[0] * 100, 2) if cmp_series[0] > 0 else 0
 
-        oi_falling_days = 0
-        for i in range(len(oi_series) - 1, 0, -1):
-            if oi_series[i] < oi_series[i-1]:
-                oi_falling_days += 1
-            else:
-                break
+        oi_consec_up   = count_consecutive(oi_series,  'up')
+        oi_consec_down = count_consecutive(oi_series,  'down')
+        vol_consec_up  = count_consecutive(vol_series, 'up')
+        cmp_consec_up  = count_consecutive(cmp_series, 'up')
+        cmp_consec_down= count_consecutive(cmp_series, 'down')
 
-        # ── Price trend ───────────────────────────────────────────────────────
-        cmp_start = cmp_series[0]
-        cmp_end   = cmp_series[-1]
-        cmp_chg_pct = round((cmp_end - cmp_start) / cmp_start * 100, 2) if cmp_start > 0 else 0
-
-        price_rising_days = 0
-        for i in range(len(cmp_series) - 1, 0, -1):
-            if cmp_series[i] > cmp_series[i-1]:
-                price_rising_days += 1
-            else:
-                break
-
-        price_falling_days = 0
-        for i in range(len(cmp_series) - 1, 0, -1):
-            if cmp_series[i] < cmp_series[i-1]:
-                price_falling_days += 1
-            else:
-                break
-
-        # ── Signal classification ─────────────────────────────────────────────
-        oi_rising   = oi_chg_pct > 1.0
-        oi_falling  = oi_chg_pct < -1.0
-        price_rising  = cmp_chg_pct > 0.5
-        price_falling = cmp_chg_pct < -0.5
+        oi_rising    = oi_chg_pct  >  2.0
+        oi_falling   = oi_chg_pct  < -2.0
+        vol_rising   = vol_chg_pct >  5.0
+        price_rising = cmp_chg_pct >  0.5
+        price_falling= cmp_chg_pct < -0.5
 
         if oi_rising and price_rising:
-            signal      = "LONG_BUILDUP"
-            signal_desc = "OI + price both rising — long positions being built"
-            bias        = "BULLISH"
-            strength    = min(oi_rising_days, price_rising_days)
+            signal = "LONG_BUILDUP"
+            bias   = "BULLISH"
+            consec = min(oi_consec_up, cmp_consec_up)
         elif oi_rising and price_falling:
-            signal      = "SHORT_BUILDUP"
-            signal_desc = "OI rising, price falling — short positions being built"
-            bias        = "BEARISH"
-            strength    = min(oi_rising_days, price_falling_days)
+            signal = "SHORT_BUILDUP"
+            bias   = "BEARISH"
+            consec = min(oi_consec_up, cmp_consec_down)
         elif oi_falling and price_rising:
-            signal      = "SHORT_COVERING"
-            signal_desc = "OI falling, price rising — shorts being covered"
-            bias        = "BULLISH"
-            strength    = min(oi_falling_days, price_rising_days)
+            signal = "SHORT_COVERING"
+            bias   = "BULLISH"
+            consec = min(oi_consec_down, cmp_consec_up)
         elif oi_falling and price_falling:
-            signal      = "LONG_UNWINDING"
-            signal_desc = "OI falling, price falling — longs being exited"
-            bias        = "BEARISH"
-            strength    = min(oi_falling_days, price_falling_days)
+            signal = "LONG_UNWINDING"
+            bias   = "BEARISH"
+            consec = min(oi_consec_down, cmp_consec_down)
         else:
-            signal      = "SIDEWAYS"
-            signal_desc = "No clear directional OI trend"
-            bias        = "NEUTRAL"
-            strength    = 0
+            continue
 
-        if signal == "SIDEWAYS":
-            continue  # Skip neutral — not actionable for positional
+        if consec >= max(2, actual_days - 1):
+            conviction = "HIGH"
+        elif consec >= 2:
+            conviction = "MEDIUM"
+        else:
+            conviction = "LOW"
 
-        # Consecutive days score — higher = stronger signal
-        conviction = "HIGH" if strength >= days - 1 else "MEDIUM" if strength >= 2 else "LOW"
+        triple_confirm = (
+            signal == "LONG_BUILDUP" and
+            vol_rising and
+            vol_consec_up >= 2
+        )
 
         results.append({
-            "symbol":            sym,
-            "is_index":          sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
-            "signal":            signal,
-            "signal_desc":       signal_desc,
-            "bias":              bias,
-            "conviction":        conviction,
-            "strength_days":     strength,        # consecutive days signal held
-            "oi_chg_pct":        oi_chg_pct,      # % OI change over period
-            "price_chg_pct":     cmp_chg_pct,     # % price change over period
-            "oi_rising_days":    oi_rising_days,
-            "price_rising_days": price_rising_days,
-            "oi_series":         [round(x/100000, 1) for x in oi_series],  # in Lakhs
-            "cmp_series":        cmp_series,
-            "date_labels":       date_labels,
-            "cmp":               cmp_end,
-            "oi_now":            oi_end,
-            "oi_start":          oi_start,
-            "days_analyzed":     len(oi_series),
+            "symbol":          sym,
+            "is_index":        sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "signal":          signal,
+            "bias":            bias,
+            "conviction":      conviction,
+            "consec_days":     consec,
+            "actual_days":     actual_days,
+            "triple_confirm":  triple_confirm,
+            "oi_chg_pct":      oi_chg_pct,
+            "vol_chg_pct":     vol_chg_pct,
+            "cmp_chg_pct":     cmp_chg_pct,
+            "oi_consec_up":    oi_consec_up,
+            "oi_consec_down":  oi_consec_down,
+            "vol_consec_up":   vol_consec_up,
+            "cmp_consec_up":   cmp_consec_up,
+            "cmp_consec_down": cmp_consec_down,
+            "oi_series":       [round(x / 100000, 1) for x in oi_series],
+            "vol_series":      [round(x / 100000, 1) for x in vol_series],
+            "cmp_series":      cmp_series,
+            "date_labels":     date_labels,
+            "cmp":             cmp_series[-1],
+            "oi_now":          oi_series[-1],
+            "vol_now":         vol_series[-1],
         })
 
-    # Sort: conviction HIGH first, then by absolute OI change
-    conviction_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
     results.sort(key=lambda x: (
-        conviction_order[x["conviction"]],
+        0 if x["triple_confirm"] else 1,
+        {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["conviction"]],
         -abs(x["oi_chg_pct"])
     ))
 
-    # Summary stats
-    long_buildup   = sum(1 for r in results if r["signal"] == "LONG_BUILDUP")
-    short_buildup  = sum(1 for r in results if r["signal"] == "SHORT_BUILDUP")
-    short_covering = sum(1 for r in results if r["signal"] == "SHORT_COVERING")
-    long_unwinding = sum(1 for r in results if r["signal"] == "LONG_UNWINDING")
-    high_conv      = sum(1 for r in results if r["conviction"] == "HIGH")
+    summary = {
+        "long_buildup":   sum(1 for r in results if r["signal"] == "LONG_BUILDUP"),
+        "short_buildup":  sum(1 for r in results if r["signal"] == "SHORT_BUILDUP"),
+        "short_covering": sum(1 for r in results if r["signal"] == "SHORT_COVERING"),
+        "long_unwinding": sum(1 for r in results if r["signal"] == "LONG_UNWINDING"),
+        "high_conviction":sum(1 for r in results if r["conviction"] == "HIGH"),
+        "triple_confirm": sum(1 for r in results if r["triple_confirm"]),
+    }
 
     return {
         "days":           days,
         "dates_analyzed": available_dates,
+        "from_date":      available_dates[0]  if available_dates else "",
+        "to_date":        available_dates[-1] if available_dates else "",
         "total":          len(results),
-        "summary": {
-            "long_buildup":   long_buildup,
-            "short_buildup":  short_buildup,
-            "short_covering": short_covering,
-            "long_unwinding": long_unwinding,
-            "high_conviction": high_conv,
-        },
-        "results": results,
+        "summary":        summary,
+        "results":        results,
     }
