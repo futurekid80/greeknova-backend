@@ -7,3 +7,4 @@ apscheduler
 requests
 pyotp
 pytz
+anthropic>=0.20.0
