@@ -264,3 +264,14 @@ def relative_strength(benchmark: str = "NIFTY"):
 def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
     from api.options_jungle import get_options_jungle
     return get_options_jungle(oi_threshold, vol_threshold, date)
+# Add these routes to main.py
+
+@app.get("/iv-analysis")
+def iv_analysis_all(date: str = None):
+    from api.iv_analysis import get_iv_analysis
+    return get_iv_analysis(symbol=None, date=date)
+
+@app.get("/iv-analysis/{symbol}")
+def iv_analysis_symbol(symbol: str, date: str = None):
+    from api.iv_analysis import get_iv_analysis
+    return get_iv_analysis(symbol=symbol.upper(), date=date)
