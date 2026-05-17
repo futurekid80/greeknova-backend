@@ -102,6 +102,21 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
     all_strikes_raw = sorted(set(list(ce_oi.keys()) + list(pe_oi.keys())))
 
+    # ── Get CMP for ATM ───────────────────────────────────────────────────────
+    cmp = None
+    try:
+        cmp_q = supabase.from_("cmp_prices")\
+            .select("cmp")\
+            .eq("symbol", symbol)\
+            .gte("timestamp", f"{date}T00:00:00+00:00")\
+            .lt("timestamp",  f"{date}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1).execute()
+        if cmp_q.data:
+            cmp = float(cmp_q.data[0]["cmp"])
+    except:
+        pass
+
     # ── Filter to meaningful strike range ─────────────────────────────────────
     # Keep only strikes with OI on BOTH sides (have both CE and PE activity)
     # AND within ±20% of CMP to remove far OTM noise
@@ -128,20 +143,6 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     if not all_strikes:
         return {"error": "No strike data"}
 
-    # ── Get CMP for ATM ───────────────────────────────────────────────────────
-    cmp = None
-    try:
-        cmp_q = supabase.from_("cmp_prices")\
-            .select("cmp")\
-            .eq("symbol", symbol)\
-            .gte("timestamp", f"{date}T00:00:00+00:00")\
-            .lt("timestamp",  f"{date}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(1).execute()
-        if cmp_q.data:
-            cmp = float(cmp_q.data[0]["cmp"])
-    except:
-        pass
 
     atm_strike = min(all_strikes, key=lambda s: abs(s - cmp)) if cmp else None
 
