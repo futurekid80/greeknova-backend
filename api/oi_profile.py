@@ -84,7 +84,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
     active_expiry = expiry or (expiries[0] if expiries else None)
 
-    # Filter to active expiry
+    # Filter to active expiry strictly
     if active_expiry:
         all_rows = [r for r in all_rows if r["expiry"] == active_expiry]
 
@@ -100,7 +100,30 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         else:
             pe_oi[strike] = pe_oi.get(strike, 0) + oi
 
-    all_strikes = sorted(set(list(ce_oi.keys()) + list(pe_oi.keys())))
+    all_strikes_raw = sorted(set(list(ce_oi.keys()) + list(pe_oi.keys())))
+
+    # ── Filter to meaningful strike range ─────────────────────────────────────
+    # Keep only strikes with OI on BOTH sides (have both CE and PE activity)
+    # AND within ±20% of CMP to remove far OTM noise
+    # If no CMP available, use OI-based filtering (keep strikes where total OI > 1% of max)
+
+    if cmp and cmp > 0:
+        lower_bound = cmp * 0.80
+        upper_bound = cmp * 1.20
+        all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
+        # Fallback: if filter is too aggressive, expand range
+        if len(all_strikes) < 10:
+            lower_bound = cmp * 0.75
+            upper_bound = cmp * 1.25
+            all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
+    else:
+        # No CMP — filter by OI significance (keep strikes above 1% of max total OI)
+        max_total_raw = max(
+            (ce_oi.get(s, 0) + pe_oi.get(s, 0)) for s in all_strikes_raw
+        ) if all_strikes_raw else 1
+        threshold = max_total_raw * 0.01
+        all_strikes = [s for s in all_strikes_raw
+                       if (ce_oi.get(s, 0) + pe_oi.get(s, 0)) >= threshold]
 
     if not all_strikes:
         return {"error": "No strike data"}
@@ -231,13 +254,20 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
                 day_pe[strike] = day_pe.get(strike, 0) + oi
 
         if day_ce and day_pe:
-            wall_migration.append({
-                "date":     d,
-                "ce_wall":  max(day_ce, key=day_ce.get),
-                "pe_wall":  max(day_pe, key=day_pe.get),
-                "ce_wall_oi": day_ce[max(day_ce, key=day_ce.get)],
-                "pe_wall_oi": day_pe[max(day_pe, key=day_pe.get)],
-            })
+            # Filter to same ±20% CMP range for consistency
+            if cmp and cmp > 0:
+                lo, hi = cmp * 0.80, cmp * 1.20
+                day_ce = {k: v for k, v in day_ce.items() if lo <= k <= hi}
+                day_pe = {k: v for k, v in day_pe.items() if lo <= k <= hi}
+
+            if day_ce and day_pe:
+                wall_migration.append({
+                    "date":       d,
+                    "ce_wall":    max(day_ce, key=day_ce.get),
+                    "pe_wall":    max(day_pe, key=day_pe.get),
+                    "ce_wall_oi": day_ce[max(day_ce, key=day_ce.get)],
+                    "pe_wall_oi": day_pe[max(day_pe, key=day_pe.get)],
+                })
 
     wall_migration.reverse()  # chronological order
 
