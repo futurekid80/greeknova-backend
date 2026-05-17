@@ -123,13 +123,13 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     # If no CMP available, use OI-based filtering (keep strikes where total OI > 1% of max)
 
     if cmp and cmp > 0:
-        lower_bound = cmp * 0.80
-        upper_bound = cmp * 1.20
+        lower_bound = cmp * 0.90
+        upper_bound = cmp * 1.10
         all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
         # Fallback: if filter is too aggressive, expand range
         if len(all_strikes) < 10:
-            lower_bound = cmp * 0.75
-            upper_bound = cmp * 1.25
+            lower_bound = cmp * 0.85
+            upper_bound = cmp * 1.15
             all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
     else:
         # No CMP — filter by OI significance (keep strikes above 1% of max total OI)
@@ -257,7 +257,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         if day_ce and day_pe:
             # Filter to same ±20% CMP range for consistency
             if cmp and cmp > 0:
-                lo, hi = cmp * 0.80, cmp * 1.20
+                lo, hi = cmp * 0.90, cmp * 1.10
                 day_ce = {k: v for k, v in day_ce.items() if lo <= k <= hi}
                 day_pe = {k: v for k, v in day_pe.items() if lo <= k <= hi}
 
