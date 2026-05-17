@@ -316,3 +316,10 @@ def ask_context_default():
 def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
+
+# Add to main.py
+
+@app.get("/oi-profile/{symbol}")
+def oi_profile(symbol: str, date: str = None, expiry: str = None):
+    from api.oi_profile import get_oi_profile
+    return get_oi_profile(symbol=symbol, date=date, expiry=expiry)
