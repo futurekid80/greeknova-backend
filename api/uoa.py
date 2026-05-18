@@ -49,35 +49,50 @@ def get_uoa(date: str = None):
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     live = is_market_hours()
 
-    # ── Get ALL distinct timestamps for today ────────────────────────────────
-    ts_result = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .lt("timestamp",  f"{today}T23:59:59+00:00")\
-        .order("timestamp", desc=False)\
-        .limit(500)\
-        .execute()
+    # ── Get ALL distinct timestamps via pagination ────────────────────────────
+    # NIFTY has ~300 rows per snapshot so must paginate to get all timestamps
+    all_ts_rows = []
+    for offset in range(0, 50000, 1000):
+        batch = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .lt("timestamp",  f"{today}T23:59:59+00:00")\
+            .order("timestamp", desc=False)\
+            .range(offset, offset + 999)\
+            .execute()
+        if not batch.data:
+            break
+        all_ts_rows.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
 
-    timestamps = sorted(set(r["timestamp"] for r in ts_result.data))
+    timestamps = sorted(set(r["timestamp"] for r in all_ts_rows))
 
     # Fallback to last available day
     if len(timestamps) < 2:
-        fallback = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .order("timestamp", desc=True)\
-            .limit(200)\
-            .execute()
-        timestamps = sorted(set(r["timestamp"] for r in fallback.data))
+        fallback_rows = []
+        for offset in range(0, 50000, 1000):
+            batch = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", "NIFTY")\
+                .order("timestamp", desc=True)\
+                .range(offset, offset + 999)\
+                .execute()
+            if not batch.data:
+                break
+            fallback_rows.extend(batch.data)
+            if len(batch.data) < 1000:
+                break
+        timestamps = sorted(set(r["timestamp"] for r in fallback_rows))
 
     if len(timestamps) < 2:
         return {"signals": [], "total": 0}
 
-    # ── A+B snapshot selection ────────────────────────────────────────────────
-    ts_open  = timestamps[0]
-    ts_new   = timestamps[-1]
-    ts_30min = timestamps[max(0, len(timestamps) - 7)]
+    # ── Snapshot selection ────────────────────────────────────────────────────
+    ts_open  = timestamps[0]   # first capture of day = 9:15 AM
+    ts_new   = timestamps[-1]  # latest capture
+    ts_30min = timestamps[max(0, len(timestamps) - 7)]  # ~30 mins ago
 
     # ── Minutes to close ──────────────────────────────────────────────────────
     now_utc = datetime.now(timezone.utc)
@@ -111,6 +126,7 @@ def get_uoa(date: str = None):
     for offset in range(0, 10000, 1000):
         batch = supabase.from_("cmp_prices")\
             .select("*")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
             .order("timestamp", desc=True)\
             .range(offset, offset + 999)\
             .execute()
@@ -128,15 +144,12 @@ def get_uoa(date: str = None):
             seen_cmp.add(c["symbol"])
 
     # ── Day high for underlying stock ─────────────────────────────────────────
-    # Option B: Kite OHLC during market hours (accurate)
-    # Fallback: max(cmp) from today's cmp_prices snapshots
     day_high_map: dict = {}
 
     if live:
         try:
             from services.kite_auth import get_kite_client
             kite = get_kite_client()
-            # Get unique symbols in UOA candidates
             candidate_syms = list(set(r["symbol"] for r in new_data))
             nse_keys = [ALL_NSE_MAP[s] for s in candidate_syms if s in ALL_NSE_MAP]
             if nse_keys:
@@ -148,7 +161,6 @@ def get_uoa(date: str = None):
         except Exception as e:
             print(f"[UOA] Kite OHLC failed, using cmp fallback: {e}")
 
-    # Fallback: compute day high from today's cmp_prices
     if not day_high_map:
         try:
             cmp_today = supabase.from_("cmp_prices")\
@@ -168,7 +180,6 @@ def get_uoa(date: str = None):
     open_map  = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in open_data}
     min30_map = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in min30_data}
 
-    # ── Avg vol from 3 snapshots only ─────────────────────────────────────────
     avg_vol: dict = {}
     for key in set(list(open_map.keys()) + list(min30_map.keys())):
         vols = []
@@ -204,31 +215,26 @@ def get_uoa(date: str = None):
         if new_vol < 100000:
             continue
 
-        # ── A: Price direction — open vs now ─────────────────────────────────
         ltp_chg_from_open = ((new_ltp - open_ltp) / open_ltp * 100) if open_ltp > 0 else 0
         price_rising  = ltp_chg_from_open > 2.0
         price_falling = ltp_chg_from_open < -2.0
 
-        # ── B: OI momentum — 30 mins ago vs now ──────────────────────────────
         oi_chg_30min = ((new_oi - min30_oi) / min30_oi * 100) if min30_oi > 0 else 0
         oi_rising    = oi_chg_30min > 2.0
         oi_falling   = oi_chg_30min < -2.0
 
-        # ── Day high proximity for underlying stock ───────────────────────────
         stock_day_high = day_high_map.get(sym, 0)
         at_day_high = False
         day_high_pct = None
         if stock_day_high > 0 and cmp > 0:
             day_high_pct = round((stock_day_high - cmp) / cmp * 100, 2)
-            at_day_high = day_high_pct <= 0.5 and opt_type == 'CE'  # within 0.5% of day high
+            at_day_high = day_high_pct <= 0.5 and opt_type == 'CE'
 
-        # Volume metrics
         avg = avg_vol.get(key, new_vol)
         vol_ratio    = new_vol / avg if avg > 0 else 1
         vol_oi_ratio = new_vol / new_oi if new_oi > 0 else 0
         vol_chg_30m  = ((new_vol - min30_vol) / min30_vol * 100) if min30_vol > 0 else 0
 
-        # OTM
         if cmp > 0:
             dist_pct = ((strike - cmp) / cmp * 100)
             is_otm   = (opt_type == 'CE' and strike > cmp) or (opt_type == 'PE' and strike < cmp)
@@ -237,7 +243,6 @@ def get_uoa(date: str = None):
             otm_pct = 0
             is_otm  = False
 
-        # ── Scoring ───────────────────────────────────────────────────────────
         score = 0
         if vol_ratio > 6:      score += 2
         elif vol_ratio > 4:    score += 1
@@ -245,14 +250,12 @@ def get_uoa(date: str = None):
         elif vol_oi_ratio > 2: score += 1
         if otm_pct > 3 and new_vol > 200000: score += 1
         if abs(oi_chg_30min) > 10 and vol_chg_30m > 20: score += 1
-        # FIXED — day high bonus only for CE, put writing bonus for PE
         if at_day_high and oi_rising and opt_type == 'CE': score += 1
-        if opt_type == 'PE' and oi_rising and price_falling: score += 1  # put writing bonus
+        if opt_type == 'PE' and oi_rising and price_falling: score += 1
 
         if score < 3:
             continue
 
-        # ── Signal classification ─────────────────────────────────────────────
         if oi_rising and price_rising:
             if opt_type == 'CE':
                 signal_type = "LONG_BUILDUP"
@@ -262,7 +265,6 @@ def get_uoa(date: str = None):
                 signal_type = "SHORT_BUILDUP"
                 signal_desc = "PE OI building last 30 mins · price rising from open · put accumulation observed"
                 bias = "BEARISH"
-
         elif oi_rising and price_falling:
             if opt_type == 'CE':
                 signal_type = "CALL_WRITING"
@@ -272,7 +274,6 @@ def get_uoa(date: str = None):
                 signal_type = "PUT_WRITING"
                 signal_desc = "PE OI rising · price falling from open · put writer activity observed"
                 bias = "BULLISH"
-
         elif oi_falling and price_rising:
             if opt_type == 'CE':
                 signal_type = "SHORT_COVERING"
@@ -282,7 +283,6 @@ def get_uoa(date: str = None):
                 signal_type = "LONG_UNWINDING"
                 signal_desc = "PE OI reducing · price rising from open · put long positions exiting"
                 bias = "BULLISH"
-
         elif oi_falling and price_falling:
             if opt_type == 'CE':
                 signal_type = "LONG_UNWINDING"
@@ -292,7 +292,6 @@ def get_uoa(date: str = None):
                 signal_type = "SHORT_COVERING"
                 signal_desc = "PE OI reducing · price falling from open · put short positions unwinding"
                 bias = "BEARISH"
-
         elif vol_oi_ratio > 2 and not oi_rising and not oi_falling:
             if price_rising:
                 signal_type = "BUYER_DOMINATED"
@@ -304,12 +303,10 @@ def get_uoa(date: str = None):
                 bias = "BEARISH" if opt_type == "CE" else "BULLISH"
             else:
                 continue
-
         elif otm_pct > 3 and new_vol > 200000:
             signal_type = "FAR_OTM_ACTIVITY"
             signal_desc = f"{otm_pct:.1f}% OTM · heavy volume · possible hedging or speculative interest"
             bias = "BULLISH" if opt_type == "PE" else "BEARISH"
-
         elif vol_ratio > 4 and (price_rising or price_falling):
             signal_type = "VOLUME_SURGE"
             signal_desc = f"{vol_ratio:.1f}x average volume · significant activity vs baseline"
@@ -317,11 +314,9 @@ def get_uoa(date: str = None):
                 (opt_type == "CE" and price_rising) or
                 (opt_type == "PE" and price_falling)
             ) else "BEARISH"
-
         else:
             continue
 
-        # Time tag
         if is_very_near_close:
             time_tag = "market_closing"
         elif is_near_close:
@@ -359,9 +354,21 @@ def get_uoa(date: str = None):
 
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
 
+    # IST display times — use first and last snapshot of day
+    def to_ist(ts):
+        try:
+            clean = ts.split('+')[0].split('Z')[0]
+            dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+            ist = dt.hour * 60 + dt.minute + 330
+            return f"{(ist//60)%24:02d}:{ist%60:02d}"
+        except:
+            return ts[11:16]
+
     return {
         "timestamp":       ts_new,
         "open_timestamp":  ts_open,
+        "open_time":       to_ist(ts_open),   # 09:15
+        "close_time":      to_ist(ts_new),    # latest
         "date":            today,
         "total":           len(uoa_signals),
         "signals":         uoa_signals[:50],
