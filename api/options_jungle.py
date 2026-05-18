@@ -1,36 +1,57 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-    # ── Get timestamps via NIFTY ──────────────────────────────────────────────
-    ts_result = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .lt("timestamp",  f"{today}T23:59:59+00:00")\
-        .order("timestamp", desc=False)\
-        .execute()
-
-    timestamps = sorted(set(r["timestamp"] for r in ts_result.data))
-
-    if len(timestamps) < 2:
-        fallback = supabase.from_("oi_snapshots")\
+    # ── Get distinct timestamps via paginated fetch ───────────────────────────
+    # Must paginate because NIFTY has ~300 rows per snapshot × many snapshots
+    all_ts_rows = []
+    for offset in range(0, 50000, 1000):
+        batch = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
-            .order("timestamp", desc=True)\
-            .limit(100)\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .lt("timestamp",  f"{today}T23:59:59+00:00")\
+            .order("timestamp", desc=False)\
+            .range(offset, offset + 999)\
             .execute()
-        timestamps = sorted(set(r["timestamp"] for r in fallback.data), reverse=True)
+        if not batch.data:
+            break
+        all_ts_rows.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+
+    timestamps = sorted(set(r["timestamp"] for r in all_ts_rows))
+
+    if len(timestamps) < 2:
+        # Fallback — try last 2 days
+        fallback_rows = []
+        for offset in range(0, 50000, 1000):
+            batch = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", "NIFTY")\
+                .order("timestamp", desc=True)\
+                .range(offset, offset + 999)\
+                .execute()
+            if not batch.data:
+                break
+            fallback_rows.extend(batch.data)
+            if len(batch.data) < 1000:
+                break
+        timestamps = sorted(set(r["timestamp"] for r in fallback_rows))
         if len(timestamps) < 2:
             return {"error": "Need at least 2 snapshots", "oi_spikes": [], "vol_spikes": []}
-        ts_new = timestamps[0]
-        ts_old = timestamps[1]
-    else:
-        ts_old = timestamps[-2]
-        ts_new = timestamps[-1]
+
+    # Pick latest snapshot vs one ~5 minutes before
+    ts_new = timestamps[-1]
+    # Find snapshot closest to 5 minutes before ts_new
+    ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
+    target_old = ts_new_dt - timedelta(minutes=5)
+    ts_old = min(timestamps[:-1], key=lambda t: abs(
+        datetime.fromisoformat(t.replace('+00:00', '')).replace(tzinfo=timezone.utc) - target_old
+    ))
 
     # ── Paginated snapshot fetch ───────────────────────────────────────────────
     def fetch_snapshot(ts):
@@ -56,6 +77,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
     for offset in range(0, 10000, 1000):
         batch = supabase.from_("cmp_prices")\
             .select("*")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
             .order("timestamp", desc=True)\
             .range(offset, offset + 999)\
             .execute()
@@ -110,7 +132,6 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
         vol_pct    = round(((new_vol - old_vol) / old_vol * 100), 2) if old_vol > 10000 else 0
         ltp_chg    = round(((new_ltp - old_ltp) / old_ltp * 100), 2) if old_ltp > 0 else 0
 
-        # OTM calculation
         strike   = row["strike"]
         opt_type = row["option_type"]
         if cmp > 0:
@@ -138,7 +159,6 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
         # ── OI Spike ──────────────────────────────────────────────────────────
         if old_oi >= 1000 and abs(oi_pct) >= oi_threshold:
             direction = "BUILD" if oi_change > 0 else "UNWIND"
-            # Interpret using LTP direction
             if ltp_chg > 0.5 and oi_pct > 0:
                 interp = "LONG_BUILDUP" if opt_type == "CE" else "SHORT_BUILDUP"
             elif ltp_chg < -0.5 and oi_pct > 0:
@@ -152,12 +172,12 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
 
             oi_spikes.append({
                 **base,
-                "old_oi":    old_oi,
-                "new_oi":    new_oi,
-                "oi_change": oi_change,
-                "oi_pct":    oi_pct,
-                "vol_change": vol_change,
-                "direction": direction,
+                "old_oi":         old_oi,
+                "new_oi":         new_oi,
+                "oi_change":      oi_change,
+                "oi_pct":         oi_pct,
+                "vol_change":     vol_change,
+                "direction":      direction,
                 "interpretation": interp,
             })
 
