@@ -330,3 +330,10 @@ def oi_profile(symbol: str, date: str = None, expiry: str = None):
 def vacuum_scanner(max_distance_pct: float = 10.0):
     from api.vacuum_scanner import get_vacuum_scanner
     return get_vacuum_scanner(max_distance_pct=max_distance_pct)
+
+# Add to main.py
+
+@app.get("/oi-heatmap/{symbol}")
+def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
+    from api.oi_heatmap import get_oi_heatmap
+    return get_oi_heatmap(symbol=symbol, date=date, expiry=expiry)
