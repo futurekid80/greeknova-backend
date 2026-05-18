@@ -126,8 +126,19 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
         if not all_strikes:
             continue
 
+        # ── Liquidity filter ──────────────────────────────────────────────────
+        # Skip stocks with poor overall options liquidity
+        # Minimum 10 lakh total OI across all strikes = active options market
+        total_oi_all = sum(ce_oi.values()) + sum(pe_oi.values())
+        MIN_TOTAL_OI = 10_00_000  # 10 lakh
+        if total_oi_all < MIN_TOTAL_OI:
+            continue
+
+        # Also skip if max single strike OI is too low (spread stocks)
         max_ce = max(ce_oi.values()) if ce_oi else 1
         max_pe = max(pe_oi.values()) if pe_oi else 1
+        if max_ce < 50_000 and max_pe < 50_000:
+            continue  # No strike has meaningful OI — illiquid
 
         # Vacuum threshold = < 5% of respective max
         vac_ce_thresh = max_ce * 0.05
