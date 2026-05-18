@@ -206,8 +206,8 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
         "date":          today,
         "ts_new":        ts_new,
         "ts_old":        ts_old,
-        "open_time":     to_ist(ts_old),
-        "close_time":    to_ist(ts_new),
+        "open_time":     to_ist(timestamps[0]),   # first capture of day
+        "close_time":    to_ist(timestamps[-1]),  # latest capture of day
         "snapshots":     len(timestamps),
         "oi_threshold":  oi_threshold,
         "vol_threshold": vol_threshold,
