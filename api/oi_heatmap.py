@@ -174,17 +174,25 @@ def get_oi_heatmap(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
     time_labels = [to_ist(ts) for ts in all_timestamps]
 
+    # Latest CMP from last snapshot
+    latest_cmp = None
+    for c in reversed(cmp_series):
+        if c["cmp"]:
+            latest_cmp = round(float(c["cmp"]), 2)
+            break
+
     return {
-        "symbol":        symbol,
-        "date":          date,
-        "expiry":        active_expiry,
-        "expiries":      expiries,
-        "timestamps":    all_timestamps,
-        "time_labels":   time_labels,
-        "strikes":       all_strikes,
-        "ce_data":       ce_data,
-        "pe_data":       pe_data,
-        "cmp_series":    cmp_series,
-        "mid_cmp":       mid_cmp,
+        "symbol":         symbol,
+        "date":           date,
+        "expiry":         active_expiry,
+        "expiries":       expiries,
+        "timestamps":     all_timestamps,
+        "time_labels":    time_labels,
+        "strikes":        all_strikes,
+        "ce_data":        ce_data,
+        "pe_data":        pe_data,
+        "cmp_series":     cmp_series,
+        "mid_cmp":        round(mid_cmp, 2) if mid_cmp else None,
+        "latest_cmp":     latest_cmp,
         "snapshot_count": len(all_timestamps),
     }
