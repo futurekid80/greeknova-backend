@@ -323,3 +323,10 @@ def positional_radar(min_consec: int = 0):
 def oi_profile(symbol: str, date: str = None, expiry: str = None):
     from api.oi_profile import get_oi_profile
     return get_oi_profile(symbol=symbol, date=date, expiry=expiry)
+
+# Add to main.py
+
+@app.get("/vacuum-scanner")
+def vacuum_scanner(max_distance_pct: float = 10.0):
+    from api.vacuum_scanner import get_vacuum_scanner
+    return get_vacuum_scanner(max_distance_pct=max_distance_pct)
