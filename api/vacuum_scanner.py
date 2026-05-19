@@ -15,12 +15,21 @@ SYMBOLS = [
     "HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL",
 ]
 
+# Hard absolute cap — no strike with either side > 1L can be a vacuum
+# regardless of the stock's overall OI scale
+HARD_CAP_PER_SIDE = 1_00_000  # 1 Lakh
+
 
 def get_vacuum_scanner(max_distance_pct: float = 10.0):
     """
     Scan all F&O stocks for vacuum zones near current price.
-    A true vacuum = BOTH CE and PE OI are low at that strike.
-    Uses combined total OI threshold — not separate CE/PE thresholds.
+    Also detects stocks APPROACHING a vacuum zone (within 1% of a vacuum strike).
+
+    Vacuum definition (all three must be true):
+    1. Combined CE+PE OI < 5% of peak combined OI at any strike
+    2. CE alone < 10% of max CE (soft cap)
+    3. PE alone < 10% of max PE (soft cap)
+    4. HARD CAP: neither CE nor PE exceeds 1L individually
     """
     supabase = get_supabase()
 
@@ -40,7 +49,11 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
             break
 
     if not data_date:
-        return {"scan_time": datetime.now(timezone.utc).isoformat(), "data_date": None, "total": 0, "results": []}
+        return {
+            "scan_time": datetime.now(timezone.utc).isoformat(),
+            "data_date": None, "total": 0,
+            "results": [], "approaching": []
+        }
 
     # ── Get latest CMP for all symbols ───────────────────────────────────────
     cmp_rows = supabase.from_("cmp_prices")\
@@ -57,7 +70,8 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
             cmp_map[r["symbol"]] = float(r["cmp"])
             seen.add(r["symbol"])
 
-    results = []
+    results    = []
+    approaching = []
 
     for symbol in SYMBOLS:
         cmp = cmp_map.get(symbol)
@@ -92,9 +106,10 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
         ))
         active_expiry = expiries[0] if expiries else None
 
-        # Fetch OI data — filter to ±max_distance_pct of CMP
-        lower = cmp * (1 - max_distance_pct / 100)
-        upper = cmp * (1 + max_distance_pct / 100)
+        # Fetch OI — wider range (15%) to catch approaching vacuums too
+        fetch_range = max(max_distance_pct, 15.0)
+        lower = cmp * (1 - fetch_range / 100)
+        upper = cmp * (1 + fetch_range / 100)
         all_rows = []
         for offset in range(0, 10000, 1000):
             q = supabase.from_("oi_snapshots")\
@@ -130,9 +145,9 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
         if not all_strikes:
             continue
 
-        # ── Liquidity filter ──────────────────────────────────────────────────
+        # Liquidity filter
         total_oi_all = sum(ce_oi.values()) + sum(pe_oi.values())
-        if total_oi_all < 10_00_000:  # skip illiquid stocks
+        if total_oi_all < 10_00_000:
             continue
 
         max_ce = max(ce_oi.values()) if ce_oi else 1
@@ -140,20 +155,17 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
         if max_ce < 50_000 and max_pe < 50_000:
             continue
 
-        # ── FIXED: Combined OI threshold ──────────────────────────────────────
-        # max combined OI at any single strike in the range
+        # Combined threshold
         max_combined = max(
             (ce_oi.get(s, 0) + pe_oi.get(s, 0)) for s in all_strikes
         )
-
-        # Vacuum = total OI at strike is less than 5% of the peak combined OI
-        # AND neither CE nor PE alone exceeds 10% of its own maximum
-        # This prevents one-sided high OI from passing as vacuum
         vac_combined_thresh = max_combined * 0.05
-        vac_ce_abs_thresh   = max_ce * 0.10   # absolute CE cap
-        vac_pe_abs_thresh   = max_pe * 0.10   # absolute PE cap
+        vac_ce_soft_thresh  = max_ce * 0.10
+        vac_pe_soft_thresh  = max_pe * 0.10
 
-        vacuums = []
+        vacuums    = []
+        near_zones = []  # strikes that are close to being vacuums
+
         for s in all_strikes:
             ce = ce_oi.get(s, 0)
             pe = pe_oi.get(s, 0)
@@ -162,56 +174,86 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
             if total == 0:
                 continue
 
-            # TRUE VACUUM: combined total is tiny AND neither side dominates
+            dist_pct = round((s - cmp) / cmp * 100, 2)
+
+            # ── HARD CAP: either side > 1L = never a vacuum ───────────────────
+            if ce > HARD_CAP_PER_SIDE or pe > HARD_CAP_PER_SIDE:
+                continue
+
+            # ── Soft thresholds ───────────────────────────────────────────────
             is_combined_low = total < vac_combined_thresh
-            is_ce_low       = ce < vac_ce_abs_thresh
-            is_pe_low       = pe < vac_pe_abs_thresh
+            is_ce_low       = ce < vac_ce_soft_thresh
+            is_pe_low       = pe < vac_pe_soft_thresh
             is_vacuum       = is_combined_low and is_ce_low and is_pe_low
 
             if not is_vacuum:
                 continue
 
-            dist_pct = round((s - cmp) / cmp * 100, 2)
-            if abs(dist_pct) > max_distance_pct:
-                continue
+            # Classify into vacuum (within max_distance_pct) or approaching
+            if abs(dist_pct) <= max_distance_pct:
+                vacuums.append({
+                    "strike":    s,
+                    "ce_oi":     ce,
+                    "pe_oi":     pe,
+                    "total_oi":  total,
+                    "dist_pct":  dist_pct,
+                    "direction": "ABOVE" if dist_pct > 0 else "BELOW",
+                })
+            elif abs(dist_pct) <= 15.0:
+                # Within 15% but outside max_distance — approaching zone
+                near_zones.append({
+                    "strike":    s,
+                    "ce_oi":     ce,
+                    "pe_oi":     pe,
+                    "total_oi":  total,
+                    "dist_pct":  dist_pct,
+                    "direction": "ABOVE" if dist_pct > 0 else "BELOW",
+                })
 
-            vacuums.append({
-                "strike":    s,
-                "ce_oi":     ce,
-                "pe_oi":     pe,
-                "total_oi":  total,
-                "dist_pct":  dist_pct,
-                "direction": "ABOVE" if dist_pct > 0 else "BELOW",
+        # Add to results if has vacuums within range
+        if vacuums:
+            vacuums.sort(key=lambda x: abs(x["dist_pct"]))
+            above = [v for v in vacuums if v["direction"] == "ABOVE"]
+            below = [v for v in vacuums if v["direction"] == "BELOW"]
+            results.append({
+                "symbol":        symbol,
+                "cmp":           cmp,
+                "is_index":      symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+                "vacuums":       vacuums,
+                "nearest_above": above[0] if above else None,
+                "nearest_below": below[0] if below else None,
+                "vacuum_count":  len(vacuums),
+                "expiry":        active_expiry,
+                "data_date":     data_date,
+            })
+        elif near_zones:
+            # No vacuum within range but approaching ones exist
+            near_zones.sort(key=lambda x: abs(x["dist_pct"]))
+            nearest = near_zones[0]
+            approaching.append({
+                "symbol":       symbol,
+                "cmp":          cmp,
+                "is_index":     symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+                "nearest_zone": nearest,
+                "all_zones":    near_zones,
+                "expiry":       active_expiry,
+                "data_date":    data_date,
             })
 
-        if not vacuums:
-            continue
-
-        vacuums.sort(key=lambda x: abs(x["dist_pct"]))
-
-        above = [v for v in vacuums if v["direction"] == "ABOVE"]
-        below = [v for v in vacuums if v["direction"] == "BELOW"]
-
-        results.append({
-            "symbol":        symbol,
-            "cmp":           cmp,
-            "is_index":      symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
-            "vacuums":       vacuums,
-            "nearest_above": above[0] if above else None,
-            "nearest_below": below[0] if below else None,
-            "vacuum_count":  len(vacuums),
-            "expiry":        active_expiry,
-            "data_date":     data_date,
-        })
-
+    # Sort results by nearest vacuum distance
     results.sort(key=lambda x: min(
         abs(x["nearest_above"]["dist_pct"]) if x["nearest_above"] else 999,
         abs(x["nearest_below"]["dist_pct"]) if x["nearest_below"] else 999,
     ))
 
+    # Sort approaching by nearest zone distance
+    approaching.sort(key=lambda x: abs(x["nearest_zone"]["dist_pct"]))
+
     return {
-        "scan_time": datetime.now(timezone.utc).isoformat(),
-        "data_date": data_date,
-        "total":     len(results),
-        "results":   results,
+        "scan_time":  datetime.now(timezone.utc).isoformat(),
+        "data_date":  data_date,
+        "total":      len(results),
+        "approaching_total": len(approaching),
+        "results":    results,
+        "approaching": approaching,
     }
