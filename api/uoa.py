@@ -34,8 +34,8 @@ INDEX_NSE_MAP = {
 }
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
 
-MARKET_OPEN_UTC  = 3 * 60 + 45
-MARKET_CLOSE_UTC = 10 * 60 + 0
+MARKET_OPEN_UTC  = 3 * 60 + 45   # 9:15 AM IST
+MARKET_CLOSE_UTC = 10 * 60 + 0   # 3:30 PM IST
 
 def is_market_hours() -> bool:
     now_utc = datetime.now(timezone.utc)
@@ -44,13 +44,20 @@ def is_market_hours() -> bool:
     total = now_utc.hour * 60 + now_utc.minute
     return MARKET_OPEN_UTC <= total <= MARKET_CLOSE_UTC
 
+def is_post_market() -> bool:
+    now_utc = datetime.now(timezone.utc)
+    if now_utc.weekday() >= 5:
+        return True  # Weekend — treat as post-market
+    total = now_utc.hour * 60 + now_utc.minute
+    return total > MARKET_CLOSE_UTC
+
 def get_uoa(date: str = None):
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     live = is_market_hours()
+    post_market = is_post_market()
 
     # ── Get ALL distinct timestamps via pagination ────────────────────────────
-    # NIFTY has ~300 rows per snapshot so must paginate to get all timestamps
     all_ts_rows = []
     for offset in range(0, 50000, 1000):
         batch = supabase.from_("oi_snapshots")\
@@ -90,9 +97,9 @@ def get_uoa(date: str = None):
         return {"signals": [], "total": 0}
 
     # ── Snapshot selection ────────────────────────────────────────────────────
-    ts_open  = timestamps[0]   # first capture of day = 9:15 AM
-    ts_new   = timestamps[-1]  # latest capture
-    ts_30min = timestamps[max(0, len(timestamps) - 7)]  # ~30 mins ago
+    ts_open  = timestamps[0]
+    ts_new   = timestamps[-1]
+    ts_30min = timestamps[max(0, len(timestamps) - 7)]
 
     # ── Minutes to close ──────────────────────────────────────────────────────
     now_utc = datetime.now(timezone.utc)
@@ -143,7 +150,7 @@ def get_uoa(date: str = None):
             cmp_map[c["symbol"]] = c["cmp"]
             seen_cmp.add(c["symbol"])
 
-    # ── Day high for underlying stock ─────────────────────────────────────────
+    # ── Day high map ──────────────────────────────────────────────────────────
     day_high_map: dict = {}
 
     if live:
@@ -157,7 +164,6 @@ def get_uoa(date: str = None):
                 for sym, nse_key in ALL_NSE_MAP.items():
                     if nse_key in ohlc:
                         day_high_map[sym] = ohlc[nse_key]["ohlc"]["high"]
-            print(f"[UOA] Day high from Kite: {len(day_high_map)} symbols")
         except Exception as e:
             print(f"[UOA] Kite OHLC failed, using cmp fallback: {e}")
 
@@ -173,7 +179,6 @@ def get_uoa(date: str = None):
             for r in cmp_today:
                 sym_prices[r["symbol"]].append(float(r["cmp"]))
             day_high_map = {sym: max(prices) for sym, prices in sym_prices.items()}
-            print(f"[UOA] Day high from cmp_prices: {len(day_high_map)} symbols")
         except Exception as e:
             print(f"[UOA] Day high fallback failed: {e}")
 
@@ -317,7 +322,10 @@ def get_uoa(date: str = None):
         else:
             continue
 
-        if is_very_near_close:
+        # ── Time tag — now includes post_market ───────────────────────────────
+        if post_market:
+            time_tag = "post_market"
+        elif is_very_near_close:
             time_tag = "market_closing"
         elif is_near_close:
             time_tag = "positional_only"
@@ -354,7 +362,6 @@ def get_uoa(date: str = None):
 
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
 
-    # IST display times — use first and last snapshot of day
     def to_ist(ts):
         try:
             clean = ts.split('+')[0].split('Z')[0]
@@ -367,11 +374,13 @@ def get_uoa(date: str = None):
     return {
         "timestamp":       ts_new,
         "open_timestamp":  ts_open,
-        "open_time":       to_ist(ts_open),   # 09:15
-        "close_time":      to_ist(ts_new),    # latest
+        "open_time":       to_ist(ts_open),
+        "close_time":      to_ist(ts_new),
         "date":            today,
         "total":           len(uoa_signals),
         "signals":         uoa_signals[:50],
         "snapshot_count":  len(timestamps),
         "mins_to_close":   max(0, mins_to_close),
+        "is_post_market":  post_market,        # NEW — tells frontend market is closed
+        "market_close_time": "15:29",          # last expected snapshot time
     }
