@@ -19,12 +19,13 @@ SYMBOLS = [
 def get_vacuum_scanner(max_distance_pct: float = 10.0):
     """
     Scan all F&O stocks for vacuum zones near current price.
-    Returns stocks with vacuum zones within max_distance_pct of CMP.
+    A true vacuum = BOTH CE and PE OI are low at that strike.
+    Uses combined total OI threshold — not separate CE/PE thresholds.
     """
     supabase = get_supabase()
-    today    = datetime.now(timezone.utc).date().isoformat()
 
-    # ── Find latest EOD timestamp ─────────────────────────────────────────────
+    # ── Find latest data date ─────────────────────────────────────────────────
+    data_date = None
     for i in range(7):
         check = (datetime.now(timezone.utc).date() - timedelta(days=i)).isoformat()
         r = supabase.from_("oi_snapshots")\
@@ -37,6 +38,9 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
         if r.data:
             data_date = check
             break
+
+    if not data_date:
+        return {"scan_time": datetime.now(timezone.utc).isoformat(), "data_date": None, "total": 0, "results": []}
 
     # ── Get latest CMP for all symbols ───────────────────────────────────────
     cmp_rows = supabase.from_("cmp_prices")\
@@ -88,9 +92,9 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
         ))
         active_expiry = expiries[0] if expiries else None
 
-        # Fetch OI data with pagination — filter to ±10% of CMP
-        lower = cmp * 0.90
-        upper = cmp * 1.10
+        # Fetch OI data — filter to ±max_distance_pct of CMP
+        lower = cmp * (1 - max_distance_pct / 100)
+        upper = cmp * (1 + max_distance_pct / 100)
         all_rows = []
         for offset in range(0, 10000, 1000):
             q = supabase.from_("oi_snapshots")\
@@ -127,33 +131,43 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
             continue
 
         # ── Liquidity filter ──────────────────────────────────────────────────
-        # Skip stocks with poor overall options liquidity
-        # Minimum 10 lakh total OI across all strikes = active options market
         total_oi_all = sum(ce_oi.values()) + sum(pe_oi.values())
-        MIN_TOTAL_OI = 10_00_000  # 10 lakh
-        if total_oi_all < MIN_TOTAL_OI:
+        if total_oi_all < 10_00_000:  # skip illiquid stocks
             continue
 
-        # Also skip if max single strike OI is too low (spread stocks)
         max_ce = max(ce_oi.values()) if ce_oi else 1
         max_pe = max(pe_oi.values()) if pe_oi else 1
         if max_ce < 50_000 and max_pe < 50_000:
-            continue  # No strike has meaningful OI — illiquid
+            continue
 
-        # Vacuum threshold = < 5% of respective max
-        vac_ce_thresh = max_ce * 0.05
-        vac_pe_thresh = max_pe * 0.05
+        # ── FIXED: Combined OI threshold ──────────────────────────────────────
+        # max combined OI at any single strike in the range
+        max_combined = max(
+            (ce_oi.get(s, 0) + pe_oi.get(s, 0)) for s in all_strikes
+        )
 
-        # Find vacuum zones near CMP
+        # Vacuum = total OI at strike is less than 5% of the peak combined OI
+        # AND neither CE nor PE alone exceeds 10% of its own maximum
+        # This prevents one-sided high OI from passing as vacuum
+        vac_combined_thresh = max_combined * 0.05
+        vac_ce_abs_thresh   = max_ce * 0.10   # absolute CE cap
+        vac_pe_abs_thresh   = max_pe * 0.10   # absolute PE cap
+
         vacuums = []
         for s in all_strikes:
             ce = ce_oi.get(s, 0)
             pe = pe_oi.get(s, 0)
             total = ce + pe
+
             if total == 0:
                 continue
 
-            is_vacuum = (ce < vac_ce_thresh and pe < vac_pe_thresh)
+            # TRUE VACUUM: combined total is tiny AND neither side dominates
+            is_combined_low = total < vac_combined_thresh
+            is_ce_low       = ce < vac_ce_abs_thresh
+            is_pe_low       = pe < vac_pe_abs_thresh
+            is_vacuum       = is_combined_low and is_ce_low and is_pe_low
+
             if not is_vacuum:
                 continue
 
@@ -162,44 +176,42 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
                 continue
 
             vacuums.append({
-                "strike":   s,
-                "ce_oi":    ce,
-                "pe_oi":    pe,
-                "dist_pct": dist_pct,
+                "strike":    s,
+                "ce_oi":     ce,
+                "pe_oi":     pe,
+                "total_oi":  total,
+                "dist_pct":  dist_pct,
                 "direction": "ABOVE" if dist_pct > 0 else "BELOW",
             })
 
         if not vacuums:
             continue
 
-        # Sort vacuums by proximity
         vacuums.sort(key=lambda x: abs(x["dist_pct"]))
 
-        # Find nearest vacuum above and below
         above = [v for v in vacuums if v["direction"] == "ABOVE"]
         below = [v for v in vacuums if v["direction"] == "BELOW"]
 
         results.append({
-            "symbol":         symbol,
-            "cmp":            cmp,
-            "is_index":       symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
-            "vacuums":        vacuums,
-            "nearest_above":  above[0] if above else None,
-            "nearest_below":  below[0] if below else None,
-            "vacuum_count":   len(vacuums),
-            "expiry":         active_expiry,
-            "data_date":      data_date,
+            "symbol":        symbol,
+            "cmp":           cmp,
+            "is_index":      symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "vacuums":       vacuums,
+            "nearest_above": above[0] if above else None,
+            "nearest_below": below[0] if below else None,
+            "vacuum_count":  len(vacuums),
+            "expiry":        active_expiry,
+            "data_date":     data_date,
         })
 
-    # Sort by nearest vacuum distance
     results.sort(key=lambda x: min(
         abs(x["nearest_above"]["dist_pct"]) if x["nearest_above"] else 999,
         abs(x["nearest_below"]["dist_pct"]) if x["nearest_below"] else 999,
     ))
 
     return {
-        "scan_time":    datetime.now(timezone.utc).isoformat(),
-        "data_date":    data_date,
-        "total":        len(results),
-        "results":      results,
+        "scan_time": datetime.now(timezone.utc).isoformat(),
+        "data_date": data_date,
+        "total":     len(results),
+        "results":   results,
     }
