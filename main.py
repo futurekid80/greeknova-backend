@@ -123,6 +123,14 @@ def run_full_capture():
         if cmp_records:
             supabase.table("cmp_prices").insert(cmp_records).execute()
         print(f"  ✅ Saved {len(records)} OI + {len(cmp_records)} CMP records")
+
+        # ── Run alert engine after every successful capture ────────────────
+        try:
+            from services.alert_engine import run_alert_check
+            run_alert_check()
+        except Exception as ae:
+            print(f"  ⚠️ Alert engine error: {ae}")
+
     except Exception as e: print(f"  ❌ Capture failed: {e}")
 
 scheduler = BackgroundScheduler()
@@ -134,6 +142,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     print("✅ GreekNova backend started")
     print("📸 Full capture every 5 min during market hours")
+    print("🔔 Alert engine: wired into capture cycle")
     yield
     scheduler.shutdown()
 
@@ -155,6 +164,16 @@ def health(): return {"status": "ok"}
 
 @app.get("/capture-now")
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
+
+@app.get("/alerts-test")
+def alerts_test():
+    """Manually trigger alert check — useful for testing"""
+    try:
+        from services.alert_engine import run_alert_check
+        run_alert_check()
+        return {"status": "alert check triggered"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.get("/oi-spikes")
 def oi_spikes(threshold: float = 10.0, date: str = None):
@@ -205,7 +224,7 @@ def auto_refresh_token():
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
-    if now.weekday() >= 5: return          # Skip Saturday and Sunday
+    if now.weekday() >= 5: return
     print(f"🔐 Auto token refresh at {now.strftime('%H:%M IST')}...")
     try:
         import os
@@ -254,17 +273,11 @@ def oi_pulse():
 def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
     from api.options_jungle import get_options_jungle
     return get_options_jungle(oi_threshold, vol_threshold, date)
-    
+
 @app.get("/relative-strength")
 def relative_strength(benchmark: str = "NIFTY"):
     from api.relative_strength import get_relative_strength
     return get_relative_strength(benchmark)
-    
-@app.get("/options-jungle")
-def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
-    from api.options_jungle import get_options_jungle
-    return get_options_jungle(oi_threshold, vol_threshold, date)
-# Add these routes to main.py
 
 @app.get("/iv-analysis")
 def iv_analysis_all(date: str = None):
@@ -276,18 +289,13 @@ def iv_analysis_symbol(symbol: str, date: str = None):
     from api.iv_analysis import get_iv_analysis
     return get_iv_analysis(symbol=symbol.upper(), date=date)
 
-# Add these to main.py — replaces the earlier ask-claude route
-
 @app.post("/ask-claude")
 async def ask_claude(request: dict):
-    """Proxy endpoint — calls Claude API securely from backend"""
     import os
     import anthropic
-
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return {"error": "ANTHROPIC_API_KEY not set in environment"}
-
     try:
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
@@ -310,28 +318,20 @@ def ask_context_default():
     from api.ask_context import get_ask_context
     return get_ask_context("NIFTY")
 
-# Replace existing positional-radar route in main.py
-
 @app.get("/positional-radar")
 def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
-
-# Add to main.py
 
 @app.get("/oi-profile/{symbol}")
 def oi_profile(symbol: str, date: str = None, expiry: str = None):
     from api.oi_profile import get_oi_profile
     return get_oi_profile(symbol=symbol, date=date, expiry=expiry)
 
-# Add to main.py
-
 @app.get("/vacuum-scanner")
 def vacuum_scanner(max_distance_pct: float = 10.0):
     from api.vacuum_scanner import get_vacuum_scanner
     return get_vacuum_scanner(max_distance_pct=max_distance_pct)
-
-# Add to main.py
 
 @app.get("/oi-heatmap/{symbol}")
 def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
