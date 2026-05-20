@@ -1,12 +1,11 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as date_type
 
 def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
     # ── Get distinct timestamps via paginated fetch ───────────────────────────
-    # Must paginate because NIFTY has ~300 rows per snapshot × many snapshots
     all_ts_rows = []
     for offset in range(0, 50000, 1000):
         batch = supabase.from_("oi_snapshots")\
@@ -26,7 +25,6 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
     timestamps = sorted(set(r["timestamp"] for r in all_ts_rows))
 
     if len(timestamps) < 2:
-        # Fallback — try last 2 days
         fallback_rows = []
         for offset in range(0, 50000, 1000):
             batch = supabase.from_("oi_snapshots")\
@@ -44,9 +42,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
         if len(timestamps) < 2:
             return {"error": "Need at least 2 snapshots", "oi_spikes": [], "vol_spikes": []}
 
-    # Pick latest snapshot vs one ~5 minutes before
     ts_new = timestamps[-1]
-    # Find snapshot closest to 5 minutes before ts_new
     ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
     target_old = ts_new_dt - timedelta(minutes=5)
     ts_old = min(timestamps[:-1], key=lambda t: abs(
@@ -69,8 +65,39 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
                 break
         return rows
 
-    new_data = fetch_snapshot(ts_new)
-    old_data = fetch_snapshot(ts_old)
+    new_data_raw = fetch_snapshot(ts_new)
+    old_data_raw = fetch_snapshot(ts_old)
+
+    # ── FIX: Build nearest active expiry map per symbol ───────────────────────
+    # For each symbol, find the nearest expiry >= today
+    # This prevents June expiry LTPs from appearing when May is still active
+    today_str = date_type.today().isoformat()
+
+    nearest_expiry_map: dict = {}
+    for r in new_data_raw:
+        sym = r["symbol"]
+        exp = r.get("expiry")
+        if not exp or exp < today_str:
+            continue
+        if sym not in nearest_expiry_map or exp < nearest_expiry_map[sym]:
+            nearest_expiry_map[sym] = exp
+
+    # Filter snapshots to nearest active expiry only
+    def filter_to_nearest_expiry(rows):
+        filtered = []
+        for r in rows:
+            sym = r["symbol"]
+            exp = r.get("expiry")
+            nearest = nearest_expiry_map.get(sym)
+            if nearest and exp == nearest:
+                filtered.append(r)
+            elif sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
+                # For indices allow all expiries (they have multiple active)
+                filtered.append(r)
+        return filtered
+
+    new_data = filter_to_nearest_expiry(new_data_raw)
+    old_data = filter_to_nearest_expiry(old_data_raw)
 
     # ── CMP map ───────────────────────────────────────────────────────────────
     cmp_raw = []
@@ -146,6 +173,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             "tradingsymbol": row["tradingsymbol"],
             "strike":        strike,
             "option_type":   opt_type,
+            "expiry":        row.get("expiry"),
             "cmp":           float(cmp),
             "last_price":    float(new_ltp),
             "ltp_chg_pct":   ltp_chg,
@@ -206,8 +234,8 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
         "date":          today,
         "ts_new":        ts_new,
         "ts_old":        ts_old,
-        "open_time":     to_ist(timestamps[0]),   # first capture of day
-        "close_time":    to_ist(timestamps[-1]),  # latest capture of day
+        "open_time":     to_ist(timestamps[0]),
+        "close_time":    to_ist(timestamps[-1]),
         "snapshots":     len(timestamps),
         "oi_threshold":  oi_threshold,
         "vol_threshold": vol_threshold,
