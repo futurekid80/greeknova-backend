@@ -54,14 +54,17 @@ STOCK_NSE_MAP = {
     "VEDL":"NSE:VEDL",
 }
 
+# CMP cache — updated each capture cycle, used for ATM-centered selection
+_last_cmp: dict = {}
+
 def run_full_capture():
+    global _last_cmp
     from dotenv import load_dotenv
     load_dotenv('/Users/apple/optionspulse/.env')
-    from datetime import datetime, timezone
-    from datetime import timezone, timedelta
+    from datetime import datetime, timezone, timedelta
     ist = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(ist)
-    if now.weekday() >= 5: return          # Skip Saturday and Sunday
+    if now.weekday() >= 5: return
     if not (9 <= now.hour <= 15): return
     if now.hour == 9 and now.minute < 15: return
     if now.hour == 15 and now.minute > 30: return
@@ -74,29 +77,76 @@ def run_full_capture():
         timestamp = now.astimezone(timezone.utc).isoformat()
         records = []
         cmp_records = []
+
+        # ── Fetch CMP for indices ─────────────────────────────────────────────
         try:
             idx_quotes = kite.quote(list(INDEX_NSE_MAP.values()))
             for sym, key in INDEX_NSE_MAP.items():
                 price = idx_quotes.get(key, {}).get("last_price", 0)
-                if price: cmp_records.append({"timestamp": timestamp, "symbol": sym, "cmp": float(price)})
+                if price:
+                    cmp_records.append({"timestamp": timestamp, "symbol": sym, "cmp": float(price)})
+                    _last_cmp[sym] = float(price)
         except Exception as e: print(f"  ⚠️ Index CMP: {e}")
+
+        # ── Fetch CMP for stocks ──────────────────────────────────────────────
         try:
             stk_quotes = kite.quote(list(STOCK_NSE_MAP.values()))
             for sym, key in STOCK_NSE_MAP.items():
                 price = stk_quotes.get(key, {}).get("last_price", 0)
-                if price: cmp_records.append({"timestamp": timestamp, "symbol": sym, "cmp": float(price)})
+                if price:
+                    cmp_records.append({"timestamp": timestamp, "symbol": sym, "cmp": float(price)})
+                    _last_cmp[sym] = float(price)
         except Exception as e: print(f"  ⚠️ Stock CMP: {e}")
+
         instruments = kite.instruments("NFO")
+
         for symbol in INDICES + TOP30:
             is_index = symbol in INDICES
-            limit = 50 if is_index else 20
+            limit = 50 if is_index else 20  # total strikes per expiry (25 above + 25 below ATM for indices)
+            half  = limit // 2              # strikes on each side of ATM
+
             found = [i for i in instruments if i["name"] == symbol and i["instrument_type"] in ["CE","PE"]]
             if not found: continue
+
             expiries = sorted(set(i["expiry"] for i in found))
             num_expiries = 3 if is_index else 2
+
+            # ── ATM-centered strike selection ─────────────────────────────────
+            # Get current price for this symbol — use cached CMP or fallback to middle strike
+            current_price = _last_cmp.get(symbol, 0)
+
             nearest = []
             for exp in expiries[:num_expiries]:
-                nearest.extend([i for i in found if i["expiry"] == exp][:limit])
+                exp_instruments = [i for i in found if i["expiry"] == exp]
+                if not exp_instruments:
+                    continue
+
+                if current_price > 0:
+                    # Sort all instruments by distance from current price
+                    # Take `half` strikes below ATM and `half` strikes above ATM
+                    # This gives balanced coverage on both sides
+                    exp_instruments.sort(key=lambda i: i["strike"])
+                    strikes_sorted = sorted(set(i["strike"] for i in exp_instruments))
+
+                    # Find ATM index
+                    atm_strike = min(strikes_sorted, key=lambda s: abs(s - current_price))
+                    atm_idx = strikes_sorted.index(atm_strike)
+
+                    # Select `half` strikes on each side of ATM
+                    lower_idx = max(0, atm_idx - half)
+                    upper_idx = min(len(strikes_sorted) - 1, atm_idx + half)
+                    selected_strikes = set(strikes_sorted[lower_idx:upper_idx + 1])
+
+                    # Filter instruments to selected strikes
+                    selected = [i for i in exp_instruments if i["strike"] in selected_strikes]
+                else:
+                    # Fallback: no CMP available, use middle of available strikes
+                    exp_instruments.sort(key=lambda i: i["strike"])
+                    mid = len(exp_instruments) // 2
+                    selected = exp_instruments[max(0, mid - half): mid + half]
+
+                nearest.extend(selected)
+
             try:
                 quotes = kite.quote(["NFO:" + i["tradingsymbol"] for i in nearest])
                 for inst in nearest:
@@ -104,19 +154,22 @@ def run_full_capture():
                     if key in quotes:
                         q = quotes[key]
                         records.append({
-                            "timestamp": timestamp, "symbol": symbol,
+                            "timestamp":     timestamp,
+                            "symbol":        symbol,
                             "tradingsymbol": inst["tradingsymbol"],
-                            "strike": float(inst["strike"]),
-                            "option_type": inst["instrument_type"],
-                            "expiry": inst["expiry"].isoformat(),
-                            "oi": int(q.get("oi", 0)),
-                            "oi_day_high": int(q.get("oi_day_high", 0)),
-                            "volume": int(q.get("volume", 0)),
-                            "last_price": float(q.get("last_price", 0)),
-                            "is_index": is_index,
+                            "strike":        float(inst["strike"]),
+                            "option_type":   inst["instrument_type"],
+                            "expiry":        inst["expiry"].isoformat(),
+                            "oi":            int(q.get("oi", 0)),
+                            "oi_day_high":   int(q.get("oi_day_high", 0)),
+                            "volume":        int(q.get("volume", 0)),
+                            "last_price":    float(q.get("last_price", 0)),
+                            "is_index":      is_index,
                         })
                 time.sleep(0.3)
-            except Exception as e: print(f"  ❌ {symbol}: {e}")
+            except Exception as e:
+                print(f"  ❌ {symbol}: {e}")
+
         if records:
             for i in range(0, len(records), 500):
                 supabase.table("oi_snapshots").insert(records[i:i+500]).execute()
@@ -124,14 +177,16 @@ def run_full_capture():
             supabase.table("cmp_prices").insert(cmp_records).execute()
         print(f"  ✅ Saved {len(records)} OI + {len(cmp_records)} CMP records")
 
-        # ── Run alert engine after every successful capture ────────────────
+        # ── Run alert engine after every successful capture ────────────────────
         try:
             from services.alert_engine import run_alert_check
             run_alert_check()
         except Exception as ae:
             print(f"  ⚠️ Alert engine error: {ae}")
 
-    except Exception as e: print(f"  ❌ Capture failed: {e}")
+    except Exception as e:
+        print(f"  ❌ Capture failed: {e}")
+
 
 scheduler = BackgroundScheduler()
 
@@ -143,6 +198,7 @@ async def lifespan(app: FastAPI):
     print("✅ GreekNova backend started")
     print("📸 Full capture every 5 min during market hours")
     print("🔔 Alert engine: wired into capture cycle")
+    print("🎯 ATM-centered strike selection: 25 above + 25 below for indices")
     yield
     scheduler.shutdown()
 
@@ -150,7 +206,13 @@ app = FastAPI(title="GreekNova API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000", "https://greeknova-frontend.vercel.app","https://app.greeknova.com",],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://127.0.0.1:3000",
+        "https://greeknova-frontend.vercel.app",
+        "https://app.greeknova.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -167,7 +229,6 @@ def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
 @app.get("/alerts-test")
 def alerts_test():
-    """Manually trigger alert check — useful for testing"""
     try:
         from services.alert_engine import run_alert_check
         run_alert_check()
@@ -219,7 +280,6 @@ def max_pain():
     return get_max_pain_all()
 
 def auto_refresh_token():
-    """Auto-login every morning at 8:30 AM IST — weekdays only"""
     from datetime import datetime
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
