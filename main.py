@@ -89,7 +89,7 @@ def run_full_capture():
         instruments = kite.instruments("NFO")
         for symbol in INDICES + TOP30:
             is_index = symbol in INDICES
-            limit = 40 if is_index else 20
+            limit = 50 if is_index else 20
             found = [i for i in instruments if i["name"] == symbol and i["instrument_type"] in ["CE","PE"]]
             if not found: continue
             expiries = sorted(set(i["expiry"] for i in found))
