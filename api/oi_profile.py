@@ -123,13 +123,13 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     # If no CMP available, use OI-based filtering (keep strikes where total OI > 1% of max)
 
     if cmp and cmp > 0:
-        lower_bound = cmp * 0.90
-        upper_bound = cmp * 1.10
+        lower_bound = cmp * 0.95
+        upper_bound = cmp * 1.05
         all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
         # Fallback: if filter is too aggressive, expand range
         if len(all_strikes) < 10:
-            lower_bound = cmp * 0.85
-            upper_bound = cmp * 1.15
+            llower_bound = cmp * 0.93
+            upper_bound = cmp * 1.07
             all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
     else:
         # No CMP — filter by OI significance (keep strikes above 1% of max total OI)
