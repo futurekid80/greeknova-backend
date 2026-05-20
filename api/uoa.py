@@ -34,8 +34,8 @@ INDEX_NSE_MAP = {
 }
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
 
-MARKET_OPEN_UTC  = 3 * 60 + 45   # 9:15 AM IST
-MARKET_CLOSE_UTC = 10 * 60 + 0   # 3:30 PM IST
+MARKET_OPEN_UTC  = 3 * 60 + 45
+MARKET_CLOSE_UTC = 10 * 60 + 0
 
 def is_market_hours() -> bool:
     now_utc = datetime.now(timezone.utc)
@@ -47,7 +47,7 @@ def is_market_hours() -> bool:
 def is_post_market() -> bool:
     now_utc = datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
-        return True  # Weekend — treat as post-market
+        return True
     total = now_utc.hour * 60 + now_utc.minute
     return total > MARKET_CLOSE_UTC
 
@@ -76,7 +76,6 @@ def get_uoa(date: str = None):
 
     timestamps = sorted(set(r["timestamp"] for r in all_ts_rows))
 
-    # Fallback to last available day
     if len(timestamps) < 2:
         fallback_rows = []
         for offset in range(0, 50000, 1000):
@@ -96,19 +95,17 @@ def get_uoa(date: str = None):
     if len(timestamps) < 2:
         return {"signals": [], "total": 0}
 
-    # ── Snapshot selection ────────────────────────────────────────────────────
     ts_open  = timestamps[0]
     ts_new   = timestamps[-1]
     ts_30min = timestamps[max(0, len(timestamps) - 7)]
 
-    # ── Minutes to close ──────────────────────────────────────────────────────
     now_utc = datetime.now(timezone.utc)
     market_close = now_utc.replace(hour=10, minute=0, second=0, microsecond=0)
     mins_to_close = int((market_close - now_utc).total_seconds() / 60)
     is_near_close      = 0 < mins_to_close <= 30
     is_very_near_close = 0 < mins_to_close <= 15
 
-    # ── Fetch 3 key snapshots ─────────────────────────────────────────────────
+    # ── Fetch snapshots ───────────────────────────────────────────────────────
     def fetch_snapshot(ts):
         rows = []
         for offset in range(0, 200000, 1000):
@@ -124,9 +121,40 @@ def get_uoa(date: str = None):
                 break
         return rows
 
-    new_data   = fetch_snapshot(ts_new)
-    open_data  = fetch_snapshot(ts_open)
-    min30_data = fetch_snapshot(ts_30min)
+    new_data_raw   = fetch_snapshot(ts_new)
+    open_data_raw  = fetch_snapshot(ts_open)
+    min30_data_raw = fetch_snapshot(ts_30min)
+
+    # ── FIX: Build nearest active expiry map per symbol ───────────────────────
+    # Prevents June expiry rows mixing with May expiry for stocks
+    today_str = date_type.today().isoformat()
+
+    nearest_expiry_map: dict = {}
+    for r in new_data_raw:
+        sym = r["symbol"]
+        exp = r.get("expiry")
+        if not exp or exp < today_str:
+            continue
+        if sym not in nearest_expiry_map or exp < nearest_expiry_map[sym]:
+            nearest_expiry_map[sym] = exp
+
+    def filter_to_nearest_expiry(rows):
+        filtered = []
+        for r in rows:
+            sym = r["symbol"]
+            exp = r.get("expiry")
+            # Indices keep all expiries — stocks filter to nearest only
+            if sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
+                filtered.append(r)
+            else:
+                nearest = nearest_expiry_map.get(sym)
+                if nearest and exp == nearest:
+                    filtered.append(r)
+        return filtered
+
+    new_data   = filter_to_nearest_expiry(new_data_raw)
+    open_data  = filter_to_nearest_expiry(open_data_raw)
+    min30_data = filter_to_nearest_expiry(min30_data_raw)
 
     # ── CMP map ───────────────────────────────────────────────────────────────
     cmp_raw = []
@@ -322,7 +350,6 @@ def get_uoa(date: str = None):
         else:
             continue
 
-        # ── Time tag — now includes post_market ───────────────────────────────
         if post_market:
             time_tag = "post_market"
         elif is_very_near_close:
@@ -372,15 +399,15 @@ def get_uoa(date: str = None):
             return ts[11:16]
 
     return {
-        "timestamp":       ts_new,
-        "open_timestamp":  ts_open,
-        "open_time":       to_ist(ts_open),
-        "close_time":      to_ist(ts_new),
-        "date":            today,
-        "total":           len(uoa_signals),
-        "signals":         uoa_signals[:50],
-        "snapshot_count":  len(timestamps),
-        "mins_to_close":   max(0, mins_to_close),
-        "is_post_market":  post_market,        # NEW — tells frontend market is closed
-        "market_close_time": "15:29",          # last expected snapshot time
+        "timestamp":         ts_new,
+        "open_timestamp":    ts_open,
+        "open_time":         to_ist(ts_open),
+        "close_time":        to_ist(ts_new),
+        "date":              today,
+        "total":             len(uoa_signals),
+        "signals":           uoa_signals[:50],
+        "snapshot_count":    len(timestamps),
+        "mins_to_close":     max(0, mins_to_close),
+        "is_post_market":    post_market,
+        "market_close_time": "15:29",
     }
