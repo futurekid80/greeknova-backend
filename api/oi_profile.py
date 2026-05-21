@@ -12,19 +12,9 @@ def get_monthly_expiry(year: int, month: int) -> str:
 
 
 def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
-    """
-    Build OI profile — horizontal distribution of OI across strikes.
-    Returns:
-    - strikes with CE OI, PE OI, imbalance score
-    - POC (strike with highest total OI)
-    - vacuum zones (strikes with very low OI on both sides)
-    - value area (strikes covering 70% of total OI)
-    - wall migration data (CE/PE wall per day this series)
-    """
     supabase = get_supabase()
     today = datetime.now(timezone.utc).date()
 
-    # ── Resolve date ──────────────────────────────────────────────────────────
     if not date:
         date = today.isoformat()
 
@@ -41,7 +31,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
             date = check
             break
 
-    # ── Get EOD timestamp ─────────────────────────────────────────────────────
+    # Get EOD timestamp
     ts_q = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", symbol)\
@@ -55,7 +45,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
     eod_ts = ts_q.data[0]["timestamp"]
 
-    # ── Fetch all strikes with pagination ─────────────────────────────────────
+    # Fetch all strikes with pagination
     all_rows = []
     for offset in range(0, 50000, 1000):
         q = supabase.from_("oi_snapshots")\
@@ -75,7 +65,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     if not all_rows:
         return {"error": "No OI data found"}
 
-    # ── Get available expiries ────────────────────────────────────────────────
+    # Get available expiries
     today_str = date_type.today().isoformat()
     expiries = sorted(set(
         r["expiry"] for r in all_rows
@@ -84,11 +74,10 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
     active_expiry = expiry or (expiries[0] if expiries else None)
 
-    # Filter to active expiry strictly
     if active_expiry:
         all_rows = [r for r in all_rows if r["expiry"] == active_expiry]
 
-    # ── Build strike profile ──────────────────────────────────────────────────
+    # Build strike profile
     ce_oi: dict = {}
     pe_oi: dict = {}
 
@@ -102,7 +91,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
     all_strikes_raw = sorted(set(list(ce_oi.keys()) + list(pe_oi.keys())))
 
-    # ── Get CMP for ATM ───────────────────────────────────────────────────────
+    # Get CMP for ATM
     cmp = None
     try:
         cmp_q = supabase.from_("cmp_prices")\
@@ -117,22 +106,16 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     except:
         pass
 
-    # ── Filter to meaningful strike range ─────────────────────────────────────
-    # Keep only strikes with OI on BOTH sides (have both CE and PE activity)
-    # AND within ±20% of CMP to remove far OTM noise
-    # If no CMP available, use OI-based filtering (keep strikes where total OI > 1% of max)
-
+    # Filter to meaningful strike range ±5% of CMP
     if cmp and cmp > 0:
         lower_bound = cmp * 0.95
         upper_bound = cmp * 1.05
         all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
-        # Fallback: if filter is too aggressive, expand range
         if len(all_strikes) < 10:
-            llower_bound = cmp * 0.93
+            lower_bound = cmp * 0.93
             upper_bound = cmp * 1.07
             all_strikes = [s for s in all_strikes_raw if lower_bound <= s <= upper_bound]
     else:
-        # No CMP — filter by OI significance (keep strikes above 1% of max total OI)
         max_total_raw = max(
             (ce_oi.get(s, 0) + pe_oi.get(s, 0)) for s in all_strikes_raw
         ) if all_strikes_raw else 1
@@ -143,23 +126,18 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     if not all_strikes:
         return {"error": "No strike data"}
 
-
     atm_strike = min(all_strikes, key=lambda s: abs(s - cmp)) if cmp else None
 
-    # ── Calculate metrics ─────────────────────────────────────────────────────
+    # Calculate metrics
     total_ce = sum(ce_oi.values())
     total_pe = sum(pe_oi.values())
     total_oi = total_ce + total_pe
 
-    # POC — strike with highest total OI
     poc_strike = max(all_strikes, key=lambda s: (ce_oi.get(s, 0) + pe_oi.get(s, 0)))
-
-    # CE wall = strike with highest CE OI (max resistance)
     ce_wall = max(ce_oi, key=ce_oi.get) if ce_oi else None
-    # PE wall = strike with highest PE OI (max support)
     pe_wall = max(pe_oi, key=pe_oi.get) if pe_oi else None
 
-    # Value area — strikes covering 70% of total OI, centered on POC
+    # Value area
     va_threshold = total_oi * 0.70
     sorted_by_oi = sorted(all_strikes, key=lambda s: (ce_oi.get(s,0)+pe_oi.get(s,0)), reverse=True)
     va_strikes = []
@@ -172,29 +150,20 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     vah = max(va_strikes) if va_strikes else None
     val = min(va_strikes) if va_strikes else None
 
-    # Max values for normalizing bar widths in frontend
     max_ce = max(ce_oi.values()) if ce_oi else 1
     max_pe = max(pe_oi.values()) if pe_oi else 1
     max_total = max(ce_oi.get(s,0)+pe_oi.get(s,0) for s in all_strikes)
 
-    # Vacuum threshold = strikes where BOTH CE and PE OI < 5% of their respective max
-    vac_ce_threshold  = max_ce  * 0.05
-    vac_pe_threshold  = max_pe  * 0.05
+    vac_ce_threshold = max_ce * 0.05
+    vac_pe_threshold = max_pe * 0.05
 
-    # Build profile rows
     profile = []
     for s in all_strikes:
         ce = ce_oi.get(s, 0)
         pe = pe_oi.get(s, 0)
         total = ce + pe
-
-        # Imbalance: +100 = all CE (resistance), -100 = all PE (support)
         imbalance = round((ce - pe) / total * 100) if total > 0 else 0
-
-        # Vacuum zone
         is_vacuum = (ce < vac_ce_threshold and pe < vac_pe_threshold and total > 0)
-
-        # Value area membership
         in_value_area = (val <= s <= vah) if (val and vah) else False
 
         profile.append({
@@ -214,7 +183,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
             "in_value_area": in_value_area,
         })
 
-    # ── Wall migration — CE/PE wall per trading day this series ──────────────
+    # ── Wall migration — CE/PE wall + CMP per trading day this series ─────────
     wall_migration = []
     for i in range(20):
         d = (today - timedelta(days=i)).isoformat()
@@ -255,22 +224,37 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
                 day_pe[strike] = day_pe.get(strike, 0) + oi
 
         if day_ce and day_pe:
-            # Filter to same ±20% CMP range for consistency
             if cmp and cmp > 0:
                 lo, hi = cmp * 0.90, cmp * 1.10
                 day_ce = {k: v for k, v in day_ce.items() if lo <= k <= hi}
                 day_pe = {k: v for k, v in day_pe.items() if lo <= k <= hi}
 
             if day_ce and day_pe:
+                # ── Fetch closing CMP for this day ────────────────────────────
+                day_cmp = None
+                try:
+                    cmp_day_q = supabase.from_("cmp_prices")\
+                        .select("cmp")\
+                        .eq("symbol", symbol)\
+                        .gte("timestamp", f"{d}T00:00:00+00:00")\
+                        .lt("timestamp",  f"{d}T23:59:59+00:00")\
+                        .order("timestamp", desc=True)\
+                        .limit(1).execute()
+                    if cmp_day_q.data:
+                        day_cmp = float(cmp_day_q.data[0]["cmp"])
+                except:
+                    pass
+
                 wall_migration.append({
                     "date":       d,
                     "ce_wall":    max(day_ce, key=day_ce.get),
                     "pe_wall":    max(day_pe, key=day_pe.get),
                     "ce_wall_oi": day_ce[max(day_ce, key=day_ce.get)],
                     "pe_wall_oi": day_pe[max(day_pe, key=day_pe.get)],
+                    "cmp":        day_cmp,  # ← NEW: closing price for this day
                 })
 
-    wall_migration.reverse()  # chronological order
+    wall_migration.reverse()
 
     return {
         "symbol":          symbol,
