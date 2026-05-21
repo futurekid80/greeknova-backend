@@ -172,13 +172,15 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
             direction = "📈 BUILD" if oi_pct > 0 else "📉 UNWIND"
             alert_key = f"spike_{sym}_{strike}_{opt_type}_{round(oi_pct)}"
 
-            text = (
-                f"🔥 *OI Spike Alert*\n"
-                f"*{sym}* {strike} {opt_type}\n"
-                f"{direction} · OI {oi_pct:+.1f}% in 5 mins\n"
-                f"LTP: ₹{ltp} · {_fmt(old_oi)} → {_fmt(new_oi)}\n"
-                f"_GreekNova · Informational only_"
-            )
+    expiry_str = row.get("expiry", "")
+    expiry_tag = f" [{expiry_str[5:]}]" if expiry_str else ""  # shows MM-DD
+    text = (
+        f"🔥 *OI Spike Alert*\n"
+        f"*{sym}* {strike} {opt_type}{expiry_tag}\n"
+        f"{direction} · OI {oi_pct:+.1f}% in 5 mins\n"
+        f"LTP: ₹{ltp} · {_fmt(old_oi)} → {_fmt(new_oi)}\n"
+        f"_GreekNova · Informational only_"
+    )
 
             alerts.append({"key": alert_key, "text": text})
 
