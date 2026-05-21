@@ -9,7 +9,7 @@ Deduplicates: tracks sent alerts in memory to avoid spam
 
 import os
 import requests
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as date_type
 from typing import Optional
 
 # ── Telegram config ───────────────────────────────────────────────────────────
@@ -18,15 +18,13 @@ PERSONAL_CHAT_ID = "5513733966"
 TELEGRAM_URL = f"https://api.telegram.org/bot{ALERT_BOT_TOKEN}/sendMessage"
 
 # ── Alert deduplication ───────────────────────────────────────────────────────
-# In-memory store — resets on restart (intentional, avoids stale state)
-_sent_alerts: set = set()        # keys of alerts already sent this session
-_last_walls:  dict = {}          # symbol → (ce_wall, pe_wall) from last check
+_sent_alerts: set = set()
+_last_walls:  dict = {}
 _last_heartbeat: Optional[datetime] = None
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
-# ── Telegram send ─────────────────────────────────────────────────────────────
 def send_telegram(text: str) -> bool:
     try:
         r = requests.post(TELEGRAM_URL, json={
@@ -48,9 +46,7 @@ def is_market_hours() -> bool:
     return (9 * 60 + 15) <= total <= (15 * 60 + 30)
 
 
-# ── Main alert check — called after every capture ─────────────────────────────
 def run_alert_check():
-    """Run after each OI capture. Checks all alert types and sends Telegram."""
     if not is_market_hours():
         return
 
@@ -60,7 +56,6 @@ def run_alert_check():
         supabase = get_supabase()
         today = datetime.now(IST).strftime('%Y-%m-%d')
 
-        # Get last 2 timestamps
         ts_rows = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
@@ -78,19 +73,15 @@ def run_alert_check():
 
         alerts_fired = []
 
-        # ── 1. OI SPIKE DETECTION ─────────────────────────────────────────────
         spike_alerts = _check_oi_spikes(supabase, today, ts_new, ts_old)
         alerts_fired.extend(spike_alerts)
 
-        # ── 2. UOA HIGH CONVICTION ────────────────────────────────────────────
         uoa_alerts = _check_uoa_signals(supabase, today, timestamps)
         alerts_fired.extend(uoa_alerts)
 
-        # ── 3. WALL SHIFT DETECTION ───────────────────────────────────────────
         wall_alerts = _check_wall_shifts(supabase, today, ts_new, ts_old)
         alerts_fired.extend(wall_alerts)
 
-        # Send each alert via Telegram
         for alert in alerts_fired:
             alert_key = alert.get("key", alert.get("text", "")[:50])
             if alert_key not in _sent_alerts:
@@ -101,24 +92,21 @@ def run_alert_check():
         if not alerts_fired:
             print("[ALERTS] No new alerts this cycle")
 
-        # ── 4. HEARTBEAT (every 30 mins) ──────────────────────────────────────
         _maybe_send_heartbeat(supabase, today, ts_new, len(timestamps))
 
     except Exception as e:
         print(f"[ALERTS] Alert check error: {e}")
 
 
-# ── OI Spike Detection ────────────────────────────────────────────────────────
 def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
                      threshold: float = 15.0) -> list:
-    """Detect OI changes >threshold% between last two snapshots."""
     alerts = []
     try:
         def fetch_snap(ts):
             rows = []
             for offset in range(0, 50000, 1000):
                 batch = supabase.from_("oi_snapshots")\
-                    .select("symbol, tradingsymbol, strike, option_type, oi, last_price")\
+                    .select("symbol, tradingsymbol, strike, option_type, oi, last_price, expiry")\
                     .eq("timestamp", ts)\
                     .range(offset, offset + 999).execute()
                 if not batch.data: break
@@ -126,8 +114,35 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
                 if len(batch.data) < 1000: break
             return rows
 
-        new_rows = fetch_snap(ts_new)
-        old_rows = fetch_snap(ts_old)
+        new_rows_raw = fetch_snap(ts_new)
+        old_rows_raw = fetch_snap(ts_old)
+
+        # Build nearest active expiry map per symbol
+        today_str = date_type.today().isoformat()
+        nearest_expiry_map: dict = {}
+        for r in new_rows_raw:
+            sym = r["symbol"]
+            exp = r.get("expiry")
+            if not exp or exp < today_str:
+                continue
+            if sym not in nearest_expiry_map or exp < nearest_expiry_map[sym]:
+                nearest_expiry_map[sym] = exp
+
+        def filter_nearest(rows):
+            filtered = []
+            for r in rows:
+                sym = r["symbol"]
+                exp = r.get("expiry")
+                if sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
+                    filtered.append(r)
+                else:
+                    nearest = nearest_expiry_map.get(sym)
+                    if nearest and exp == nearest:
+                        filtered.append(r)
+            return filtered
+
+        new_rows = filter_nearest(new_rows_raw)
+        old_rows = filter_nearest(old_rows_raw)
 
         old_map = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in old_rows}
 
@@ -142,8 +157,7 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
             old_oi = old["oi"] or 0
 
             if old_oi < 50000:
-                continue  # skip low-liquidity strikes
-
+                continue
             if old_oi == 0:
                 continue
 
@@ -152,17 +166,17 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
             if abs(oi_pct) < threshold:
                 continue
 
-            strike     = row["strike"]
-            opt_type   = row["option_type"]
-            ltp        = row["last_price"] or 0
-            direction  = "📈 BUILD" if oi_pct > 0 else "📉 UNWIND"
-            alert_key  = f"spike_{sym}_{strike}_{opt_type}_{round(oi_pct)}"
+            strike    = row["strike"]
+            opt_type  = row["option_type"]
+            ltp       = row["last_price"] or 0
+            direction = "📈 BUILD" if oi_pct > 0 else "📉 UNWIND"
+            alert_key = f"spike_{sym}_{strike}_{opt_type}_{round(oi_pct)}"
 
             text = (
                 f"🔥 *OI Spike Alert*\n"
                 f"*{sym}* {strike} {opt_type}\n"
                 f"{direction} · OI {oi_pct:+.1f}% in 5 mins\n"
-                f"LTP: ₹{ltp} · Old OI: {_fmt(old_oi)} → New OI: {_fmt(new_oi)}\n"
+                f"LTP: ₹{ltp} · {_fmt(old_oi)} → {_fmt(new_oi)}\n"
                 f"_GreekNova · Informational only_"
             )
 
@@ -174,9 +188,7 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
     return alerts
 
 
-# ── UOA High Conviction ───────────────────────────────────────────────────────
 def _check_uoa_signals(supabase, today: str, timestamps: list) -> list:
-    """Detect UOA signals with score 4+ using same logic as api/uoa.py."""
     alerts = []
     try:
         from api.uoa import get_uoa
@@ -198,7 +210,7 @@ def _check_uoa_signals(supabase, today: str, timestamps: list) -> list:
             vol_ratio = sig.get("vol_oi_ratio", 0)
             alert_key = f"uoa_{sym}_{strike}_{opt_type}_{signal_t}"
 
-            bias_icon = "🟢" if bias == "BULLISH" else "🔴"
+            bias_icon    = "🟢" if bias == "BULLISH" else "🔴"
             signal_label = signal_t.replace("_", " ").title()
 
             text = (
@@ -218,12 +230,9 @@ def _check_uoa_signals(supabase, today: str, timestamps: list) -> list:
     return alerts
 
 
-# ── Wall Shift Detection ──────────────────────────────────────────────────────
 def _check_wall_shifts(supabase, today: str, ts_new: str, ts_old: str) -> list:
-    """Detect if CE wall or PE wall has shifted for NIFTY/BANKNIFTY/FINNIFTY."""
     global _last_walls
     alerts = []
-
     INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
     try:
@@ -237,7 +246,7 @@ def _check_wall_shifts(supabase, today: str, ts_new: str, ts_old: str) -> list:
             ce_oi: dict = {}
             pe_oi: dict = {}
             for r in rows:
-                s = r["strike"]
+                s  = r["strike"]
                 oi = r["oi"] or 0
                 if r["option_type"] == "CE":
                     ce_oi[s] = ce_oi.get(s, 0) + oi
@@ -251,18 +260,16 @@ def _check_wall_shifts(supabase, today: str, ts_new: str, ts_old: str) -> list:
         for sym in INDICES:
             ce_new, pe_new = get_walls(ts_new, sym)
             ce_old, pe_old = _last_walls.get(sym, (None, None))
-
-            # Update stored walls
             _last_walls[sym] = (ce_new, pe_new)
 
             if ce_old is None:
-                continue  # first run, no comparison
+                continue
 
             wall_changes = []
             if ce_new != ce_old and ce_new is not None:
-                wall_changes.append(f"CE wall: {_fmt_strike(ce_old)} → *{_fmt_strike(ce_new)}* (resistance shifted)")
+                wall_changes.append(f"CE wall: {_fmt_strike(ce_old)} → *{_fmt_strike(ce_new)}*")
             if pe_new != pe_old and pe_new is not None:
-                wall_changes.append(f"PE wall: {_fmt_strike(pe_old)} → *{_fmt_strike(pe_new)}* (support shifted)")
+                wall_changes.append(f"PE wall: {_fmt_strike(pe_old)} → *{_fmt_strike(pe_new)}*")
 
             if not wall_changes:
                 continue
@@ -281,19 +288,16 @@ def _check_wall_shifts(supabase, today: str, ts_new: str, ts_old: str) -> list:
     return alerts
 
 
-# ── Heartbeat (every 30 mins) ─────────────────────────────────────────────────
 def _maybe_send_heartbeat(supabase, today: str, ts_new: str, snapshot_count: int):
     global _last_heartbeat
     now = datetime.now(IST)
 
-    # Send heartbeat every 30 mins
     if _last_heartbeat and (now - _last_heartbeat).total_seconds() < 30 * 60:
         return
 
     _last_heartbeat = now
 
     try:
-        # Get NIFTY CMP
         cmp_row = supabase.from_("cmp_prices")\
             .select("cmp")\
             .eq("symbol", "NIFTY")\
@@ -303,7 +307,6 @@ def _maybe_send_heartbeat(supabase, today: str, ts_new: str, snapshot_count: int
 
         nifty_cmp = cmp_row.data[0]["cmp"] if cmp_row.data else "N/A"
 
-        # Get NIFTY PCR
         rows = supabase.from_("oi_snapshots")\
             .select("option_type, oi")\
             .eq("symbol", "NIFTY")\
@@ -332,7 +335,6 @@ def _maybe_send_heartbeat(supabase, today: str, ts_new: str, snapshot_count: int
         print(f"[ALERTS] Heartbeat error: {e}")
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 def _fmt(n: int) -> str:
     if n >= 10_000_000: return f"{n/10_000_000:.1f}Cr"
     if n >= 100_000:    return f"{n/100_000:.1f}L"
