@@ -145,7 +145,7 @@ def get_uoa(date: str = None):
             exp = r.get("expiry")
             nearest = nearest_expiry_map.get(sym)
             if nearest and exp == nearest:
-            filtered.append(r)
+                filtered.append(r)
         return filtered
 
     new_data   = filter_to_nearest_expiry(new_data_raw)
