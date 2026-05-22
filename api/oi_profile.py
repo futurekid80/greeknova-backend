@@ -203,7 +203,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         if d not in day_ts_map or ts > day_ts_map[d]:
             day_ts_map[d] = ts
 
-    eod_timestamps = list(day_ts_map.values())
+    eod_timestamps = list(day_ts_map.values())[-15:]  # limit to 15
 
     # Step 2: Fetch ALL OI data for all EOD timestamps in ONE query
     all_migration_rows = []
