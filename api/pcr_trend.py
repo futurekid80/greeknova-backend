@@ -1,9 +1,10 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as date_type
 
 def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    today_str = date_type.today().isoformat()
 
     query = supabase.from_("oi_snapshots")\
         .select("timestamp, option_type, oi, expiry")\
@@ -22,13 +23,25 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
         all_data.extend(batch.data)
         if len(batch.data) < 1000:
             break
-    result_data = all_data
 
-    if not result_data:
+    if not all_data:
         return {"symbol": symbol, "points": [], "expiry": expiry}
 
+    # ── Filter to nearest active expiry if no expiry specified ────────────────
+    if not expiry:
+        # Find nearest active expiry from data
+        active_expiries = sorted(set(
+            r["expiry"] for r in all_data
+            if r["expiry"] and r["expiry"] >= today_str
+        ))
+        nearest_expiry = active_expiries[0] if active_expiries else None
+        if nearest_expiry:
+            all_data = [r for r in all_data if r["expiry"] == nearest_expiry]
+            expiry = nearest_expiry
+
+    # ── Group by timestamp ────────────────────────────────────────────────────
     ts_map: dict = {}
-    for row in result_data:
+    for row in all_data:
         ts = row["timestamp"]
         if ts not in ts_map:
             ts_map[ts] = {"ce": 0, "pe": 0}
@@ -64,4 +77,9 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
             "pe_oi": pe,
         })
 
-    return {"symbol": symbol, "points": points, "total_snapshots": len(points), "expiry": expiry}
+    return {
+        "symbol":           symbol,
+        "points":           points,
+        "total_snapshots":  len(points),
+        "expiry":           expiry,
+    }
