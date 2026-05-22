@@ -30,9 +30,14 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     else:
         strike_interval = 50
 
-    # ATM ±10 strikes range
-    strike_lower = (cmp - 10 * strike_interval) if cmp else None
-    strike_upper = (cmp + 10 * strike_interval) if cmp else None
+    # Snap CMP to nearest strike interval for consistent fixed set
+if cmp:
+    snapped_atm = round(cmp / strike_interval) * strike_interval
+    strike_lower = snapped_atm - (10 * strike_interval)
+    strike_upper = snapped_atm + (10 * strike_interval)
+else:
+    strike_lower = None
+    strike_upper = None
 
     # ── Fetch OI data with strike ─────────────────────────────────────────────
     query = supabase.from_("oi_snapshots")\
