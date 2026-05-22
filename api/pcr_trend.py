@@ -6,8 +6,37 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     today_str = date_type.today().isoformat()
 
+    # ── Get current CMP for ATM-centered strike filter ────────────────────────
+    cmp = None
+    try:
+        cmp_q = supabase.from_("cmp_prices")\
+            .select("cmp")\
+            .eq("symbol", symbol)\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1).execute()
+        if cmp_q.data:
+            cmp = float(cmp_q.data[0]["cmp"])
+    except:
+        pass
+
+    # Strike interval per symbol
+    if symbol == "NIFTY":
+        strike_interval = 50
+    elif symbol == "BANKNIFTY":
+        strike_interval = 100
+    elif symbol == "FINNIFTY":
+        strike_interval = 50
+    else:
+        strike_interval = 50
+
+    # ATM ±10 strikes range
+    strike_lower = (cmp - 10 * strike_interval) if cmp else None
+    strike_upper = (cmp + 10 * strike_interval) if cmp else None
+
+    # ── Fetch OI data with strike ─────────────────────────────────────────────
     query = supabase.from_("oi_snapshots")\
-        .select("timestamp, option_type, oi, expiry")\
+        .select("timestamp, option_type, oi, expiry, strike")\
         .eq("symbol", symbol)\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
         .order("timestamp", desc=False)
@@ -27,9 +56,8 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     if not all_data:
         return {"symbol": symbol, "points": [], "expiry": expiry}
 
-    # ── Filter to nearest active expiry if no expiry specified ────────────────
+    # ── Filter to nearest active expiry ───────────────────────────────────────
     if not expiry:
-        # Find nearest active expiry from data
         active_expiries = sorted(set(
             r["expiry"] for r in all_data
             if r["expiry"] and r["expiry"] >= today_str
@@ -38,6 +66,13 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
         if nearest_expiry:
             all_data = [r for r in all_data if r["expiry"] == nearest_expiry]
             expiry = nearest_expiry
+
+    # ── Filter to ATM ±10 strikes for stable PCR ──────────────────────────────
+    if strike_lower and strike_upper:
+        all_data = [
+            r for r in all_data
+            if r.get("strike") and strike_lower <= float(r["strike"]) <= strike_upper
+        ]
 
     # ── Group by timestamp ────────────────────────────────────────────────────
     ts_map: dict = {}
@@ -71,15 +106,15 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
 
         points.append({
             "timestamp": ts,
-            "time": time_label,
-            "pcr": pcr,
-            "ce_oi": ce,
-            "pe_oi": pe,
+            "time":      time_label,
+            "pcr":       pcr,
+            "ce_oi":     ce,
+            "pe_oi":     pe,
         })
 
     return {
-        "symbol":           symbol,
-        "points":           points,
-        "total_snapshots":  len(points),
-        "expiry":           expiry,
+        "symbol":          symbol,
+        "points":          points,
+        "total_snapshots": len(points),
+        "expiry":          expiry,
     }
