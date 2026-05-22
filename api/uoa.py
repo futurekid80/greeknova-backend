@@ -139,14 +139,14 @@ def get_uoa(date: str = None):
             nearest_expiry_map[sym] = exp
 
     def filter_to_nearest_expiry(rows):
-    filtered = []
-    for r in rows:
-        sym = r["symbol"]
-        exp = r.get("expiry")
-        nearest = nearest_expiry_map.get(sym)
-        if nearest and exp == nearest:
+        filtered = []
+        for r in rows:
+            sym = r["symbol"]
+            exp = r.get("expiry")
+            nearest = nearest_expiry_map.get(sym)
+            if nearest and exp == nearest:
             filtered.append(r)
-    return filtered
+        return filtered
 
     new_data   = filter_to_nearest_expiry(new_data_raw)
     open_data  = filter_to_nearest_expiry(open_data_raw)
