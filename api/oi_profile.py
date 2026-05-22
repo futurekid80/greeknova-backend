@@ -3,6 +3,14 @@ from datetime import datetime, timezone, timedelta, date as date_type
 import calendar
 
 
+def get_monthly_expiry(year: int, month: int) -> str:
+    last_day = calendar.monthrange(year, month)[1]
+    d = datetime(year, month, last_day)
+    while d.weekday() != 3:
+        d -= timedelta(days=1)
+    return d.strftime('%Y-%m-%d')
+
+
 def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).date()
@@ -57,7 +65,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     if not all_rows:
         return {"error": "No OI data found"}
 
-    # Get available expiries — include ALL expiries for dropdown
+    # Get available expiries
     today_str = date_type.today().isoformat()
     expiries = sorted(set(
         r["expiry"] for r in all_rows
@@ -175,116 +183,78 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
             "in_value_area": in_value_area,
         })
 
-    # ── OPTIMIZED Wall Migration — 3 queries instead of 40+ ──────────────────
-    # Step 1: Get one EOD timestamp per day for last 20 days in ONE query
-    start_date = (today - timedelta(days=20)).isoformat()
-
-    # Fetch all EOD timestamps in date range — get latest per day
-    all_ts_rows = []
-    for offset in range(0, 5000, 1000):
-        batch = supabase.from_("oi_snapshots")\
+    # ── Wall migration — CE/PE wall + CMP per trading day this series ─────────
+    wall_migration = []
+    for i in range(20):
+        d = (today - timedelta(days=i)).isoformat()
+        ts_r = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", symbol)\
-            .gte("timestamp", f"{start_date}T00:00:00+00:00")\
-            .order("timestamp", desc=False)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        all_ts_rows.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+            .gte("timestamp", f"{d}T00:00:00+00:00")\
+            .lt("timestamp",  f"{d}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1).execute()
+        if not ts_r.data:
+            continue
 
-    # Group timestamps by date, keep latest per day
-    day_ts_map: dict = {}
-    for row in all_ts_rows:
-        ts = row["timestamp"]
-        d = ts[:10]  # YYYY-MM-DD
-        if d not in day_ts_map or ts > day_ts_map[d]:
-            day_ts_map[d] = ts
-
-    eod_timestamps = list(day_ts_map.values())[-15:]  # limit to 15
-
-    # Step 2: Fetch ALL OI data for all EOD timestamps in ONE query
-    all_migration_rows = []
-    if eod_timestamps:
-        for offset in range(0, 200000, 1000):
+        day_ts = ts_r.data[0]["timestamp"]
+        day_rows = []
+        for offset in range(0, 20000, 1000):
             q = supabase.from_("oi_snapshots")\
-                .select("timestamp, strike, option_type, oi")\
+                .select("strike, option_type, oi")\
                 .eq("symbol", symbol)\
-                .in_("timestamp", eod_timestamps)\
-                .range(offset, offset + 999)
+                .eq("timestamp", day_ts)
             if active_expiry:
                 q = q.eq("expiry", active_expiry)
-            batch = q.execute()
+            batch = q.range(offset, offset+999).execute()
             if not batch.data:
                 break
-            all_migration_rows.extend(batch.data)
+            day_rows.extend(batch.data)
             if len(batch.data) < 1000:
                 break
-
-    # Step 3: Fetch ALL CMP data for date range in ONE query
-    all_cmp_rows = []
-    for offset in range(0, 10000, 1000):
-        batch = supabase.from_("cmp_prices")\
-            .select("timestamp, cmp")\
-            .eq("symbol", symbol)\
-            .gte("timestamp", f"{start_date}T00:00:00+00:00")\
-            .order("timestamp", desc=False)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        all_cmp_rows.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
-
-    # Build CMP map — latest CMP per day
-    day_cmp_map: dict = {}
-    for row in all_cmp_rows:
-        d = row["timestamp"][:10]
-        if d not in day_cmp_map or row["timestamp"] > day_cmp_map[d]["ts"]:
-            day_cmp_map[d] = {"ts": row["timestamp"], "cmp": float(row["cmp"])}
-
-    # Group migration rows by timestamp
-    from collections import defaultdict
-    ts_rows_map: dict = defaultdict(list)
-    for row in all_migration_rows:
-        ts_rows_map[row["timestamp"]].append(row)
-
-    # Compute walls per day
-    wall_migration = []
-    lo = cmp * 0.90 if cmp and cmp > 0 else 0
-    hi = cmp * 1.10 if cmp and cmp > 0 else float('inf')
-
-    for d in sorted(day_ts_map.keys()):
-        day_ts = day_ts_map[d]
-        day_rows = ts_rows_map.get(day_ts, [])
-        if not day_rows:
-            continue
 
         day_ce: dict = {}
         day_pe: dict = {}
         for r in day_rows:
             strike = float(r["strike"])
             oi     = r["oi"] or 0
-            if cmp and cmp > 0 and not (lo <= strike <= hi):
-                continue
             if r["option_type"] == "CE":
                 day_ce[strike] = day_ce.get(strike, 0) + oi
             else:
                 day_pe[strike] = day_pe.get(strike, 0) + oi
 
         if day_ce and day_pe:
-            day_cmp_val = day_cmp_map.get(d, {}).get("cmp")
-            wall_migration.append({
-                "date":       d,
-                "ce_wall":    max(day_ce, key=day_ce.get),
-                "pe_wall":    max(day_pe, key=day_pe.get),
-                "ce_wall_oi": day_ce[max(day_ce, key=day_ce.get)],
-                "pe_wall_oi": day_pe[max(day_pe, key=day_pe.get)],
-                "cmp":        day_cmp_val,
-            })
+            if cmp and cmp > 0:
+                lo, hi = cmp * 0.90, cmp * 1.10
+                day_ce = {k: v for k, v in day_ce.items() if lo <= k <= hi}
+                day_pe = {k: v for k, v in day_pe.items() if lo <= k <= hi}
+
+            if day_ce and day_pe:
+                # ── Fetch closing CMP for this day ────────────────────────────
+                day_cmp = None
+                try:
+                    cmp_day_q = supabase.from_("cmp_prices")\
+                        .select("cmp")\
+                        .eq("symbol", symbol)\
+                        .gte("timestamp", f"{d}T00:00:00+00:00")\
+                        .lt("timestamp",  f"{d}T23:59:59+00:00")\
+                        .order("timestamp", desc=True)\
+                        .limit(1).execute()
+                    if cmp_day_q.data:
+                        day_cmp = float(cmp_day_q.data[0]["cmp"])
+                except:
+                    pass
+
+                wall_migration.append({
+                    "date":       d,
+                    "ce_wall":    max(day_ce, key=day_ce.get),
+                    "pe_wall":    max(day_pe, key=day_pe.get),
+                    "ce_wall_oi": day_ce[max(day_ce, key=day_ce.get)],
+                    "pe_wall_oi": day_pe[max(day_pe, key=day_pe.get)],
+                    "cmp":        day_cmp,  # ← NEW: closing price for this day
+                })
+
+    wall_migration.reverse()
 
     return {
         "symbol":          symbol,
