@@ -353,7 +353,7 @@ def update_cpr_status():
                     "is_virgin":         is_virgin,
                     "status_updated_at": now_utc,
                 })\
-                .eq("trade_date", today)\
+                .gte("trade_date", today).order("trade_date", desc=False).limit(500)\
                 .eq("symbol", sym)\
                 .execute()
         except Exception as e:
