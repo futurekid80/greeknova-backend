@@ -182,23 +182,21 @@ def run_full_capture():
         print(f"  ✅ Saved {len(records)} OI + {len(cmp_records)} CMP records")
 
         # ── Run alert engine after every successful capture ────────────────────
+        t# ── Run alert engine after every successful capture ────────────────────
         try:
             from services.alert_engine import run_alert_check
             run_alert_check()
-            
+        except Exception as ae:
+            print(f"  ⚠️ Alert engine error: {ae}")
+
         try:
             from api.cpr import update_cpr_status
             update_cpr_status()
         except Exception as ce:
             print(f"  ⚠️ CPR status update error: {ce}")
-            
-        except Exception as ce:
-            print(f"  ⚠️ CPR status update error: {ce}")
-        except Exception as ae:
-            print(f"  ⚠️ Alert engine error: {ae}")
 
-    except Exception as e:
-        print(f"  ❌ Capture failed: {e}")
+        except Exception as e:
+            print(f"  ❌ Capture failed: {e}")
 
 
 scheduler = BackgroundScheduler()
