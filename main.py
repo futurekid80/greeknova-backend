@@ -397,6 +397,11 @@ def vacuum_scanner(max_distance_pct: float = 10.0):
     from api.vacuum_scanner import get_vacuum_scanner
     return get_vacuum_scanner(max_distance_pct=max_distance_pct)
 
+@app.get("/signal-log")
+def signal_log(date: str = None, symbol: str = None):
+    from api.signal_log import get_signal_log
+    return get_signal_log(date, symbol)
+
 @app.get("/oi-heatmap/{symbol}")
 def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
     from api.oi_heatmap import get_oi_heatmap
