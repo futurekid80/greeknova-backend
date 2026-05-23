@@ -396,6 +396,11 @@ def oi_profile(symbol: str, date: str = None, expiry: str = None):
 def vacuum_scanner(max_distance_pct: float = 10.0):
     from api.vacuum_scanner import get_vacuum_scanner
     return get_vacuum_scanner(max_distance_pct=max_distance_pct)
+    
+@app.get("/cpr-scanner")
+def cpr_scanner():
+    from api.cpr import get_cpr_scanner
+    return get_cpr_scanner()
 
 @app.get("/signal-log")
 def signal_log(date: str = None, symbol: str = None):
