@@ -185,6 +185,13 @@ def run_full_capture():
         try:
             from services.alert_engine import run_alert_check
             run_alert_check()
+            
+        try:    
+            from api.cpr import update_cpr_status
+            update_cpr_status()
+            
+        except Exception as ce:
+            print(f"  ⚠️ CPR status update error: {ce}")
         except Exception as ae:
             print(f"  ⚠️ Alert engine error: {ae}")
 
@@ -401,6 +408,11 @@ def vacuum_scanner(max_distance_pct: float = 10.0):
 def cpr_scanner():
     from api.cpr import get_cpr_scanner
     return get_cpr_scanner()
+
+@app.get("/cpr-compute")
+def cpr_compute():
+    from api.cpr import compute_and_store_cpr
+    return compute_and_store_cpr()
 
 @app.get("/signal-log")
 def signal_log(date: str = None, symbol: str = None):
