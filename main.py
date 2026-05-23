@@ -59,6 +59,10 @@ _last_cmp: dict = {}
 
 def run_full_capture():
     global _last_cmp
+    # ── Only capture if explicitly enabled ───────────────────────────────────
+    # Set CAPTURE_ENABLED=true only on Mac. Railway keeps it unset → skips capture.
+    if os.getenv("CAPTURE_ENABLED", "false").lower() != "true":
+        return
     from dotenv import load_dotenv
     load_dotenv('/Users/apple/optionspulse/.env')
     from datetime import datetime, timezone, timedelta
