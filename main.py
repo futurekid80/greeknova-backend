@@ -186,9 +186,11 @@ def run_full_capture():
             from services.alert_engine import run_alert_check
             run_alert_check()
             
-        try:    
+        try:
             from api.cpr import update_cpr_status
             update_cpr_status()
+        except Exception as ce:
+            print(f"  ⚠️ CPR status update error: {ce}")
             
         except Exception as ce:
             print(f"  ⚠️ CPR status update error: {ce}")
