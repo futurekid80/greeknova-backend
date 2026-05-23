@@ -303,9 +303,11 @@ def update_cpr_status():
 
     # Get today's CPR levels
     cpr_rows = supabase.from_("cpr_levels")\
-        .select("*")\
-        .eq("trade_date", today)\
-        .execute()
+    .select("*")\
+    .gte("trade_date", today)\
+    .order("trade_date", desc=False)\
+    .limit(500)\
+    .execute()
 
     if not cpr_rows.data:
         return
