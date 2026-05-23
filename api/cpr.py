@@ -372,10 +372,16 @@ def get_cpr_scanner():
     today = datetime.now(ist).date().isoformat()
 
     # Try reading from table first
+    # Get today's CPR levels
     cpr_rows = supabase.from_("cpr_levels")\
-        .select("*")\
-        .eq("trade_date", today)\
-        .execute()
+    .select("*")\
+    .gte("trade_date", today)\
+    .order("trade_date", desc=False)\
+    .limit(500)\
+    .execute()
+
+    if not cpr_rows.data:
+        return
 
     if not cpr_rows.data:
         # Fallback — compute live from Kite
