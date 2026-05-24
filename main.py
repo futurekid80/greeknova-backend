@@ -6,7 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
 
-
+# ── CommodityNova additions ────────────────────────────────────────────────
+from commoditynova.mcx_scheduler import start_mcx_scheduler
+from commoditynova.mcx_router import router as mcx_router
+# ──────────────────────────────────────────────────────────────────────────
 
 INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
 TOP30 = [
@@ -59,8 +62,6 @@ _last_cmp: dict = {}
 
 def run_full_capture():
     global _last_cmp
-    # ── Only capture if explicitly enabled ───────────────────────────────────
-    # Set CAPTURE_ENABLED=true only on Mac. Railway keeps it unset → skips capture.
     if os.getenv("CAPTURE_ENABLED", "false").lower() != "true":
         return
     from dotenv import load_dotenv
@@ -82,7 +83,6 @@ def run_full_capture():
         records = []
         cmp_records = []
 
-        # ── Fetch CMP for indices ─────────────────────────────────────────────
         try:
             idx_quotes = kite.quote(list(INDEX_NSE_MAP.values()))
             for sym, key in INDEX_NSE_MAP.items():
@@ -92,7 +92,6 @@ def run_full_capture():
                     _last_cmp[sym] = float(price)
         except Exception as e: print(f"  ⚠️ Index CMP: {e}")
 
-        # ── Fetch CMP for stocks ──────────────────────────────────────────────
         try:
             stk_quotes = kite.quote(list(STOCK_NSE_MAP.values()))
             for sym, key in STOCK_NSE_MAP.items():
@@ -106,8 +105,8 @@ def run_full_capture():
 
         for symbol in INDICES + TOP30:
             is_index = symbol in INDICES
-            limit = 50 if is_index else 20  # total strikes per expiry (25 above + 25 below ATM for indices)
-            half  = limit // 2              # strikes on each side of ATM
+            limit = 50 if is_index else 20
+            half  = limit // 2
 
             found = [i for i in instruments if i["name"] == symbol and i["instrument_type"] in ["CE","PE","FUT"]]
             if not found: continue
@@ -115,8 +114,6 @@ def run_full_capture():
             expiries = sorted(set(i["expiry"] for i in found))
             num_expiries = 3 if is_index else 2
 
-            # ── ATM-centered strike selection ─────────────────────────────────
-            # Get current price for this symbol — use cached CMP or fallback to middle strike
             current_price = _last_cmp.get(symbol, 0)
 
             nearest = []
@@ -126,25 +123,15 @@ def run_full_capture():
                     continue
 
                 if current_price > 0:
-                    # Sort all instruments by distance from current price
-                    # Take `half` strikes below ATM and `half` strikes above ATM
-                    # This gives balanced coverage on both sides
                     exp_instruments.sort(key=lambda i: i["strike"])
                     strikes_sorted = sorted(set(i["strike"] for i in exp_instruments))
-
-                    # Find ATM index
                     atm_strike = min(strikes_sorted, key=lambda s: abs(s - current_price))
                     atm_idx = strikes_sorted.index(atm_strike)
-
-                    # Select `half` strikes on each side of ATM
                     lower_idx = max(0, atm_idx - half)
                     upper_idx = min(len(strikes_sorted) - 1, atm_idx + half)
                     selected_strikes = set(strikes_sorted[lower_idx:upper_idx + 1])
-
-                    # Filter instruments to selected strikes
                     selected = [i for i in exp_instruments if i["strike"] in selected_strikes]
                 else:
-                    # Fallback: no CMP available, use middle of available strikes
                     exp_instruments.sort(key=lambda i: i["strike"])
                     mid = len(exp_instruments) // 2
                     selected = exp_instruments[max(0, mid - half): mid + half]
@@ -181,7 +168,6 @@ def run_full_capture():
             supabase.table("cmp_prices").insert(cmp_records).execute()
         print(f"  ✅ Saved {len(records)} OI + {len(cmp_records)} CMP records")
 
-        # ── Run alert engine after every successful capture ────────────────────
         try:
             from services.alert_engine import run_alert_check
             run_alert_check()
@@ -199,24 +185,35 @@ def run_full_capture():
 
 
 scheduler = BackgroundScheduler(
-    job_defaults={"misfire_grace_time": 300}  # 5 min grace — fires missed jobs on recovery
+    job_defaults={"misfire_grace_time": 300}
 )
+
 def keepalive_ping():
-    """Ping self every 10 mins to prevent Railway idle shutdown"""
     try:
         import requests
         requests.get("https://greeknova-backend-production.up.railway.app/health", timeout=5)
         print("💓 Keepalive ping sent")
     except Exception as e:
         print(f"⚠️ Keepalive failed: {e}")
-        
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── GreekNova jobs (unchanged) ─────────────────────────────────────────
     scheduler.add_job(run_full_capture, "interval", minutes=5, id="full_capture")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
     scheduler.add_job(keepalive_ping, "interval", minutes=10, id="keepalive")
     scheduler.start()
+
+    # ── CommodityNova scheduler ────────────────────────────────────────────
+    from services.kite_auth import get_kite_client
+    from utils.db import get_supabase
+    kite = get_kite_client()
+    supabase = get_supabase()
+    start_mcx_scheduler(kite, supabase)
+    # ──────────────────────────────────────────────────────────────────────
+
     print("✅ GreekNova backend started")
+    print("✅ CommodityNova MCX scheduler started")
     print("📸 Full capture every 5 min during market hours")
     print("🔔 Alert engine: wired into capture cycle")
     print("🎯 ATM-centered strike selection: 25 above + 25 below for indices")
@@ -408,7 +405,7 @@ def oi_profile(symbol: str, date: str = None, expiry: str = None):
 def vacuum_scanner(max_distance_pct: float = 10.0):
     from api.vacuum_scanner import get_vacuum_scanner
     return get_vacuum_scanner(max_distance_pct=max_distance_pct)
-    
+
 @app.get("/cpr-scanner")
 def cpr_scanner():
     from api.cpr import get_cpr_scanner
@@ -428,3 +425,7 @@ def signal_log(date: str = None, symbol: str = None):
 def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
     from api.oi_heatmap import get_oi_heatmap
     return get_oi_heatmap(symbol=symbol, date=date, expiry=expiry)
+
+# ── CommodityNova routes ───────────────────────────────────────────────────
+app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
+# ──────────────────────────────────────────────────────────────────────────
