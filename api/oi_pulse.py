@@ -88,7 +88,7 @@ def fetch_oi_for_timestamp(supabase, timestamp):
 
 
 def get_latest_market_timestamp(supabase):
-    since = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
+    since = (datetime.now(timezone.utc) - timedelta(days=5)).strftime('%Y-%m-%d')
     result = supabase.from_("oi_snapshots") \
         .select("timestamp") \
         .eq("symbol", "NIFTY") \
