@@ -116,20 +116,19 @@ def get_latest_market_timestamp(supabase):
     return None
 
 
-def get_prev_market_timestamp(supabase, before_ts: str):
-    current_date = before_ts[:10]
-    # Get FIRST snapshot of same trading day (open)
+def get_prev_market_timestamp(supabase, current_date: str):
+    """Get last snapshot of the PREVIOUS trading day — EOD to EOD comparison"""
     result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{current_date}T00:00:00+00:00")\
-        .lt("timestamp", f"{current_date}T23:59:59+00:00")\
-        .order("timestamp", desc=False)\
+        .lt("timestamp", f"{current_date}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
         .limit(100)\
         .execute()
     for r in (result.data or []):
         if is_market_ts(r["timestamp"]):
             return r["timestamp"]
+    return result.data[0]["timestamp"] if result.data else None
     # Fallback: previous day's last snapshot
     result2 = supabase.from_("oi_snapshots")\
         .select("timestamp")\
@@ -199,7 +198,7 @@ def get_oi_pulse():
     today_ts = get_timestamps_for_date(supabase, active_date)
 
     # Step 2: Get previous trading day's last snapshot
-    ts_old = get_prev_market_timestamp(supabase, ts_new)
+    ts_old = get_prev_market_timestamp(supabase, active_date)
     if not ts_old:
         ts_old = today_ts[0] if today_ts else ts_new
 
