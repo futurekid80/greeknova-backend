@@ -6,7 +6,7 @@ import time as time_module
 # Simple in-memory cache — avoids repeated heavy queries
 _pulse_cache: dict = {}
 _pulse_cache_time: float = 0
-PULSE_CACHE_TTL = 60  # seconds
+PULSE_CACHE_TTL = 60  # seconds post-market, 15s during market
 
 STOCK_NSE_MAP = {
     "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
@@ -75,10 +75,7 @@ def classify(oi_chg_pct, price_chg_pct):
     return "NEUTRAL", "Neutral", "text-gray-400", "bg-gray-900/30", "border-gray-800"
 
 
-# ── FIX: Paginated fetch — old limit(50000) was cutting off at ~30 stocks
-# 66 symbols × 1280 rows = 84,480 rows needed, well over 50k
 def get_nearest_expiry_per_symbol(supabase, timestamp: str) -> dict:
-    """Get nearest active expiry for each symbol at a given timestamp"""
     today = timestamp[:10]
     result = supabase.from_("oi_snapshots")\
         .select("symbol, expiry")\
@@ -95,7 +92,6 @@ def get_nearest_expiry_per_symbol(supabase, timestamp: str) -> dict:
 
 
 def fetch_fut_oi_for_timestamp(supabase, timestamp: str) -> dict:
-    """Fetch futures OI per symbol — clean directional signal source"""
     result = supabase.from_("oi_snapshots")\
         .select("symbol, oi")\
         .eq("timestamp", timestamp)\
@@ -109,7 +105,6 @@ def fetch_fut_oi_for_timestamp(supabase, timestamp: str) -> dict:
 
 
 def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = None):
-    """Fetch options OI — used for breadth/activity, not directional signals"""
     all_rows = []
     for offset in range(0, 500000, 1000):
         batch = supabase.from_("oi_snapshots")\
@@ -139,7 +134,7 @@ def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = 
 
 
 def get_latest_market_timestamp(supabase):
-    # Find most recent trading day that has data
+    """Find most recent trading day that has market-hours data"""
     for days_back in range(6):
         check_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime('%Y-%m-%d')
         result = supabase.from_("oi_snapshots")\
@@ -153,17 +148,6 @@ def get_latest_market_timestamp(supabase):
         for r in (result.data or []):
             if is_market_ts(r["timestamp"]):
                 return r["timestamp"]
-    return None
-    result = supabase.from_("oi_snapshots") \
-        .select("timestamp") \
-        .eq("symbol", "NIFTY") \
-        .gte("timestamp", f"{since}T00:00:00+00:00") \
-        .order("timestamp", desc=True) \
-        .limit(500) \
-        .execute()
-    for r in (result.data or []):
-        if is_market_ts(r["timestamp"]):
-            return r["timestamp"]
     return None
 
 
@@ -194,29 +178,14 @@ def get_prev_market_timestamp(supabase, current_date: str):
     return result2.data[0]["timestamp"] if result2.data else None
 
 
-def get_prices_for_timestamp(supabase, timestamp: str):
-    result = supabase.from_("oi_snapshots") \
-        .select("symbol, last_price") \
-        .eq("timestamp", timestamp) \
-        .limit(5000) \
-        .execute()
-    prices = {}
-    seen = set()
-    for r in (result.data or []):
-        if r["symbol"] not in seen and r.get("last_price"):
-            prices[r["symbol"]] = r["last_price"]
-            seen.add(r["symbol"])
-    return prices
-
-
 def get_timestamps_for_date(supabase, date_str: str) -> list:
-    result = supabase.from_("oi_snapshots") \
-        .select("timestamp") \
-        .eq("symbol", "NIFTY") \
-        .gte("timestamp", f"{date_str}T00:00:00+00:00") \
-        .lt("timestamp", f"{date_str}T23:59:59+00:00") \
-        .order("timestamp", desc=False) \
-        .limit(500) \
+    result = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{date_str}T00:00:00+00:00")\
+        .lt("timestamp", f"{date_str}T23:59:59+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(500)\
         .execute()
     return sorted(set(r["timestamp"] for r in (result.data or [])))
 
@@ -234,8 +203,6 @@ def to_ist(ts: str) -> str:
         return ts[11:16]
 
 
-# ── FIX: Removed filter_type param — backend now always returns ALL symbols
-# Frontend handles All/Index/Stocks filtering locally (no extra API calls)
 def get_oi_pulse():
     global _pulse_cache, _pulse_cache_time
 
@@ -255,16 +222,16 @@ def get_oi_pulse():
     active_date = ts_new[:10]
     today_ts = get_timestamps_for_date(supabase, active_date)
 
-    # Step 2: Get previous trading day's last snapshot
+    # Step 2: Get first snapshot of same day (intraday comparison)
     ts_old = get_prev_market_timestamp(supabase, active_date)
     if not ts_old:
         ts_old = today_ts[0] if today_ts else ts_new
 
-# Step 3a: Futures OI for directional signals (Long/Short Buildup)
+    # Step 3a: Futures OI for directional signals
     fut_oi_old = fetch_fut_oi_for_timestamp(supabase, ts_old)
     fut_oi_new = fetch_fut_oi_for_timestamp(supabase, ts_new)
 
-    # Step 3b: Options OI for total activity display
+    # Step 3b: Options OI for activity display
     nearest_expiry_map = get_nearest_expiry_per_symbol(supabase, ts_new)
     old_rows = fetch_oi_for_timestamp(supabase, ts_old, nearest_expiry_map)
     new_rows = fetch_oi_for_timestamp(supabase, ts_new, nearest_expiry_map)
@@ -295,8 +262,6 @@ def get_oi_pulse():
             print(f"[OI Pulse] Live price fetch failed: {e}")
 
     if not prices:
-        active_date = ts_new[:10]
-        # Use cmp_prices table for stock prices — NOT option LTP from oi_snapshots
         cmp_result = supabase.from_("cmp_prices")\
             .select("symbol, cmp, timestamp")\
             .gte("timestamp", f"{active_date}T00:00:00+00:00")\
@@ -304,7 +269,6 @@ def get_oi_pulse():
             .order("timestamp", desc=False)\
             .limit(5000)\
             .execute()
-        
         first_cmp: dict = {}
         last_cmp: dict = {}
         for r in (cmp_result.data or []):
@@ -312,18 +276,16 @@ def get_oi_pulse():
             if sym not in first_cmp:
                 first_cmp[sym] = float(r["cmp"])
             last_cmp[sym] = float(r["cmp"])
-        
         for sym in last_cmp:
             prices[sym] = {
                 "ltp": last_cmp[sym],
                 "prev_close": first_cmp.get(sym, last_cmp[sym])
             }
 
-    # Step 5: Build items for ALL symbols — no filter here
+    # Step 5: Build items
     items = []
     for sym in ALL_SYMBOLS:
         is_index = sym in INDEX_NSE_MAP
-
         o_old = oi_old.get(sym, 0)
         o_new = oi_new.get(sym, 0)
         if o_new == 0:
@@ -343,15 +305,12 @@ def get_oi_pulse():
             if prev and prev > 0:
                 price_chg_pct = round((ltp - prev) / prev * 100, 2)
 
-        # Use futures OI for directional classification if available
-        # Fall back to options OI for indices (index futures less relevant)
         if has_futures_data and not is_index and sym in fut_oi_new:
             f_old = fut_oi_old.get(sym, 0)
             f_new = fut_oi_new.get(sym, 0)
             fut_chg_pct = round((f_new - f_old) / f_old * 100, 2) if f_old > 0 else 0
             signal, label, color, bg, border = classify(fut_chg_pct, price_chg_pct)
         else:
-            # Indices: use options OI PCR direction for classification
             signal, label, color, bg, border = classify(oi_chg_pct, price_chg_pct)
 
         items.append({
