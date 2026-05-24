@@ -16,14 +16,12 @@ TOTP_SECRET = os.getenv('ZERODHA_TOTP_SECRET', '')
 
 
 def save_token_to_supabase(access_token: str):
-    """Save today's token to Supabase so Claude Code routines can use it"""
+    """Save today's token to Supabase so Railway + Claude Code routines can use it"""
     try:
         from utils.db import get_supabase
         supabase = get_supabase()
         today = time.strftime("%Y-%m-%d")
         now   = time.strftime("%Y-%m-%d %H:%M:%S+00")
-
-        # Upsert — update if exists, insert if not
         supabase.from_("user_kite_tokens").upsert({
             "email":             "hardhittrader@gmail.com",
             "kite_user_id":      USER_ID,
@@ -32,10 +30,29 @@ def save_token_to_supabase(access_token: str):
             "token_date":        today,
             "connected_at":      now,
         }, on_conflict="email").execute()
-
         print(f"  ✅ Token saved to Supabase for {today}")
     except Exception as e:
         print(f"  ⚠️ Could not save token to Supabase: {e}")
+
+
+def get_token_from_supabase() -> str | None:
+    """Read today's token from Supabase — Railway's source of truth"""
+    try:
+        from utils.db import get_supabase
+        supabase = get_supabase()
+        today = time.strftime("%Y-%m-%d")
+        result = supabase.from_("user_kite_tokens")\
+            .select("kite_access_token, token_date")\
+            .eq("email", "hardhittrader@gmail.com")\
+            .eq("token_date", today)\
+            .limit(1).execute()
+        if result.data:
+            token = result.data[0]["kite_access_token"]
+            print(f"  ✅ Token loaded from Supabase for {today}")
+            return token
+    except Exception as e:
+        print(f"  ⚠️ Could not read token from Supabase: {e}")
+    return None
 
 
 def auto_login() -> str:
@@ -105,24 +122,20 @@ def auto_login() -> str:
     # Step 4: Exchange for access_token
     from kiteconnect import KiteConnect
     kite = KiteConnect(api_key=API_KEY)
-
-    import hashlib
-    checksum = hashlib.sha256(f"{API_KEY}{request_token}{API_SECRET}".encode()).hexdigest()
-
     session_data = kite.generate_session(request_token, api_secret=API_SECRET)
     access_token = session_data["access_token"]
 
-    # Save token to local file
-    with open(TOKEN_FILE, 'w') as f:
-        json.dump({
-            "access_token": access_token,
-            "timestamp":    time.time(),
-            "date":         time.strftime("%Y-%m-%d")
-        }, f)
+    # Save to local file (Mac) + Supabase (Railway)
+    try:
+        with open(TOKEN_FILE, 'w') as f:
+            json.dump({
+                "access_token": access_token,
+                "timestamp":    time.time(),
+                "date":         time.strftime("%Y-%m-%d")
+            }, f)
+    except Exception:
+        pass  # Local file optional — Supabase is the source of truth
 
-    print(f"  ✅ Access token saved: {access_token[:8]}...")
-
-    # Save token to Supabase so Claude Code routines can use it
     save_token_to_supabase(access_token)
 
     kite.set_access_token(access_token)
@@ -130,28 +143,41 @@ def auto_login() -> str:
 
 
 def get_kite_client():
-    """Get authenticated Kite client — auto-logins if token expired"""
+    """
+    Get authenticated Kite client.
+    Priority: 1) Local file (Mac), 2) Supabase (Railway), 3) Auto-login
+    """
     from kiteconnect import KiteConnect
-
     today = time.strftime("%Y-%m-%d")
 
-    # Check if we have a valid token for today
+    # ── 1. Try local token file (Mac dev environment) ─────────────────────────
     if os.path.exists(TOKEN_FILE):
-        with open(TOKEN_FILE) as f:
-            token_data = json.load(f)
-
-        if token_data.get("date") == today:
-            kite = KiteConnect(api_key=API_KEY)
-            kite.set_access_token(token_data["access_token"])
-            try:
-                kite.profile()  # Validate token
-                print(f"  ✅ Using cached token from today")
+        try:
+            with open(TOKEN_FILE) as f:
+                token_data = json.load(f)
+            if token_data.get("date") == today:
+                kite = KiteConnect(api_key=API_KEY)
+                kite.set_access_token(token_data["access_token"])
+                kite.profile()  # Validate
+                print("  ✅ Using cached local token")
                 return kite
-            except Exception:
-                print("  ⚠️ Cached token invalid, re-logging in...")
+        except Exception:
+            print("  ⚠️ Local token invalid, trying Supabase...")
 
-    # Auto-login
+    # ── 2. Try Supabase token (Railway environment) ───────────────────────────
+    supabase_token = get_token_from_supabase()
+    if supabase_token:
+        kite = KiteConnect(api_key=API_KEY)
+        kite.set_access_token(supabase_token)
+        try:
+            kite.profile()  # Validate
+            print("  ✅ Using Supabase token")
+            return kite
+        except Exception:
+            print("  ⚠️ Supabase token invalid, attempting auto-login...")
+
+    # ── 3. Auto-login (runs on Mac, saves token to Supabase for Railway) ──────
     if TOTP_SECRET and PASSWORD:
         return auto_login()
     else:
-        raise Exception("TOTP_SECRET or PASSWORD not set in .env — cannot auto-login")
+        raise Exception("No valid token found and TOTP_SECRET/PASSWORD not set")
