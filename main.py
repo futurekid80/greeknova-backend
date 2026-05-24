@@ -109,7 +109,7 @@ def run_full_capture():
             limit = 50 if is_index else 20  # total strikes per expiry (25 above + 25 below ATM for indices)
             half  = limit // 2              # strikes on each side of ATM
 
-            found = [i for i in instruments if i["name"] == symbol and i["instrument_type"] in ["CE","PE"]]
+            found = [i for i in instruments if i["name"] == symbol and i["instrument_type"] in ["CE","PE","FUT"]]
             if not found: continue
 
             expiries = sorted(set(i["expiry"] for i in found))
@@ -158,18 +158,18 @@ def run_full_capture():
                     if key in quotes:
                         q = quotes[key]
                         records.append({
-                            "timestamp":     timestamp,
-                            "symbol":        symbol,
-                            "tradingsymbol": inst["tradingsymbol"],
-                            "strike":        float(inst["strike"]),
-                            "option_type":   inst["instrument_type"],
-                            "expiry":        inst["expiry"].isoformat(),
-                            "oi":            int(q.get("oi", 0)),
-                            "oi_day_high":   int(q.get("oi_day_high", 0)),
-                            "volume":        int(q.get("volume", 0)),
-                            "last_price":    float(q.get("last_price", 0)),
-                            "is_index":      is_index,
-                        })
+                        "timestamp":       timestamp,
+                        "symbol":          symbol,
+                        "tradingsymbol":   inst["tradingsymbol"],
+                        "strike":          float(inst["strike"]) if inst["instrument_type"] != "FUT" else 0.0,
+                        "option_type":     inst["instrument_type"],
+                        "expiry":          inst["expiry"].isoformat(),
+                        "oi":              int(q.get("oi", 0)),
+                        "oi_day_high":     int(q.get("oi_day_high", 0)),
+                        "volume":          int(q.get("volume", 0)),
+                        "last_price":      float(q.get("last_price", 0)),
+                        "is_index":        is_index,
+                    })
                 time.sleep(0.3)
             except Exception as e:
                 print(f"  ❌ {symbol}: {e}")
