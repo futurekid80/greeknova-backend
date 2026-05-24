@@ -1,31 +1,56 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
+import time as time_module
+
+# ── Per-symbol cache ──────────────────────────────────────────────────────────
+_dates_cache: dict = {}
+_dates_cache_time: dict = {}
+_history_cache: dict = {}
+_history_cache_time: dict = {}
+CACHE_TTL = 300  # 5 minutes
 
 
 def get_available_dates(symbol: str = "NIFTY"):
-    """Get available trading dates — one fast query per day"""
+    """Get available trading dates — ONE query instead of 30"""
+    global _dates_cache, _dates_cache_time
+
+    cache_key = symbol
+    if cache_key in _dates_cache and (time_module.time() - _dates_cache_time.get(cache_key, 0)) < CACHE_TTL:
+        return _dates_cache[cache_key]
+
     supabase = get_supabase()
-    dates = set()
     base = datetime.now(timezone.utc).date()
-    for i in range(30):
-        d = (base - timedelta(days=i)).isoformat()
-        r = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", symbol)\
-            .gte("timestamp", f"{d}T00:00:00+00:00")\
-            .lt("timestamp", f"{d}T23:59:59+00:00")\
-            .limit(1).execute()
-        if r.data:
-            dates.add(d)
-    return {"symbol": symbol, "dates": sorted(dates)}
+    since = (base - timedelta(days=30)).isoformat()
+
+    # Single query — get all timestamps in last 30 days
+    r = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", symbol)\
+        .gte("timestamp", f"{since}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(5000)\
+        .execute()
+
+    # Extract unique dates from timestamps
+    dates = set()
+    for row in (r.data or []):
+        ts = row["timestamp"]
+        # Convert UTC timestamp to IST date
+        try:
+            dt = datetime.fromisoformat(ts.replace('+00:00', '').replace('Z', ''))
+            ist_dt = dt + timedelta(hours=5, minutes=30)
+            dates.add(ist_dt.date().isoformat())
+        except:
+            dates.add(ts[:10])
+
+    result = {"symbol": symbol, "dates": sorted(dates)}
+    _dates_cache[cache_key] = result
+    _dates_cache_time[cache_key] = time_module.time()
+    return result
 
 
 def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
-    """
-    Get EOD OI snapshot — paginated to handle NIFTY's large row count.
-    NIFTY has 200+ strikes × 2 option types = 400+ rows per snapshot.
-    Without pagination, Supabase cuts off at 1000 rows.
-    """
+    """Get EOD OI snapshot — paginated"""
     supabase = get_supabase()
 
     # Get EOD timestamp
@@ -42,7 +67,6 @@ def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
 
     latest_ts = ts_q.data[0]["timestamp"]
 
-    # Fetch ALL rows with pagination — critical for NIFTY
     all_rows = []
     for offset in range(0, 10000, 1000):
         q = supabase.from_("oi_snapshots")\
@@ -50,10 +74,8 @@ def get_eod_snapshot(symbol: str, date: str, expiry: str = None):
             .eq("symbol", symbol)\
             .eq("timestamp", latest_ts)\
             .range(offset, offset + 999)
-
         if expiry:
             q = q.eq("expiry", expiry)
-
         batch = q.execute()
         if not batch.data:
             break
@@ -73,9 +95,9 @@ def get_cmp(symbol: str) -> float | None:
     try:
         from services.kite_auth import get_kite_client
         INDEX_NSE_MAP = {
-            "NIFTY":    "NSE:NIFTY 50",
+            "NIFTY":     "NSE:NIFTY 50",
             "BANKNIFTY": "NSE:NIFTY BANK",
-            "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+            "FINNIFTY":  "NSE:NIFTY FIN SERVICE",
         }
         nse_symbol = INDEX_NSE_MAP.get(symbol, f"NSE:{symbol}")
         kite = get_kite_client()
@@ -94,6 +116,12 @@ def get_atm_strike(cmp: float, strikes: list) -> float | None:
 
 
 def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
+    global _history_cache, _history_cache_time
+
+    cache_key = f"{symbol}_{date_a}_{date_b}_{expiry}"
+    if cache_key in _history_cache and (time_module.time() - _history_cache_time.get(cache_key, 0)) < CACHE_TTL:
+        return _history_cache[cache_key]
+
     supabase = get_supabase()
 
     dates_result = get_available_dates(symbol)
@@ -123,17 +151,17 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
 
     active_expiry = expiry or (expiries[0] if expiries else None)
 
-    # Get snapshots with pagination
+    # Get snapshots in parallel-ish — both dates
     snap_a = get_eod_snapshot(symbol, date_a, active_expiry)
     snap_b = get_eod_snapshot(symbol, date_b, active_expiry)
 
     all_strikes = sorted(set(k[0] for k in list(snap_a.keys()) + list(snap_b.keys())))
 
     rows = []
-    total_ce_buildup  = 0
-    total_ce_unwind   = 0
-    total_pe_buildup  = 0
-    total_pe_unwind   = 0
+    total_ce_buildup = 0
+    total_ce_unwind  = 0
+    total_pe_buildup = 0
+    total_pe_unwind  = 0
 
     for strike in all_strikes:
         ce_a = snap_a.get((strike, "CE"), 0)
@@ -159,7 +187,6 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
             "net_chg": pe_chg - ce_chg,
         })
 
-    # Overall OI structure signal
     if total_ce_buildup > total_pe_buildup and total_pe_unwind > total_ce_unwind:
         structure = "BEARISH"
         structure_desc = "More CE buildup + PE unwinding → resistance growing, support easing"
@@ -176,23 +203,28 @@ def get_oi_comparison(symbol: str = "NIFTY", date_a: str = None, date_b: str = N
         structure = "NEUTRAL"
         structure_desc = "Balanced OI changes — no clear directional bias"
 
-    cmp       = get_cmp(symbol)
+    cmp        = get_cmp(symbol)
     atm_strike = get_atm_strike(cmp, all_strikes) if cmp else None
 
-    return {
-        "symbol":          symbol,
-        "date_a":          date_a,
-        "date_b":          date_b,
-        "expiry":          active_expiry,
-        "expiries":        expiries,
-        "dates":           dates,
-        "cmp":             cmp,
-        "atm_strike":      atm_strike,
+    result = {
+        "symbol":           symbol,
+        "date_a":           date_a,
+        "date_b":           date_b,
+        "expiry":           active_expiry,
+        "expiries":         expiries,
+        "dates":            dates,
+        "cmp":              cmp,
+        "atm_strike":       atm_strike,
         "total_ce_buildup": total_ce_buildup,
         "total_ce_unwind":  total_ce_unwind,
         "total_pe_buildup": total_pe_buildup,
         "total_pe_unwind":  total_pe_unwind,
         "structure":        structure,
         "structure_desc":   structure_desc,
-        "rows":            rows,
+        "rows":             rows,
     }
+
+    _history_cache[cache_key] = result
+    _history_cache_time[cache_key] = time_module.time()
+
+    return result
