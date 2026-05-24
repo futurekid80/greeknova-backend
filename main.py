@@ -198,8 +198,9 @@ def run_full_capture():
         print(f"  ❌ Capture failed: {e}")
 
 
-scheduler = BackgroundScheduler()
-
+scheduler = BackgroundScheduler(
+    job_defaults={"misfire_grace_time": 300}  # 5 min grace — fires missed jobs on recovery
+)
 def keepalive_ping():
     """Ping self every 10 mins to prevent Railway idle shutdown"""
     try:
