@@ -200,10 +200,20 @@ def run_full_capture():
 
 scheduler = BackgroundScheduler()
 
+def keepalive_ping():
+    """Ping self every 10 mins to prevent Railway idle shutdown"""
+    try:
+        import requests
+        requests.get("https://greeknova-backend-production.up.railway.app/health", timeout=5)
+        print("💓 Keepalive ping sent")
+    except Exception as e:
+        print(f"⚠️ Keepalive failed: {e}")
+        
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     scheduler.add_job(run_full_capture, "interval", minutes=5, id="full_capture")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
+    scheduler.add_job(keepalive_ping, "interval", minutes=10, id="keepalive")
     scheduler.start()
     print("✅ GreekNova backend started")
     print("📸 Full capture every 5 min during market hours")
