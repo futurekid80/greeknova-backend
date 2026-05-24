@@ -295,19 +295,14 @@ def auto_refresh_token():
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     if now.weekday() >= 5: return
-    print(f"🔐 Auto token refresh at {now.strftime('%H:%M IST')}...")
+    print(f"🔐 Railway auto-login at {now.strftime('%H:%M IST')}...")
     try:
-        import os
-        os.remove(os.path.expanduser('~/.greeksnova_token'))
-    except:
-        pass
-    try:
-        from services.kite_auth import get_kite_client
-        kite = get_kite_client()
+        from services.kite_auth import auto_login
+        kite = auto_login()
         profile = kite.profile()
-        print(f"✅ Auto-login successful: {profile['user_name']}")
+        print(f"✅ Railway auto-login successful: {profile['user_name']}")
     except Exception as e:
-        print(f"❌ Auto-login failed: {e}")
+        print(f"❌ Railway auto-login failed: {e}")
 
 @app.get("/uoa")
 def uoa(date: str = None):
