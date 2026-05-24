@@ -148,23 +148,23 @@ def get_latest_market_timestamp(supabase):
 
 
 def get_prev_market_timestamp(supabase, current_date: str):
-    """Get last snapshot of the PREVIOUS trading day — EOD to EOD comparison"""
+    """Get FIRST snapshot of the SAME trading day — intraday comparison"""
     result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", "NIFTY")\
-        .lt("timestamp", f"{current_date}T00:00:00+00:00")\
-        .order("timestamp", desc=True)\
-        .limit(100)\
+        .gte("timestamp", f"{current_date}T03:30:00+00:00")\
+        .lt("timestamp", f"{current_date}T10:30:00+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(10)\
         .execute()
     for r in (result.data or []):
         if is_market_ts(r["timestamp"]):
             return r["timestamp"]
-    return result.data[0]["timestamp"] if result.data else None
-    # Fallback: previous day's last snapshot
+    # Fallback to previous day EOD
     result2 = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", "NIFTY")\
-        .lt("timestamp", f"{current_date}T00:00:00+00:00")\
+        .lt("timestamp", f"{current_date}T03:30:00+00:00")\
         .order("timestamp", desc=True)\
         .limit(100)\
         .execute()
