@@ -23,13 +23,25 @@ def get_available_dates(symbol: str = "NIFTY"):
     since = (base - timedelta(days=30)).isoformat()
 
     # Single query — get all timestamps in last 30 days
-    r = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", symbol)\
-        .gte("timestamp", f"{since}T00:00:00+00:00")\
-        .order("timestamp", desc=True)\
-        .limit(5000)\
-        .execute()
+# Get one timestamp per day — much faster and avoids limit issues
+    dates = set()
+    check = base
+    for _ in range(30):
+        d = check.isoformat()
+        r = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", symbol)\
+            .gte("timestamp", f"{d}T00:00:00+00:00")\
+            .lt("timestamp", f"{d}T23:59:59+00:00")\
+            .limit(1).execute()
+        if r.data:
+            dates.add(d)
+        check -= timedelta(days=1)
+
+    result = {"symbol": symbol, "dates": sorted(dates)}
+    _dates_cache[cache_key] = result
+    _dates_cache_time[cache_key] = time_module.time()
+    return result
 
     # Extract unique dates from timestamps
     dates = set()
