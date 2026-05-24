@@ -7,8 +7,8 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
 
 # ── CommodityNova additions ────────────────────────────────────────────────
-from commoditynova.mcx_scheduler import start_mcx_scheduler
-from commoditynova.mcx_router import router as mcx_router
+#from commoditynova.mcx_scheduler import start_mcx_scheduler
+#from commoditynova.mcx_router import router as mcx_router
 # ──────────────────────────────────────────────────────────────────────────
 
 INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
@@ -209,7 +209,7 @@ async def lifespan(app: FastAPI):
     from utils.db import get_supabase
     kite = get_kite_client()
     supabase = get_supabase()
-    start_mcx_scheduler(kite, supabase)
+    #start_mcx_scheduler(kite, supabase)
     # ──────────────────────────────────────────────────────────────────────
 
     print("✅ GreekNova backend started")
@@ -427,5 +427,5 @@ def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
     return get_oi_heatmap(symbol=symbol, date=date, expiry=expiry)
 
 # ── CommodityNova routes ───────────────────────────────────────────────────
-app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
+#app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
 # ──────────────────────────────────────────────────────────────────────────
