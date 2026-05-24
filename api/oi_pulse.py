@@ -88,7 +88,21 @@ def fetch_oi_for_timestamp(supabase, timestamp):
 
 
 def get_latest_market_timestamp(supabase):
-    since = (datetime.now(timezone.utc) - timedelta(days=5)).strftime('%Y-%m-%d')
+    # Find most recent trading day that has data
+    for days_back in range(6):
+        check_date = (datetime.now(timezone.utc) - timedelta(days=days_back)).strftime('%Y-%m-%d')
+        result = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .gte("timestamp", f"{check_date}T00:00:00+00:00")\
+            .lt("timestamp", f"{check_date}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(100)\
+            .execute()
+        for r in (result.data or []):
+            if is_market_ts(r["timestamp"]):
+                return r["timestamp"]
+    return None
     result = supabase.from_("oi_snapshots") \
         .select("timestamp") \
         .eq("symbol", "NIFTY") \
@@ -104,17 +118,30 @@ def get_latest_market_timestamp(supabase):
 
 def get_prev_market_timestamp(supabase, before_ts: str):
     current_date = before_ts[:10]
-    result = supabase.from_("oi_snapshots") \
-        .select("timestamp") \
-        .eq("symbol", "NIFTY") \
-        .lt("timestamp", f"{current_date}T00:00:00+00:00") \
-        .order("timestamp", desc=True) \
-        .limit(500) \
+    # Get FIRST snapshot of same trading day (open)
+    result = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{current_date}T00:00:00+00:00")\
+        .lt("timestamp", f"{current_date}T23:59:59+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(100)\
         .execute()
     for r in (result.data or []):
         if is_market_ts(r["timestamp"]):
             return r["timestamp"]
-    return result.data[0]["timestamp"] if result.data else None
+    # Fallback: previous day's last snapshot
+    result2 = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .lt("timestamp", f"{current_date}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(100)\
+        .execute()
+    for r in (result2.data or []):
+        if is_market_ts(r["timestamp"]):
+            return r["timestamp"]
+    return result2.data[0]["timestamp"] if result2.data else None
 
 
 def get_prices_for_timestamp(supabase, timestamp: str):
@@ -204,12 +231,28 @@ def get_oi_pulse():
             print(f"[OI Pulse] Live price fetch failed: {e}")
 
     if not prices:
-        ltp_map  = get_prices_for_timestamp(supabase, ts_new)
-        prev_map = get_prices_for_timestamp(supabase, ts_old)
-        for sym in ltp_map:
+        active_date = ts_new[:10]
+        # Use cmp_prices table for stock prices — NOT option LTP from oi_snapshots
+        cmp_result = supabase.from_("cmp_prices")\
+            .select("symbol, cmp, timestamp")\
+            .gte("timestamp", f"{active_date}T00:00:00+00:00")\
+            .lt("timestamp", f"{active_date}T23:59:59+00:00")\
+            .order("timestamp", desc=False)\
+            .limit(5000)\
+            .execute()
+        
+        first_cmp: dict = {}
+        last_cmp: dict = {}
+        for r in (cmp_result.data or []):
+            sym = r["symbol"]
+            if sym not in first_cmp:
+                first_cmp[sym] = float(r["cmp"])
+            last_cmp[sym] = float(r["cmp"])
+        
+        for sym in last_cmp:
             prices[sym] = {
-                "ltp": ltp_map[sym],
-                "prev_close": prev_map.get(sym, ltp_map[sym])
+                "ltp": last_cmp[sym],
+                "prev_close": first_cmp.get(sym, last_cmp[sym])
             }
 
     # Step 5: Build items for ALL symbols — no filter here
