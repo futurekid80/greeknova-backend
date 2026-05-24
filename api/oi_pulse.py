@@ -71,20 +71,51 @@ def classify(oi_chg_pct, price_chg_pct):
 
 # ── FIX: Paginated fetch — old limit(50000) was cutting off at ~30 stocks
 # 66 symbols × 1280 rows = 84,480 rows needed, well over 50k
-def fetch_oi_for_timestamp(supabase, timestamp):
+def get_nearest_expiry_per_symbol(supabase, timestamp: str) -> dict:
+    """Get nearest active expiry for each symbol at a given timestamp"""
+    today = timestamp[:10]
+    result = supabase.from_("oi_snapshots")\
+        .select("symbol, expiry")\
+        .eq("timestamp", timestamp)\
+        .gte("expiry", today)\
+        .execute()
+    nearest = {}
+    for r in (result.data or []):
+        sym = r["symbol"]
+        exp = r["expiry"]
+        if exp and (sym not in nearest or exp < nearest[sym]):
+            nearest[sym] = exp
+    return nearest
+
+
+def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = None):
+    """Fetch OI filtered to nearest expiry per symbol — avoids rollover inflation"""
     all_rows = []
     for offset in range(0, 500000, 1000):
-        batch = supabase.from_("oi_snapshots") \
-            .select("symbol, oi") \
-            .eq("timestamp", timestamp) \
-            .range(offset, offset + 999) \
+        batch = supabase.from_("oi_snapshots")\
+            .select("symbol, oi, expiry")\
+            .eq("timestamp", timestamp)\
+            .range(offset, offset + 999)\
             .execute()
         if not batch.data:
             break
         all_rows.extend(batch.data)
         if len(batch.data) < 1000:
             break
-    return all_rows
+
+    if not nearest_expiry_map:
+        return all_rows
+
+    # Filter each row to nearest expiry for that symbol
+    filtered = []
+    for r in all_rows:
+        sym = r["symbol"]
+        nearest = nearest_expiry_map.get(sym)
+        if nearest and r.get("expiry") == nearest:
+            filtered.append(r)
+        elif not nearest:
+            filtered.append(r)
+    return filtered
 
 
 def get_latest_market_timestamp(supabase):
@@ -202,9 +233,10 @@ def get_oi_pulse():
     if not ts_old:
         ts_old = today_ts[0] if today_ts else ts_new
 
-    # Step 3: Fetch OI — paginated to get all 66 symbols
-    old_rows = fetch_oi_for_timestamp(supabase, ts_old)
-    new_rows = fetch_oi_for_timestamp(supabase, ts_new)
+    # Step 3: Fetch OI — filtered to nearest expiry to avoid rollover inflation
+    nearest_expiry_map = get_nearest_expiry_per_symbol(supabase, ts_new)
+    old_rows = fetch_oi_for_timestamp(supabase, ts_old, nearest_expiry_map)
+    new_rows = fetch_oi_for_timestamp(supabase, ts_new, nearest_expiry_map)
 
     oi_old = defaultdict(int)
     oi_new = defaultdict(int)
