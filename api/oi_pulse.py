@@ -1,6 +1,12 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
+import time as time_module
+
+# Simple in-memory cache — avoids repeated heavy queries
+_pulse_cache: dict = {}
+_pulse_cache_time: float = 0
+PULSE_CACHE_TTL = 60  # seconds
 
 STOCK_NSE_MAP = {
     "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
@@ -231,6 +237,13 @@ def to_ist(ts: str) -> str:
 # ── FIX: Removed filter_type param — backend now always returns ALL symbols
 # Frontend handles All/Index/Stocks filtering locally (no extra API calls)
 def get_oi_pulse():
+    global _pulse_cache, _pulse_cache_time
+
+    # Return cached result if fresh enough
+    cache_ttl = 15 if is_market_hours() else PULSE_CACHE_TTL
+    if _pulse_cache and (time_module.time() - _pulse_cache_time) < cache_ttl:
+        return _pulse_cache
+
     supabase = get_supabase()
     live = is_market_hours()
 
@@ -359,7 +372,7 @@ def get_oi_pulse():
 
     items.sort(key=lambda x: abs(x["oi_chg_pct"]), reverse=True)
 
-    return {
+    result = {
         "items":       items,
         "count":       len(items),
         "as_of":       datetime.now(timezone.utc).isoformat(),
@@ -369,3 +382,9 @@ def get_oi_pulse():
         "close_time":  to_ist(ts_new),
         "snapshots":   len(today_ts),
     }
+
+    # Cache result
+    _pulse_cache = result
+    _pulse_cache_time = time_module.time()
+
+    return result
