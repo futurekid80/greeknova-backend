@@ -88,13 +88,28 @@ def get_nearest_expiry_per_symbol(supabase, timestamp: str) -> dict:
     return nearest
 
 
+def fetch_fut_oi_for_timestamp(supabase, timestamp: str) -> dict:
+    """Fetch futures OI per symbol — clean directional signal source"""
+    result = supabase.from_("oi_snapshots")\
+        .select("symbol, oi")\
+        .eq("timestamp", timestamp)\
+        .eq("option_type", "FUT")\
+        .limit(5000)\
+        .execute()
+    fut_oi = defaultdict(int)
+    for r in (result.data or []):
+        fut_oi[r["symbol"]] += r["oi"] or 0
+    return fut_oi
+
+
 def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = None):
-    """Fetch OI filtered to nearest expiry per symbol — avoids rollover inflation"""
+    """Fetch options OI — used for breadth/activity, not directional signals"""
     all_rows = []
     for offset in range(0, 500000, 1000):
         batch = supabase.from_("oi_snapshots")\
             .select("symbol, oi, expiry")\
             .eq("timestamp", timestamp)\
+            .in_("option_type", ["CE", "PE"])\
             .range(offset, offset + 999)\
             .execute()
         if not batch.data:
@@ -106,7 +121,6 @@ def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = 
     if not nearest_expiry_map:
         return all_rows
 
-    # Filter each row to nearest expiry for that symbol
     filtered = []
     for r in all_rows:
         sym = r["symbol"]
@@ -233,7 +247,11 @@ def get_oi_pulse():
     if not ts_old:
         ts_old = today_ts[0] if today_ts else ts_new
 
-    # Step 3: Fetch OI — filtered to nearest expiry to avoid rollover inflation
+# Step 3a: Futures OI for directional signals (Long/Short Buildup)
+    fut_oi_old = fetch_fut_oi_for_timestamp(supabase, ts_old)
+    fut_oi_new = fetch_fut_oi_for_timestamp(supabase, ts_new)
+
+    # Step 3b: Options OI for total activity display
     nearest_expiry_map = get_nearest_expiry_per_symbol(supabase, ts_new)
     old_rows = fetch_oi_for_timestamp(supabase, ts_old, nearest_expiry_map)
     new_rows = fetch_oi_for_timestamp(supabase, ts_new, nearest_expiry_map)
@@ -244,6 +262,8 @@ def get_oi_pulse():
         oi_old[r["symbol"]] += r["oi"] or 0
     for r in new_rows:
         oi_new[r["symbol"]] += r["oi"] or 0
+
+    has_futures_data = len(fut_oi_new) > 0
 
     # Step 4: Get prices
     prices = {}
@@ -310,7 +330,16 @@ def get_oi_pulse():
             if prev and prev > 0:
                 price_chg_pct = round((ltp - prev) / prev * 100, 2)
 
-        signal, label, color, bg, border = classify(oi_chg_pct, price_chg_pct)
+        # Use futures OI for directional classification if available
+        # Fall back to options OI for indices (index futures less relevant)
+        if has_futures_data and not is_index and sym in fut_oi_new:
+            f_old = fut_oi_old.get(sym, 0)
+            f_new = fut_oi_new.get(sym, 0)
+            fut_chg_pct = round((f_new - f_old) / f_old * 100, 2) if f_old > 0 else 0
+            signal, label, color, bg, border = classify(fut_chg_pct, price_chg_pct)
+        else:
+            # Indices: use options OI PCR direction for classification
+            signal, label, color, bg, border = classify(oi_chg_pct, price_chg_pct)
 
         items.append({
             "symbol":        sym,
