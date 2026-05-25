@@ -19,7 +19,7 @@ SYMBOLS = [
 def get_monthly_expiry(year: int, month: int) -> str:
     last_day = calendar.monthrange(year, month)[1]
     d = datetime(year, month, last_day)
-    while d.weekday() != 3:
+    while d.weekday() != 1:  # 1 = Tuesday (NSE changed from Thursday to Tuesday Sep 2025)
         d -= timedelta(days=1)
     return d.strftime('%Y-%m-%d')
 
