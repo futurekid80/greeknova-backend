@@ -124,10 +124,20 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     total_ce = sum(ce_oi.values())
     total_pe = sum(pe_oi.values())
     total_oi = total_ce + total_pe
-
     poc_strike = max(all_strikes, key=lambda s: (ce_oi.get(s, 0) + pe_oi.get(s, 0)))
     ce_wall = max(ce_oi, key=ce_oi.get) if ce_oi else None
     pe_wall = max(pe_oi, key=pe_oi.get) if pe_oi else None
+
+    # PCR using ATM ±10 strikes only (standardized)
+    strike_interval = 100 if symbol == "BANKNIFTY" else 50
+    if atm_strike:
+        atm_lower = atm_strike - (10 * strike_interval)
+        atm_upper = atm_strike + (10 * strike_interval)
+        atm_ce = sum(ce_oi.get(s, 0) for s in all_strikes if atm_lower <= s <= atm_upper)
+        atm_pe = sum(pe_oi.get(s, 0) for s in all_strikes if atm_lower <= s <= atm_upper)
+        pcr_value = round(atm_pe / atm_ce, 2) if atm_ce > 0 else 0
+    else:
+        pcr_value = round(total_pe / total_ce, 2) if total_ce > 0 else 0
 
     # Value area
     va_threshold = total_oi * 0.70
@@ -323,7 +333,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         "val":             val,
         "total_ce_oi":     total_ce,
         "total_pe_oi":     total_pe,
-        "pcr":             round(total_pe / total_ce, 2) if total_ce > 0 else 0,
+        "pcr":             pcr_value,
         "profile":         profile,
         "wall_migration":  wall_migration,
         "vacuum_count":    sum(1 for p in profile if p["is_vacuum"]),
