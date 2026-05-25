@@ -164,12 +164,12 @@ def get_uoa(date: str = None):
     # ── Persistence: fetch all day activity per tradingsymbol ─────────────────
     # Single query — all snapshots with vol > 50K across today
     all_day_rows = []
-    for offset in range(0, 500000, 1000):
+    for offset in range(0, 50000, 1000):
         batch = supabase.from_("oi_snapshots")\
-            .select("timestamp, tradingsymbol, volume, oi")\
+            .select("timestamp, tradingsymbol, volume")\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
-            .gt("volume", 50000)\
+            .gt("volume", 200000)\
             .range(offset, offset + 999)\
             .execute()
         if not batch.data:
