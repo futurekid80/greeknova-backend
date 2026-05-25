@@ -220,9 +220,15 @@ def get_positional_radar(min_consec: int = 0):
 
     series_start = get_series_start(current_expiry)
 
+    # On expiry day or day before expiry, exclude today to avoid rollover distortion
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    ist_today = datetime.now(ist).date()
+    cutoff = ist_today if ist_today.isoformat() < current_expiry else (ist_today - timedelta(days=1))
+
     trading_dates = []
     check_date = datetime.strptime(series_start, '%Y-%m-%d').date()
-    while check_date <= today:
+    while check_date <= cutoff:
         d = check_date.isoformat()
         check = supabase.from_("oi_snapshots")\
             .select("timestamp")\
