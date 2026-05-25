@@ -313,23 +313,38 @@ def get_oi_pulse():
         else:
             signal, label, color, bg, border = classify(oi_chg_pct, price_chg_pct)
 
+        # Use FUT OI chg for display if available for stocks
+        display_oi_chg_pct = oi_chg_pct
+        fut_oi_now = 0
+        fut_oi_prev = 0
+        if has_futures_data and not is_index and sym in fut_oi_new:
+            f_old = fut_oi_old.get(sym, 0)
+            f_new = fut_oi_new.get(sym, 0)
+            if f_old > 0:
+                display_oi_chg_pct = round((f_new - f_old) / f_old * 100, 2)
+            fut_oi_now  = f_new
+            fut_oi_prev = f_old
+
         items.append({
-            "symbol":        sym,
-            "is_index":      is_index,
-            "oi_now":        o_new,
-            "oi_prev":       o_old,
-            "oi_chg_abs":    oi_chg_abs,
-            "oi_chg_pct":    oi_chg_pct,
-            "ltp":           ltp,
-            "price_chg_pct": price_chg_pct,
-            "signal":        signal,
-            "label":         label,
-            "color":         color,
-            "bg":            bg,
-            "border":        border,
+            "symbol":            sym,
+            "is_index":          is_index,
+            "oi_now":            o_new,
+            "oi_prev":           o_old,
+            "oi_chg_abs":        oi_chg_abs,
+            "oi_chg_pct":        display_oi_chg_pct,
+            "fut_oi_now":        fut_oi_now,
+            "fut_oi_prev":       fut_oi_prev,
+            "has_fut_data":      has_futures_data and not is_index and sym in fut_oi_new,
+            "ltp":               ltp,
+            "price_chg_pct":     price_chg_pct,
+            "signal":            signal,
+            "label":             label,
+            "color":             color,
+            "bg":                bg,
+            "border":            border,
         })
 
-    items.sort(key=lambda x: abs(x["oi_chg_pct"]), reverse=True)
+    items.sort(key=lambda x: (x["has_fut_data"], abs(x["oi_chg_pct"])), reverse=True)
 
     result = {
         "items":       items,
