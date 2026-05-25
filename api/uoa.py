@@ -77,7 +77,7 @@ def get_uoa(date: str = None):
         batch = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
-            ..gte("timestamp", f"{today}T06:00:00+00:00")\
+            .gte("timestamp", f"{today}T06:00:00+00:00")\
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
             .order("timestamp", desc=False)\
             .range(offset, offset + 999)\
