@@ -80,6 +80,10 @@ def get_option_tokens(
     atm_range: int,
     kite: KiteConnect
 ) -> tuple[list, list]:
+    """
+    Fetch instrument tokens for ATM +/- atm_range strikes (CE + PE).
+    Handles MCX options expiring before futures expiry.
+    """
     try:
         results = kite.instruments("MCX")
 
@@ -88,30 +92,37 @@ def get_option_tokens(
             for i in range(-atm_range, atm_range + 1)
         ]
 
-        # Find nearest options expiry on or before futures expiry
-        # Find nearest options expiry — prefer on/before futures expiry, else nearest after
+        # Collect all option expiries for this commodity
         all_option_expiries = sorted(set(
             inst["expiry"] for inst in results
             if inst["name"] == commodity
             and inst["instrument_type"] in ("CE", "PE")
-))
+        ))
 
+        if not all_option_expiries:
+            logger.warning(f"{commodity}: no option expiries found at all")
+            return [], []
+
+        # Prefer latest expiry on/before futures expiry
+        # Fall back to nearest expiry after futures expiry
         before = [e for e in all_option_expiries if e <= expiry]
         after  = [e for e in all_option_expiries if e > expiry]
 
         if before:
-            options_expiry = before[-1]   # latest on/before futures expiry
+            options_expiry = before[-1]
         elif after:
-            options_expiry = after[0]     # nearest after futures expiry
+            options_expiry = after[0]
         else:
-            logger.warning(f"{commodity}: no option expiries found at all")
+            logger.warning(f"{commodity}: no valid option expiry found")
             return [], []
-        # Use the nearest (latest) options expiry
-        options_expiry = option_expiries[-1]
-        logger.info(f"{commodity}: futures expiry {expiry}, using options expiry {options_expiry}")
+
+        logger.info(
+            f"{commodity}: futures expiry {expiry}, "
+            f"using options expiry {options_expiry}"
+        )
 
         symbols = []
-        tokens = []
+        tokens  = []
 
         for inst in results:
             if (
@@ -123,7 +134,10 @@ def get_option_tokens(
                 symbols.append(f"MCX:{inst['tradingsymbol']}")
                 tokens.append(inst["instrument_token"])
 
-        logger.info(f"{commodity}: found {len(symbols)} option instruments around ATM {atm_strike}")
+        logger.info(
+            f"{commodity}: found {len(symbols)} option instruments "
+            f"around ATM {atm_strike}"
+        )
         return symbols, tokens
 
     except Exception as e:
@@ -149,10 +163,12 @@ def seed_mcx_instruments(kite: KiteConnect, supabase) -> bool:
             ltp = quote[futures_info["futures_symbol"]]["last_price"]
 
             if not ltp:
-                logger.warning(f"{commodity}: LTP is 0, skipping ATM calculation")
+                logger.warning(f"{commodity}: LTP is 0, skipping")
                 continue
 
-            atm_strike = get_atm_strike(commodity, ltp, config["strike_step"])
+            atm_strike = get_atm_strike(
+                commodity, ltp, config["strike_step"]
+            )
 
             option_symbols, option_tokens = get_option_tokens(
                 commodity=commodity,
@@ -164,16 +180,16 @@ def seed_mcx_instruments(kite: KiteConnect, supabase) -> bool:
             )
 
             row = {
-                "commodity": commodity,
+                "commodity":      commodity,
                 "futures_symbol": futures_info["futures_symbol"],
-                "futures_token": futures_info["futures_token"],
-                "expiry_date": str(futures_info["expiry_date"]),
-                "atm_strike": atm_strike,
+                "futures_token":  futures_info["futures_token"],
+                "expiry_date":    str(futures_info["expiry_date"]),
+                "atm_strike":     atm_strike,
                 "option_symbols": option_symbols,
-                "option_tokens": option_tokens,
-                "lot_size": config["lot_size"],
-                "tick_size": config["tick_size"],
-                "updated_at": datetime.now(IST).isoformat(),
+                "option_tokens":  option_tokens,
+                "lot_size":       config["lot_size"],
+                "tick_size":      config["tick_size"],
+                "updated_at":     datetime.now(IST).isoformat(),
             }
 
             supabase.table("mcx_instruments_cache").upsert(
@@ -191,7 +207,10 @@ def seed_mcx_instruments(kite: KiteConnect, supabase) -> bool:
             logger.error(f"Failed to seed {commodity}: {e}")
             continue
 
-    logger.info(f"MCX seed complete: {success_count}/{len(MCX_COMMODITIES)} commodities seeded")
+    logger.info(
+        f"MCX seed complete: {success_count}/{len(MCX_COMMODITIES)} "
+        f"commodities seeded"
+    )
     return success_count > 0
 
 
