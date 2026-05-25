@@ -264,6 +264,7 @@ def get_positional_radar(min_consec: int = 0):
                 .select("symbol, oi, volume, option_type")\
                 .eq("timestamp", eod_ts)\
                 .in_("option_type", ["CE", "PE"])\
+                .eq("expiry", current_expiry)\
                 .range(offset, offset + 999).execute()
             if not batch.data:
                 break
