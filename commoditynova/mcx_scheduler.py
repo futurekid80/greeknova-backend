@@ -80,19 +80,18 @@ def start_mcx_scheduler(kite, supabase) -> BackgroundScheduler:
 
     # Job 1 — Morning seed at 9:00 AM IST sharp, Mon–Fri
     scheduler.add_job(
-        func=run_seed_job,
-        trigger=CronTrigger(
-            hour=MCX_OPEN_HOUR,
-            minute=MCX_OPEN_MIN,
-            day_of_week="mon-fri",
-            timezone=IST,
-        ),
-        kwargs={"kite": kite, "supabase": supabase},
-        id="mcx_morning_seed",
-        name="MCX morning instrument seed",
-        replace_existing=True,
-        misfire_grace_time=120,
-    )
+    func=run_seed_job,
+    ...
+    kwargs={"supabase": supabase},  # remove kite
+    ...
+)
+
+scheduler.add_job(
+    func=run_scan_job,
+    ...
+    kwargs={"supabase": supabase, "candles_cache": candles_cache, "prev_oi": prev_oi},  # remove kite
+    ...
+)
 
     # Job 2 — 5-minute scan, every day
     # Market hours guard inside run_scan_job handles the off-hours silencing
