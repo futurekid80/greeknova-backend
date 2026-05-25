@@ -371,7 +371,7 @@ def get_uoa(date: str = None):
         # Persistence fields
         snap_count = 0
         persistence_pct = 0
-        first_seen_ts = ts_new
+        "first_seen_ts":      to_ist(first_seen_ts),
 
         uoa_signals.append({
             "symbol":             sym,
