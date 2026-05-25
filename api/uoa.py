@@ -165,31 +165,7 @@ def get_uoa(date: str = None):
     open_data  = filter_to_nearest_expiry(open_data_raw)
     min30_data = filter_to_nearest_expiry(min30_data_raw)
 
-    # ── Persistence: fetch all day activity per tradingsymbol ─────────────────
-    # Single query — all snapshots with vol > 50K across today
-    all_day_rows = []
-    for offset in range(0, 50000, 1000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("timestamp, tradingsymbol, volume")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .lt("timestamp",  f"{today}T23:59:59+00:00")\
-            .gt("volume", 500000)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        all_day_rows.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
-
-    # Build persistence map per tradingsymbol
-    ts_activity: dict = defaultdict(set)
-    first_seen_map: dict = {}
-    for r in all_day_rows:
-        ts_key = r["tradingsymbol"]
-        ts_activity[ts_key].add(r["timestamp"])
-        if ts_key not in first_seen_map or r["timestamp"] < first_seen_map[ts_key]:
-            first_seen_map[ts_key] = r["timestamp"]
+    
 
     # ── CMP map ───────────────────────────────────────────────────────────────
     cmp_raw = []
@@ -424,10 +400,10 @@ def get_uoa(date: str = None):
             "day_high":           float(stock_day_high) if stock_day_high else None,
             "day_high_pct":       day_high_pct,
             "at_day_high":        at_day_high,
-            "snapshot_count":     snap_count,
-            "persistence_pct":    persistence_pct,
-            "first_seen":         to_ist(first_seen_ts),
-            "first_seen_ts":      first_seen_ts,
+            "snapshot_count":     0,
+            "persistence_pct":    0,
+            "first_seen":         to_ist(ts_new),
+            "first_seen_ts":      ts_new,
         })
 
     uoa_signals.sort(key=lambda x: (x["persistence_pct"], x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
