@@ -59,7 +59,7 @@ ts_result = supabase.from_("oi_snapshots")\
         .limit(500)\
         .execute()
 
-    timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
+timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
     if len(timestamps) < 2:
         return {"signals": [], "total": 0, "date": today, "snapshots": 0,
                 "message": "Need at least 2 snapshots — check back after 9:20 AM"}
