@@ -24,20 +24,26 @@ def is_mcx_market_open() -> bool:
     return open_minutes <= now_minutes <= close_minutes
 
 
-def run_seed_job(supabase):
-    """Morning seed — fetches fresh Kite client each time."""
+def run_seed_job(supabase, session_open_oi: dict):
+    """
+    Morning seed — refreshes instruments and resets
+    session_open_oi so cumulative tracking starts fresh each day.
+    """
     from services.kite_auth import get_kite_client
     from commoditynova.mcx_instruments import seed_mcx_instruments
     try:
         logger.info("MCX morning seed starting...")
         kite = get_kite_client()
         seed_mcx_instruments(kite, supabase)
+        # Reset cumulative OI baseline for new session
+        session_open_oi.clear()
+        logger.info("MCX session_open_oi reset for new trading day")
     except Exception as e:
         logger.error(f"MCX seed job failed: {e}")
 
 
-def run_scan_job(supabase, candles_cache: dict, prev_oi: dict):
-    """5-minute scan — fetches fresh Kite client each cycle."""
+def run_scan_job(supabase, candles_cache: dict, prev_oi: dict, session_open_oi: dict):
+    """5-minute scan — fresh Kite client each cycle."""
     if not is_mcx_market_open():
         return
 
@@ -54,7 +60,7 @@ def run_scan_job(supabase, candles_cache: dict, prev_oi: dict):
             return
         fresh_candles = fetch_all_candles(instruments, kite)
         candles_cache.update(fresh_candles)
-        run_ignition_scan(kite, supabase, candles_cache, prev_oi)
+        run_ignition_scan(kite, supabase, candles_cache, prev_oi, session_open_oi)
     except Exception as e:
         logger.error(f"MCX scan job failed: {e}")
 
@@ -62,14 +68,15 @@ def run_scan_job(supabase, candles_cache: dict, prev_oi: dict):
 def start_mcx_scheduler(kite, supabase) -> BackgroundScheduler:
     """
     Creates and starts the MCX APScheduler.
-    kite param kept for signature compatibility but not passed to jobs.
-    Each job fetches its own fresh client.
+    Shared state dicts persist across scan cycles in memory.
     """
-    candles_cache: dict = {}
-    prev_oi: dict = {}
+    candles_cache:    dict = {}
+    prev_oi:          dict = {}
+    session_open_oi:  dict = {}   # cumulative OI baseline — reset at 9 AM daily
 
     scheduler = BackgroundScheduler(timezone=IST)
 
+    # Job 1 — Morning seed at 9:00 AM IST, Mon–Fri
     scheduler.add_job(
         func=run_seed_job,
         trigger=CronTrigger(
@@ -78,20 +85,22 @@ def start_mcx_scheduler(kite, supabase) -> BackgroundScheduler:
             day_of_week="mon-fri",
             timezone=IST,
         ),
-        kwargs={"supabase": supabase},
+        kwargs={"supabase": supabase, "session_open_oi": session_open_oi},
         id="mcx_morning_seed",
         name="MCX morning instrument seed",
         replace_existing=True,
         misfire_grace_time=120,
     )
 
+    # Job 2 — 5-minute scan
     scheduler.add_job(
         func=run_scan_job,
         trigger=IntervalTrigger(minutes=5, timezone=IST),
         kwargs={
-            "supabase": supabase,
-            "candles_cache": candles_cache,
-            "prev_oi": prev_oi,
+            "supabase":        supabase,
+            "candles_cache":   candles_cache,
+            "prev_oi":         prev_oi,
+            "session_open_oi": session_open_oi,
         },
         id="mcx_ignition_scan",
         name="MCX trend ignition 5-min scan",
