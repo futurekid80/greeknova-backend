@@ -80,7 +80,6 @@ def get_option_tokens(
     atm_range: int,
     kite: KiteConnect
 ) -> tuple[list, list]:
-    """Fetch instrument tokens for ATM ± atm_range strikes (CE + PE)."""
     try:
         results = kite.instruments("MCX")
 
@@ -89,6 +88,22 @@ def get_option_tokens(
             for i in range(-atm_range, atm_range + 1)
         ]
 
+        # Find nearest options expiry on or before futures expiry
+        option_expiries = sorted(set(
+            inst["expiry"] for inst in results
+            if inst["name"] == commodity
+            and inst["instrument_type"] in ("CE", "PE")
+            and inst["expiry"] <= expiry
+        ))
+
+        if not option_expiries:
+            logger.warning(f"{commodity}: no option expiries found before {expiry}")
+            return [], []
+
+        # Use the nearest (latest) options expiry
+        options_expiry = option_expiries[-1]
+        logger.info(f"{commodity}: futures expiry {expiry}, using options expiry {options_expiry}")
+
         symbols = []
         tokens = []
 
@@ -96,7 +111,7 @@ def get_option_tokens(
             if (
                 inst["name"] == commodity
                 and inst["instrument_type"] in ("CE", "PE")
-                and inst["expiry"] == expiry
+                and inst["expiry"] == options_expiry
                 and inst["strike"] in strikes_needed
             ):
                 symbols.append(f"MCX:{inst['tradingsymbol']}")
