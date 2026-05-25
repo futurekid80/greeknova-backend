@@ -98,15 +98,14 @@ def get_option_tokens(
         tokens = []
 
         for inst in results:
-            if (
-                inst["name"] == commodity
-                and inst["instrument_type"] in ("CE", "PE")
-                and inst["segment"] == "MCX-OPT"
-                and str(inst["expiry"]) == expiry_str
-                and inst["strike"] in strikes_needed
-            ):
-                symbols.append(f"MCX:{inst['tradingsymbol']}")
-                tokens.append(inst["instrument_token"])
+    if (
+        inst["name"] == commodity
+        and inst["instrument_type"] in ("CE", "PE")
+        and inst["expiry"] == expiry          # exact date match
+        and inst["strike"] in strikes_needed
+    ):
+        symbols.append(f"MCX:{inst['tradingsymbol']}")
+        tokens.append(inst["instrument_token"])
 
         logger.info(f"{commodity}: found {len(symbols)} option instruments around ATM {atm_strike}")
         return symbols, tokens
