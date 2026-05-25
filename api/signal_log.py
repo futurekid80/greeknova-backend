@@ -38,7 +38,7 @@ def classify(oi_chg_pct: float, price_chg_pct: float):
     return None, None, None
 
 
-def get_signal_log(date: str = None, symbol: str = None):
+def get_signal_log(date: str = None):
     global _signal_cache, _signal_cache_time
 
     cache_ttl = 60 if is_market_hours() else 300
@@ -49,9 +49,8 @@ def get_signal_log(date: str = None, symbol: str = None):
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
     # ── Step 1: Get all timestamps for today ─────────────────────────────────
-ts_result = supabase.from_("oi_snapshots")\
+    ts_result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
-        .eq("option_type", "FUT")\
         .eq("symbol", "NIFTY")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
         .lt("timestamp",  f"{today}T23:59:59+00:00")\
@@ -59,7 +58,7 @@ ts_result = supabase.from_("oi_snapshots")\
         .limit(500)\
         .execute()
 
-timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
+    timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
     if len(timestamps) < 2:
         return {"signals": [], "total": 0, "date": today, "snapshots": 0,
                 "message": "Need at least 2 snapshots — check back after 9:20 AM"}
