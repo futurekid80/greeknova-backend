@@ -89,17 +89,23 @@ def get_option_tokens(
         ]
 
         # Find nearest options expiry on or before futures expiry
-        option_expiries = sorted(set(
-            inst["expiry"] for inst in results
-            if inst["name"] == commodity
-            and inst["instrument_type"] in ("CE", "PE")
-            and inst["expiry"] <= expiry
-        ))
+        # Find nearest options expiry — prefer on/before futures expiry, else nearest after
+all_option_expiries = sorted(set(
+    inst["expiry"] for inst in results
+    if inst["name"] == commodity
+    and inst["instrument_type"] in ("CE", "PE")
+))
 
-        if not option_expiries:
-            logger.warning(f"{commodity}: no option expiries found before {expiry}")
-            return [], []
+before = [e for e in all_option_expiries if e <= expiry]
+after  = [e for e in all_option_expiries if e > expiry]
 
+if before:
+    options_expiry = before[-1]   # latest on/before futures expiry
+elif after:
+    options_expiry = after[0]     # nearest after futures expiry
+else:
+    logger.warning(f"{commodity}: no option expiries found at all")
+    return [], []
         # Use the nearest (latest) options expiry
         options_expiry = option_expiries[-1]
         logger.info(f"{commodity}: futures expiry {expiry}, using options expiry {options_expiry}")
