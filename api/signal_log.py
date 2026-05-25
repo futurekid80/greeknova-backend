@@ -51,6 +51,7 @@ def get_signal_log(date: str = None):
     # ── Step 1: Get all timestamps for today ─────────────────────────────────
     ts_result = supabase.from_("oi_snapshots")\
         .select("timestamp")\
+        .eq("option_type", "FUT")\
         .eq("symbol", "NIFTY")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
         .lt("timestamp",  f"{today}T23:59:59+00:00")\
