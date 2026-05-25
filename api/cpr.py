@@ -192,50 +192,27 @@ def compute_and_store_cpr(trade_date: str = None):
         print(f"[CPR] Instruments fetch failed: {e}")
         token_map = {}
 
-    today_str = today.isoformat()
-    for sym in all_symbols:
-        token = token_map.get(sym)
-        if not token:
-            continue
+# Use kite.ohlc() as primary — returns completed session OHLC reliably
+    # historical_data at 3:35 PM sometimes returns partial candle
+    batch_size = 20
+    all_nse_keys = [ALL_NSE_MAP[s] for s in all_symbols if s in ALL_NSE_MAP]
+    for i in range(0, len(all_nse_keys), batch_size):
+        batch_keys = all_nse_keys[i:i+batch_size]
+        batch_syms = [s for s in all_symbols if ALL_NSE_MAP.get(s) in batch_keys]
         try:
-            hist = kite.historical_data(
-                instrument_token=token,
-                from_date=today_str,
-                to_date=today_str,
-                interval="day"
-            )
-            if hist:
-                candle = hist[-1]
-                ohlc_map[sym] = {
-                    "high":  float(candle["high"]),
-                    "low":   float(candle["low"]),
-                    "close": float(candle["close"]),
-                }
-            time.sleep(0.05)
+            ohlc_data = kite.ohlc(batch_keys)
+            for sym in batch_syms:
+                nse_key = ALL_NSE_MAP.get(sym)
+                if nse_key and nse_key in ohlc_data:
+                    d = ohlc_data[nse_key]
+                    ohlc_map[sym] = {
+                        "high":  float(d["ohlc"]["high"]),
+                        "low":   float(d["ohlc"]["low"]),
+                        "close": float(d["ohlc"]["close"]),
+                    }
         except Exception as e:
-            print(f"[CPR] Historical {sym}: {e}")
-
-    missing = [s for s in all_symbols if s not in ohlc_map]
-    if missing:
-        batch_size = 20
-        for i in range(0, len(missing), batch_size):
-            batch = missing[i:i + batch_size]
-            nse_keys = [ALL_NSE_MAP[s] for s in batch if s in ALL_NSE_MAP]
-            try:
-                ohlc_data = kite.ohlc(nse_keys)
-                for sym in batch:
-                    nse_key = ALL_NSE_MAP.get(sym)
-                    if nse_key and nse_key in ohlc_data:
-                        d = ohlc_data[nse_key]
-                        if sym not in ohlc_map:
-                            ohlc_map[sym] = {
-                                "high":  float(d["ohlc"]["high"]),
-                                "low":   float(d["ohlc"]["low"]),
-                                "close": float(d["ohlc"]["close"]),
-                            }
-            except Exception as e:
-                print(f"[CPR] OHLC fallback batch {i}: {e}")
-            time.sleep(0.2)
+            print(f"[CPR] OHLC batch {i}: {e}")
+        time.sleep(0.2)
 
     prev_cpr_map: dict = {}
     try:
