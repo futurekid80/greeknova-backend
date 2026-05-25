@@ -1,6 +1,10 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
 from collections import defaultdict
+_uoa_cache: dict = {}
+_uoa_cache_time: float = 0
+import time as time_module
+UOA_CACHE_TTL = 60
 
 STOCK_NSE_MAP = {
     "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
@@ -73,7 +77,7 @@ def get_uoa(date: str = None):
         batch = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            ..gte("timestamp", f"{today}T06:00:00+00:00")\
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
             .order("timestamp", desc=False)\
             .range(offset, offset + 999)\
@@ -169,7 +173,7 @@ def get_uoa(date: str = None):
             .select("timestamp, tradingsymbol, volume")\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
-            .gt("volume", 200000)\
+            .gt("volume", 500000)\
             .range(offset, offset + 999)\
             .execute()
         if not batch.data:
