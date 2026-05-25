@@ -81,56 +81,68 @@ def check_acceleration(oi_series, dates):
     return accelerating, round(first_chg, 2), round(second_chg, 2)
 
 
-def get_conviction_level(consec_days: int, vol_rising: bool, accelerating: bool) -> dict:
+def get_oi_composition(ce_oi_start, ce_oi_end, pe_oi_start, pe_oi_end) -> dict:
     """
-    Four-tier conviction system:
-    🔵 Radar      — early signal, 1-2 days
-    🟡 Building   — 2-3 days consecutive, watch closely
-    🟠 Conviction — 3+ days + volume surge + accelerating
-    🟢 Ignition   — Conviction + FUT confirmation today (set externally)
+    Determine what is driving OI growth — CE writers or PE writers.
+    Returns composition analysis with dominant side and interpretation.
     """
-    if consec_days >= 3 and vol_rising and accelerating:
-        return {
-            "level": "CONVICTION",
-            "label": "Conviction",
-            "emoji": "🟠",
-            "color": "orange",
-            "rank":  1,
-        }
-    elif consec_days >= 3 and (vol_rising or accelerating):
-        return {
-            "level": "CONVICTION",
-            "label": "Conviction",
-            "emoji": "🟠",
-            "color": "orange",
-            "rank":  1,
-        }
-    elif consec_days >= 2:
-        return {
-            "level": "BUILDING",
-            "label": "Building",
-            "emoji": "🟡",
-            "color": "yellow",
-            "rank":  2,
-        }
+    ce_chg_pct = round((ce_oi_end - ce_oi_start) / ce_oi_start * 100, 1) if ce_oi_start > 0 else 0
+    pe_chg_pct = round((pe_oi_end - pe_oi_start) / pe_oi_start * 100, 1) if pe_oi_start > 0 else 0
+
+    total_oi = ce_oi_end + pe_oi_end
+    pe_pct_of_total = round(pe_oi_end / total_oi * 100) if total_oi > 0 else 50
+    ce_pct_of_total = 100 - pe_pct_of_total
+
+    pcr_series = round(pe_oi_end / ce_oi_end, 2) if ce_oi_end > 0 else 0
+    pcr_start  = round(pe_oi_start / ce_oi_start, 2) if ce_oi_start > 0 else 0
+
+    # Determine dominance
+    if pe_chg_pct > ce_chg_pct * 1.3:
+        dominant     = "PE"
+        composition  = "PUT_DOMINATED"
+        interp       = "Put writers adding — bullish institutional positioning"
+        interp_short = "PE dominated"
+        bias_confirm = "BULLISH"
+    elif ce_chg_pct > pe_chg_pct * 1.3:
+        dominant     = "CE"
+        composition  = "CALL_DOMINATED"
+        interp       = "Call writers adding — bearish institutional positioning"
+        interp_short = "CE dominated"
+        bias_confirm = "BEARISH"
     else:
-        return {
-            "level": "RADAR",
-            "label": "Radar",
-            "emoji": "🔵",
-            "color": "blue",
-            "rank":  3,
-        }
+        dominant     = "MIXED"
+        composition  = "BALANCED"
+        interp       = "Both CE and PE growing equally — mixed positioning"
+        interp_short = "Balanced"
+        bias_confirm = "NEUTRAL"
+
+    return {
+        "ce_oi_chg_pct":    ce_chg_pct,
+        "pe_oi_chg_pct":    pe_chg_pct,
+        "ce_pct_of_total":  ce_pct_of_total,
+        "pe_pct_of_total":  pe_pct_of_total,
+        "pcr_series":       pcr_series,
+        "pcr_start":        pcr_start,
+        "dominant":         dominant,
+        "composition":      composition,
+        "interp":           interp,
+        "interp_short":     interp_short,
+        "bias_confirm":     bias_confirm,
+    }
+
+
+def get_conviction_level(consec_days: int, vol_rising: bool, accelerating: bool) -> dict:
+    if consec_days >= 3 and (vol_rising or accelerating):
+        return {"level": "CONVICTION", "label": "Conviction", "emoji": "🟠", "color": "orange", "rank": 1}
+    elif consec_days >= 2:
+        return {"level": "BUILDING",   "label": "Building",   "emoji": "🟡", "color": "yellow", "rank": 2}
+    else:
+        return {"level": "RADAR",      "label": "Radar",      "emoji": "🔵", "color": "blue",   "rank": 3}
 
 
 def get_today_fut_signals(supabase, today_str: str) -> dict:
-    """
-    Fetch today's FUT Long/Short Buildup signals from signal_log data.
-    Returns dict of symbol -> signal_type for stocks with FUT confirmation today.
-    """
     fut_signals = {}
     try:
-        # Get all FUT snapshots from today — first and latest timestamp
         ts_result = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("option_type", "FUT")\
@@ -147,7 +159,6 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
         ts_open   = timestamps[0]
         ts_latest = timestamps[-1]
 
-        # Fetch FUT OI at open and latest
         def fetch_fut_oi(ts):
             result = supabase.from_("oi_snapshots")\
                 .select("symbol, oi, volume, last_price")\
@@ -157,11 +168,7 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
             oi_map = {}
             for r in (result.data or []):
                 sym = r["symbol"]
-                oi_map[sym] = {
-                    "oi":    r["oi"] or 0,
-                    "vol":   r["volume"] or 0,
-                    "price": r["last_price"] or 0,
-                }
+                oi_map[sym] = {"oi": r["oi"] or 0, "vol": r["volume"] or 0, "price": r["last_price"] or 0}
             return oi_map
 
         open_fut   = fetch_fut_oi(ts_open)
@@ -174,20 +181,14 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
             oi_latest = latest_fut[sym]["oi"]
             pr_open   = open_fut[sym]["price"]
             pr_latest = latest_fut[sym]["price"]
-            vol_open  = open_fut[sym]["vol"]
-            vol_latest= latest_fut[sym]["vol"]
 
             if oi_open <= 0 or pr_open <= 0:
                 continue
 
             oi_chg_pct    = (oi_latest - oi_open) / oi_open * 100
             price_chg_pct = (pr_latest - pr_open) / pr_open * 100
-            vol_chg_pct   = (vol_latest - vol_open) / vol_open * 100 if vol_open > 0 else 0
 
-            # Minimum thresholds for FUT confirmation
-            if abs(oi_chg_pct) < 2.0:
-                continue
-            if abs(price_chg_pct) < 0.2:
+            if abs(oi_chg_pct) < 2.0 or abs(price_chg_pct) < 0.2:
                 continue
 
             if oi_chg_pct > 0 and price_chg_pct > 0:
@@ -210,7 +211,6 @@ def get_positional_radar(min_consec: int = 0):
     today = datetime.now(timezone.utc).date()
     today_str = today.isoformat()
 
-    # ── Current monthly expiry ────────────────────────────────────────────────
     current_expiry = get_monthly_expiry(today.year, today.month)
     if today.strftime('%Y-%m-%d') > current_expiry:
         if today.month == 12:
@@ -220,7 +220,6 @@ def get_positional_radar(min_consec: int = 0):
 
     series_start = get_series_start(current_expiry)
 
-    # ── Find all trading dates in this series ─────────────────────────────────
     trading_dates = []
     check_date = datetime.strptime(series_start, '%Y-%m-%d').date()
     while check_date <= today:
@@ -236,17 +235,14 @@ def get_positional_radar(min_consec: int = 0):
         check_date += timedelta(days=1)
 
     if len(trading_dates) < 3:
-        return {
-            "error": "Not enough trading days in current series",
-            "series_start": series_start,
-            "expiry": current_expiry,
-            "results": []
-        }
+        return {"error": "Not enough trading days", "series_start": series_start, "expiry": current_expiry, "results": []}
 
-    # ── Batch fetch EOD data per day ──────────────────────────────────────────
-    oi_by_date:  dict = {}
-    vol_by_date: dict = {}
-    cmp_by_date: dict = {}
+    # ── Batch fetch EOD data per day — now split CE/PE ────────────────────────
+    oi_by_date:    dict = {}   # total OI per symbol per day
+    ce_oi_by_date: dict = {}   # CE OI per symbol per day
+    pe_oi_by_date: dict = {}   # PE OI per symbol per day
+    vol_by_date:   dict = {}
+    cmp_by_date:   dict = {}
 
     for d in trading_dates:
         ts_q = supabase.from_("oi_snapshots")\
@@ -265,8 +261,9 @@ def get_positional_radar(min_consec: int = 0):
         raw = []
         for offset in range(0, 200000, 1000):
             batch = supabase.from_("oi_snapshots")\
-                .select("symbol, oi, volume")\
+                .select("symbol, oi, volume, option_type")\
                 .eq("timestamp", eod_ts)\
+                .in_("option_type", ["CE", "PE"])\
                 .range(offset, offset + 999).execute()
             if not batch.data:
                 break
@@ -274,15 +271,29 @@ def get_positional_radar(min_consec: int = 0):
             if len(batch.data) < 1000:
                 break
 
-        sym_oi:  dict = {}
-        sym_vol: dict = {}
+        sym_oi:    dict = {}
+        sym_ce_oi: dict = {}
+        sym_pe_oi: dict = {}
+        sym_vol:   dict = {}
+
         for r in raw:
             sym = r["symbol"]
-            sym_oi[sym]  = sym_oi.get(sym, 0)  + (r["oi"]     or 0)
-            sym_vol[sym] = sym_vol.get(sym, 0) + (r["volume"] or 0)
+            oi  = r["oi"] or 0
+            vol = r["volume"] or 0
+            opt = r["option_type"]
 
-        oi_by_date[d]  = sym_oi
-        vol_by_date[d] = sym_vol
+            sym_oi[sym]  = sym_oi.get(sym, 0) + oi
+            sym_vol[sym] = sym_vol.get(sym, 0) + vol
+
+            if opt == "CE":
+                sym_ce_oi[sym] = sym_ce_oi.get(sym, 0) + oi
+            elif opt == "PE":
+                sym_pe_oi[sym] = sym_pe_oi.get(sym, 0) + oi
+
+        oi_by_date[d]    = sym_oi
+        ce_oi_by_date[d] = sym_ce_oi
+        pe_oi_by_date[d] = sym_pe_oi
+        vol_by_date[d]   = sym_vol
 
         cmp_q = supabase.from_("cmp_prices")\
             .select("symbol, cmp")\
@@ -305,24 +316,28 @@ def get_positional_radar(min_consec: int = 0):
     if total_trading_days < 3:
         return {"error": "Insufficient data", "results": []}
 
-    # ── Fetch today's FUT signals for Ignition detection ──────────────────────
     today_fut_signals = get_today_fut_signals(supabase, today_str)
 
-    # ── Per-symbol analysis ───────────────────────────────────────────────────
     results = []
 
     for sym in SYMBOLS:
-        oi_series  = []
-        vol_series = []
-        cmp_series = []
-        date_labels = []
+        oi_series:    list = []
+        ce_oi_series: list = []
+        pe_oi_series: list = []
+        vol_series:   list = []
+        cmp_series:   list = []
+        date_labels:  list = []
 
         for d in available_dates:
             oi_val  = oi_by_date.get(d, {}).get(sym, 0)
+            ce_val  = ce_oi_by_date.get(d, {}).get(sym, 0)
+            pe_val  = pe_oi_by_date.get(d, {}).get(sym, 0)
             vol_val = vol_by_date.get(d, {}).get(sym, 0)
             cmp_val = cmp_by_date.get(d, {}).get(sym, 0)
             if oi_val > 0 and cmp_val > 0:
                 oi_series.append(oi_val)
+                ce_oi_series.append(ce_val)
+                pe_oi_series.append(pe_val)
                 vol_series.append(vol_val)
                 cmp_series.append(cmp_val)
                 date_labels.append(d)
@@ -346,73 +361,62 @@ def get_positional_radar(min_consec: int = 0):
         price_falling= cmp_chg_pct < -0.5
 
         if oi_rising and price_rising:
-            signal = "LONG_BUILDUP"
-            bias   = "BULLISH"
+            signal = "LONG_BUILDUP";   bias = "BULLISH"
         elif oi_rising and price_falling:
-            signal = "SHORT_BUILDUP"
-            bias   = "BEARISH"
+            signal = "SHORT_BUILDUP";  bias = "BEARISH"
         elif oi_falling and price_rising:
-            signal = "SHORT_COVERING"
-            bias   = "BULLISH"
+            signal = "SHORT_COVERING"; bias = "BULLISH"
         elif oi_falling and price_falling:
-            signal = "LONG_UNWINDING"
-            bias   = "BEARISH"
+            signal = "LONG_UNWINDING"; bias = "BEARISH"
         else:
             continue
 
         consec_days = count_signal_days(oi_series, cmp_series, signal)
-
         if min_consec > 0 and consec_days < min_consec:
             continue
 
-        match_days, total_intervals = count_consistent_days(
-            oi_series, cmp_series, vol_series, signal
-        )
+        match_days, total_intervals = count_consistent_days(oi_series, cmp_series, vol_series, signal)
         consistency_pct = round(match_days / total_intervals * 100) if total_intervals > 0 else 0
+        consistency_label = "HIGH" if consistency_pct >= 70 else "MEDIUM" if consistency_pct >= 50 else "LOW"
 
-        if consistency_pct >= 70:
-            consistency_label = "HIGH"
-        elif consistency_pct >= 50:
-            consistency_label = "MEDIUM"
-        else:
-            consistency_label = "LOW"
-
-        accelerating, first_half_chg, second_half_chg = check_acceleration(
-            oi_series, date_labels
-        )
+        accelerating, first_half_chg, second_half_chg = check_acceleration(oi_series, date_labels)
 
         vol_consec = 0
         for i in range(len(vol_series) - 1, 0, -1):
-            if vol_series[i] > vol_series[i-1]:
-                vol_consec += 1
-            else:
-                break
+            if vol_series[i] > vol_series[i-1]: vol_consec += 1
+            else: break
+
+        # ── CE/PE composition analysis ────────────────────────────────────────
+        composition = get_oi_composition(
+            ce_oi_series[0],  ce_oi_series[-1],
+            pe_oi_series[0],  pe_oi_series[-1],
+        )
+
+        # ── Does composition confirm the signal bias? ─────────────────────────
+        # Long Buildup should be PE dominated (put writers = bullish)
+        # Short Buildup should be CE dominated (call writers = bearish)
+        bias_confirmed = (
+            (bias == "BULLISH" and composition["dominant"] == "PE") or
+            (bias == "BEARISH" and composition["dominant"] == "CE") or
+            composition["dominant"] == "MIXED"
+        )
 
         # ── Conviction level ──────────────────────────────────────────────────
         conviction = get_conviction_level(consec_days, vol_rising, accelerating)
 
-        # ── Ignition check — FUT confirming same direction today ──────────────
+        # ── Ignition ─────────────────────────────────────────────────────────
         fut_signal_today = today_fut_signals.get(sym)
         ignition = False
         if conviction["level"] == "CONVICTION" and fut_signal_today:
-            # FUT must confirm same bias as options signal
             fut_bullish = fut_signal_today in ("LONG_BUILDUP", "SHORT_COVERING")
             fut_bearish = fut_signal_today in ("SHORT_BUILDUP", "LONG_UNWINDING")
             if (bias == "BULLISH" and fut_bullish) or (bias == "BEARISH" and fut_bearish):
                 ignition = True
 
-        if ignition:
-            conviction_display = {
-                "level": "IGNITION",
-                "label": "Ignition",
-                "emoji": "🟢",
-                "color": "emerald",
-                "rank":  0,
-            }
-        else:
-            conviction_display = conviction
+        conviction_display = {
+            "level": "IGNITION", "label": "Ignition", "emoji": "🟢", "color": "emerald", "rank": 0
+        } if ignition else conviction
 
-        # Keep triple_confirm for backward compat with frontend
         triple_confirm = conviction["level"] == "CONVICTION"
 
         results.append({
@@ -421,7 +425,7 @@ def get_positional_radar(min_consec: int = 0):
             "signal":              signal,
             "bias":                bias,
 
-            # New conviction system
+            # Conviction
             "conviction_level":    conviction_display["level"],
             "conviction_label":    conviction_display["label"],
             "conviction_emoji":    conviction_display["emoji"],
@@ -429,6 +433,19 @@ def get_positional_radar(min_consec: int = 0):
             "conviction_rank":     conviction_display["rank"],
             "ignition":            ignition,
             "fut_signal_today":    fut_signal_today,
+
+            # CE/PE composition — the key new addition
+            "ce_oi_chg_pct":       composition["ce_oi_chg_pct"],
+            "pe_oi_chg_pct":       composition["pe_oi_chg_pct"],
+            "ce_pct_of_total":     composition["ce_pct_of_total"],
+            "pe_pct_of_total":     composition["pe_pct_of_total"],
+            "pcr_series":          composition["pcr_series"],
+            "pcr_start":           composition["pcr_start"],
+            "dominant":            composition["dominant"],
+            "composition":         composition["composition"],
+            "composition_interp":  composition["interp"],
+            "composition_short":   composition["interp_short"],
+            "bias_confirmed":      bias_confirmed,
 
             # Backward compat
             "triple_confirm":      triple_confirm,
@@ -439,18 +456,14 @@ def get_positional_radar(min_consec: int = 0):
             "consistency_label":   consistency_label,
             "match_days":          match_days,
             "total_days":          total_intervals,
-
-            # Consecutive
             "consec_days":         consec_days,
 
             # Acceleration
             "oi_first_half_chg":   first_half_chg,
             "oi_second_half_chg":  second_half_chg,
-
-            # Volume
             "vol_consec":          vol_consec,
 
-            # Overall % changes
+            # % changes
             "oi_chg_pct":          oi_chg_pct,
             "vol_chg_pct":         vol_chg_pct,
             "vol_series_chg":      vol_series_chg,
@@ -459,35 +472,38 @@ def get_positional_radar(min_consec: int = 0):
 
             # Sparklines
             "oi_series":           [round(x / 100000, 1) for x in oi_series],
+            "ce_oi_series":        [round(x / 100000, 1) for x in ce_oi_series],
+            "pe_oi_series":        [round(x / 100000, 1) for x in pe_oi_series],
             "vol_series":          [round(x / 100000, 1) for x in vol_series],
             "cmp_series":          cmp_series,
             "date_labels":         date_labels,
-
-            # Latest
             "cmp":                 cmp_series[-1],
             "series_days":         len(oi_series) - 1,
         })
 
-    # Sort: Ignition first, then Conviction, then Building, then Radar
-    # Within each level: consistency then OI%
+    # Sort: Ignition first, then by conviction rank, then consistency, then OI%
     results.sort(key=lambda x: (
         x["conviction_rank"],
         {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["consistency_label"]],
+        0 if x["bias_confirmed"] else 1,
         -abs(x["oi_chg_pct"])
     ))
 
     summary = {
-        "long_buildup":    sum(1 for r in results if r["signal"] == "LONG_BUILDUP"),
-        "short_buildup":   sum(1 for r in results if r["signal"] == "SHORT_BUILDUP"),
-        "short_covering":  sum(1 for r in results if r["signal"] == "SHORT_COVERING"),
-        "long_unwinding":  sum(1 for r in results if r["signal"] == "LONG_UNWINDING"),
-        "high_consistency":sum(1 for r in results if r["consistency_label"] == "HIGH"),
-        "triple_confirm":  sum(1 for r in results if r["triple_confirm"]),
-        "accelerating":    sum(1 for r in results if r["accelerating"]),
-        "conviction":      sum(1 for r in results if r["conviction_level"] == "CONVICTION"),
-        "ignition":        sum(1 for r in results if r["conviction_level"] == "IGNITION"),
-        "building":        sum(1 for r in results if r["conviction_level"] == "BUILDING"),
-        "radar":           sum(1 for r in results if r["conviction_level"] == "RADAR"),
+        "long_buildup":     sum(1 for r in results if r["signal"] == "LONG_BUILDUP"),
+        "short_buildup":    sum(1 for r in results if r["signal"] == "SHORT_BUILDUP"),
+        "short_covering":   sum(1 for r in results if r["signal"] == "SHORT_COVERING"),
+        "long_unwinding":   sum(1 for r in results if r["signal"] == "LONG_UNWINDING"),
+        "high_consistency": sum(1 for r in results if r["consistency_label"] == "HIGH"),
+        "triple_confirm":   sum(1 for r in results if r["triple_confirm"]),
+        "accelerating":     sum(1 for r in results if r["accelerating"]),
+        "conviction":       sum(1 for r in results if r["conviction_level"] == "CONVICTION"),
+        "ignition":         sum(1 for r in results if r["conviction_level"] == "IGNITION"),
+        "building":         sum(1 for r in results if r["conviction_level"] == "BUILDING"),
+        "radar":            sum(1 for r in results if r["conviction_level"] == "RADAR"),
+        "bias_confirmed":   sum(1 for r in results if r["bias_confirmed"]),
+        "pe_dominated":     sum(1 for r in results if r["dominant"] == "PE"),
+        "ce_dominated":     sum(1 for r in results if r["dominant"] == "CE"),
     }
 
     return {
