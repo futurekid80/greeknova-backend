@@ -33,42 +33,35 @@ def is_mcx_market_open() -> bool:
     return open_minutes <= now_minutes <= close_minutes
 
 
-def run_seed_job(kite, supabase):
-    """Morning seed — runs at 9:00 AM IST."""
+def run_seed_job(supabase):
+    from services.kite_auth import get_kite_client
     from commoditynova.mcx_instruments import seed_mcx_instruments
     try:
+        kite = get_kite_client()  # fresh client
         logger.info("MCX morning seed starting...")
         seed_mcx_instruments(kite, supabase)
     except Exception as e:
         logger.error(f"MCX seed job failed: {e}")
 
 
-def run_scan_job(kite, supabase, candles_cache: dict, prev_oi: dict):
-    """
-    5-minute scan job.
-    Skips silently if market is closed — no noise in logs.
-    Refreshes candles before every scan.
-    """
+def run_scan_job(supabase, candles_cache: dict, prev_oi: dict):
     if not is_mcx_market_open():
         return
 
+    from services.kite_auth import get_kite_client
     from commoditynova.mcx_instruments import get_cached_instruments
-    from commoditynova.mcx_historical  import fetch_all_candles
+    from commoditynova.mcx_historical import fetch_all_candles
     from commoditynova.mcx_ignition_scanner import run_ignition_scan
 
     try:
-        # Refresh candles at start of every scan cycle
+        kite = get_kite_client()  # fresh client every cycle
         instruments = get_cached_instruments(supabase)
         if not instruments:
             logger.warning("MCX scan skipped — no instruments cached yet")
             return
-
         fresh_candles = fetch_all_candles(instruments, kite)
         candles_cache.update(fresh_candles)
-
-        # Run the signal scan
         run_ignition_scan(kite, supabase, candles_cache, prev_oi)
-
     except Exception as e:
         logger.error(f"MCX scan job failed: {e}")
 
