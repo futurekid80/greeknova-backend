@@ -369,10 +369,9 @@ def get_uoa(date: str = None):
             time_tag = "normal"
 
         # Persistence fields
-        snap_set = ts_activity.get(ts, set())
-        snap_count = len(snap_set)
-        persistence_pct = round(snap_count / total_snaps * 100) if total_snaps > 0 else 0
-        first_seen_ts = first_seen_map.get(ts, ts_new)
+        snap_count = 0
+        persistence_pct = 0
+        first_seen_ts = ts_new
 
         uoa_signals.append({
             "symbol":             sym,
