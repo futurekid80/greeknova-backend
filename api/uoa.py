@@ -1,10 +1,5 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
-from collections import defaultdict
-_uoa_cache: dict = {}
-_uoa_cache_time: float = 0
-import time as time_module
-UOA_CACHE_TTL = 60
 
 STOCK_NSE_MAP = {
     "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
@@ -56,28 +51,19 @@ def is_post_market() -> bool:
     total = now_utc.hour * 60 + now_utc.minute
     return total > MARKET_CLOSE_UTC
 
-def to_ist(ts: str) -> str:
-    try:
-        clean = ts.split('+')[0].split('Z')[0]
-        dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
-        ist = dt.hour * 60 + dt.minute + 330
-        return f"{(ist//60)%24:02d}:{ist%60:02d}"
-    except:
-        return ts[11:16]
-
 def get_uoa(date: str = None):
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     live = is_market_hours()
     post_market = is_post_market()
 
-    # ── Get all timestamps for today ─────────────────────────────────────────
+    # ── Get ALL distinct timestamps via pagination ────────────────────────────
     all_ts_rows = []
     for offset in range(0, 50000, 1000):
         batch = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{today}T06:00:00+00:00")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
             .order("timestamp", desc=False)\
             .range(offset, offset + 999)\
@@ -112,7 +98,6 @@ def get_uoa(date: str = None):
     ts_open  = timestamps[0]
     ts_new   = timestamps[-1]
     ts_30min = timestamps[max(0, len(timestamps) - 7)]
-    total_snaps = len(timestamps)
 
     now_utc = datetime.now(timezone.utc)
     market_close = now_utc.replace(hour=10, minute=0, second=0, microsecond=0)
@@ -140,8 +125,10 @@ def get_uoa(date: str = None):
     open_data_raw  = fetch_snapshot(ts_open)
     min30_data_raw = fetch_snapshot(ts_30min)
 
-    # ── Nearest active expiry per symbol ─────────────────────────────────────
+    # ── FIX: Build nearest active expiry map per symbol ───────────────────────
+    # Prevents June expiry rows mixing with May expiry for stocks
     today_str = date_type.today().isoformat()
+
     nearest_expiry_map: dict = {}
     for r in new_data_raw:
         sym = r["symbol"]
@@ -164,8 +151,6 @@ def get_uoa(date: str = None):
     new_data   = filter_to_nearest_expiry(new_data_raw)
     open_data  = filter_to_nearest_expiry(open_data_raw)
     min30_data = filter_to_nearest_expiry(min30_data_raw)
-
-    
 
     # ── CMP map ───────────────────────────────────────────────────────────────
     cmp_raw = []
@@ -191,6 +176,7 @@ def get_uoa(date: str = None):
 
     # ── Day high map ──────────────────────────────────────────────────────────
     day_high_map: dict = {}
+
     if live:
         try:
             from services.kite_auth import get_kite_client
@@ -203,7 +189,7 @@ def get_uoa(date: str = None):
                     if nse_key in ohlc:
                         day_high_map[sym] = ohlc[nse_key]["ohlc"]["high"]
         except Exception as e:
-            print(f"[UOA] Kite OHLC failed: {e}")
+            print(f"[UOA] Kite OHLC failed, using cmp fallback: {e}")
 
     if not day_high_map:
         try:
@@ -212,6 +198,7 @@ def get_uoa(date: str = None):
                 .gte("timestamp", f"{today}T00:00:00+00:00")\
                 .limit(5000)\
                 .execute().data or []
+            from collections import defaultdict
             sym_prices: dict = defaultdict(list)
             for r in cmp_today:
                 sym_prices[r["symbol"]].append(float(r["cmp"]))
@@ -368,11 +355,6 @@ def get_uoa(date: str = None):
         else:
             time_tag = "normal"
 
-        # Persistence fields
-        snap_count = 0
-        persistence_pct = 0
-        "first_seen_ts":      to_ist(first_seen_ts),
-
         uoa_signals.append({
             "symbol":             sym,
             "tradingsymbol":      ts,
@@ -399,13 +381,18 @@ def get_uoa(date: str = None):
             "day_high":           float(stock_day_high) if stock_day_high else None,
             "day_high_pct":       day_high_pct,
             "at_day_high":        at_day_high,
-            "snapshot_count":     0,
-            "persistence_pct":    0,
-            "first_seen":         to_ist(ts_new),
-            "first_seen_ts":      ts_new,
         })
 
-    uoa_signals.sort(key=lambda x: (x["persistence_pct"], x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
+    uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
+
+    def to_ist(ts):
+        try:
+            clean = ts.split('+')[0].split('Z')[0]
+            dt = datetime.fromisoformat(clean).replace(tzinfo=timezone.utc)
+            ist = dt.hour * 60 + dt.minute + 330
+            return f"{(ist//60)%24:02d}:{ist%60:02d}"
+        except:
+            return ts[11:16]
 
     return {
         "timestamp":         ts_new,
@@ -415,7 +402,7 @@ def get_uoa(date: str = None):
         "date":              today,
         "total":             len(uoa_signals),
         "signals":           uoa_signals[:50],
-        "snapshot_count":    total_snaps,
+        "snapshot_count":    len(timestamps),
         "mins_to_close":     max(0, mins_to_close),
         "is_post_market":    post_market,
         "market_close_time": "15:29",
