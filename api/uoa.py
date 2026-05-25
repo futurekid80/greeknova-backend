@@ -1,5 +1,11 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
+from utils.db import get_supabase
+from datetime import datetime, timezone, date as date_type
+import time as time_module  # ADD THIS LINE
+
+# Persistence cache
+_signal_history: dict = {}
 
 STOCK_NSE_MAP = {
     "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
@@ -384,6 +390,18 @@ def get_uoa(date: str = None):
         })
 
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
+    # Persistence tracking
+    total_snaps = len(timestamps)
+    for sig in uoa_signals:
+        ts_key = sig["tradingsymbol"]
+        if ts_key not in _signal_history:
+            _signal_history[ts_key] = []
+        if ts_new not in _signal_history[ts_key]:
+            _signal_history[ts_key].append(ts_new)
+        count = len(_signal_history[ts_key])
+        sig["snapshot_count"] = count
+        sig["persistence_pct"] = round(count / total_snaps * 100) if total_snaps > 0 else 0
+        sig["first_seen"] = _signal_history[ts_key][0]
 
     def to_ist(ts):
         try:
