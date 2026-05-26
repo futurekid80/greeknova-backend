@@ -245,6 +245,16 @@ def health(): return {"status": "ok"}
 @app.get("/capture-now")
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
+@app.get("/force-login")
+def force_login():
+    try:
+        from services.kite_auth import auto_login
+        kite = auto_login()
+        profile = kite.profile()
+        return {"status": "success", "user": profile["user_name"]}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @app.get("/alerts-test")
 def alerts_test():
     try:
