@@ -55,7 +55,6 @@ def get_signal_log(date: str = None):
         .eq("symbol", "NIFTY")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
         .lt("timestamp",  f"{today}T23:59:59+00:00")\
-        .order("timestamp", desc=False)\
         .limit(500)\
         .execute()
 
@@ -76,9 +75,9 @@ def get_signal_log(date: str = None):
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
-            .order("timestamp", desc=False)\
             .range(offset, offset + 999)\
             .execute()
+        
         if not batch.data:
             break
         all_fut_rows.extend(batch.data)
