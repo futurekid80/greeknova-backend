@@ -47,13 +47,20 @@ STOCK_NSE_MAP = {
 }
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
 
+# Instrument tokens for indices (needed for historical_data)
+INDEX_TOKENS = {
+    "NIFTY":    256265,
+    "BANKNIFTY": 260105,
+    "FINNIFTY":  257801,
+}
+
 # ── In-memory cache ───────────────────────────────────────────────────────────
 _cpr_cache: dict = {}
 _cpr_cache_time: float = 0
 _uoa_cache: dict = {}
 _uoa_cache_time: float = 0
-CPR_CACHE_TTL  = 30   # seconds during market, 60 post-market
-UOA_CACHE_TTL  = 60   # UOA changes slowly
+CPR_CACHE_TTL  = 30
+UOA_CACHE_TTL  = 60
 
 
 def _is_market_hours() -> bool:
@@ -128,7 +135,6 @@ def get_cpr_position(cmp: float, tc: float, bc: float) -> dict:
 
 
 def _get_uoa_signals_cached() -> dict:
-    """Get UOA signals with caching — avoids repeated heavy queries"""
     global _uoa_cache, _uoa_cache_time
     if _uoa_cache and (time_module.time() - _uoa_cache_time) < UOA_CACHE_TTL:
         return _uoa_cache
@@ -155,6 +161,11 @@ def _get_uoa_signals_cached() -> dict:
 
 
 def compute_and_store_cpr(trade_date: str = None):
+    """
+    EOD CPR computation — uses kite.historical_data() for official NSE closing price.
+    This matches Zerodha/TradingView/KGS exactly since it uses the weighted avg close.
+    Called at 4:00 PM after market fully settles.
+    """
     supabase = get_supabase()
     try:
         from services.kite_auth import get_kite_client
@@ -176,43 +187,65 @@ def compute_and_store_cpr(trade_date: str = None):
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
+    # ── Build instrument token map for stocks ─────────────────────────────────
+    token_map: dict = {}
     try:
         instruments = kite.instruments("NSE")
-        token_map: dict = {}
         for inst in instruments:
             if inst["tradingsymbol"] in STOCKS:
                 token_map[inst["tradingsymbol"]] = inst["instrument_token"]
-        index_tokens = {
-            "NIFTY":    256265,
-            "BANKNIFTY":260105,
-            "FINNIFTY": 257801,
-        }
-        token_map.update(index_tokens)
+        token_map.update(INDEX_TOKENS)
+        print(f"[CPR] Got {len(token_map)} instrument tokens")
     except Exception as e:
         print(f"[CPR] Instruments fetch failed: {e}")
-        token_map = {}
 
-    # Use kite.ohlc() as primary — returns completed session OHLC reliably
-    batch_size = 20
-    all_nse_keys = [ALL_NSE_MAP[s] for s in all_symbols if s in ALL_NSE_MAP]
-    for i in range(0, len(all_nse_keys), batch_size):
-        batch_keys = all_nse_keys[i:i+batch_size]
-        batch_syms = [s for s in all_symbols if ALL_NSE_MAP.get(s) in batch_keys]
+    # ── Fetch OHLC via historical_data (official NSE close) ───────────────────
+    # historical_data returns official weighted avg close — matches Zerodha charts
+    from_date = today.isoformat()
+    to_date   = today.isoformat()
+
+    for sym in all_symbols:
+        token = token_map.get(sym)
+        if not token:
+            print(f"[CPR] No token for {sym}, skipping")
+            continue
         try:
-            ohlc_data = kite.ohlc(batch_keys)
-            for sym in batch_syms:
-                nse_key = ALL_NSE_MAP.get(sym)
-                if nse_key and nse_key in ohlc_data:
-                    d = ohlc_data[nse_key]
-                    ohlc_map[sym] = {
-                        "high":  float(d["ohlc"]["high"]),
-                        "low":   float(d["ohlc"]["low"]),
-                        "close": float(d["ohlc"]["close"]),
-                    }
+            records = kite.historical_data(
+                instrument_token=token,
+                from_date=from_date,
+                to_date=to_date,
+                interval="day",
+                continuous=False,
+                oi=False,
+            )
+            if records:
+                r = records[-1]  # get today's candle
+                ohlc_map[sym] = {
+                    "high":  float(r["high"]),
+                    "low":   float(r["low"]),
+                    "close": float(r["close"]),
+                }
+            time.sleep(0.05)  # avoid rate limiting
         except Exception as e:
-            print(f"[CPR] OHLC batch {i}: {e}")
-        time.sleep(0.2)
+            print(f"[CPR] historical_data {sym}: {e}")
+            # Fallback to ohlc() for this symbol
+            try:
+                nse_key = ALL_NSE_MAP.get(sym)
+                if nse_key:
+                    ohlc_data = kite.ohlc([nse_key])
+                    if nse_key in ohlc_data:
+                        d = ohlc_data[nse_key]
+                        ohlc_map[sym] = {
+                            "high":  float(d["ohlc"]["high"]),
+                            "low":   float(d["ohlc"]["low"]),
+                            "close": float(d["ohlc"]["close"]),
+                        }
+            except Exception as e2:
+                print(f"[CPR] Fallback OHLC {sym}: {e2}")
 
+    print(f"[CPR] Got OHLC for {len(ohlc_map)} symbols via historical_data")
+
+    # ── Fetch previous CPR for trend calculation ──────────────────────────────
     prev_cpr_map: dict = {}
     try:
         prev_rows = supabase.from_("cpr_levels")\
@@ -228,6 +261,7 @@ def compute_and_store_cpr(trade_date: str = None):
     except Exception as e:
         print(f"[CPR] Prev CPR fetch: {e}")
 
+    # ── Compute and store CPR records ─────────────────────────────────────────
     records = []
     for sym in all_symbols:
         ohlc = ohlc_map.get(sym)
@@ -273,7 +307,6 @@ def compute_and_store_cpr(trade_date: str = None):
                 .upsert(records[i:i+50], on_conflict="trade_date,symbol")\
                 .execute()
 
-    # Invalidate cache after new CPR computed
     global _cpr_cache, _cpr_cache_time
     _cpr_cache = {}
     _cpr_cache_time = 0
@@ -337,7 +370,6 @@ def update_cpr_status():
         except Exception as e:
             print(f"[CPR] Status update {sym}: {e}")
 
-    # Invalidate cache after status update
     global _cpr_cache, _cpr_cache_time
     _cpr_cache = {}
     _cpr_cache_time = 0
@@ -346,7 +378,6 @@ def update_cpr_status():
 def get_cpr_scanner():
     global _cpr_cache, _cpr_cache_time
 
-    # Return cached result if fresh enough
     cache_ttl = 30 if _is_market_hours() else 60
     if _cpr_cache and (time_module.time() - _cpr_cache_time) < cache_ttl:
         return _cpr_cache
@@ -365,7 +396,6 @@ def get_cpr_scanner():
     if not cpr_rows.data:
         return _get_cpr_live()
 
-    # Get UOA signals — cached to avoid slow repeated queries
     active_signals = _get_uoa_signals_cached()
 
     results = []
@@ -442,7 +472,6 @@ def get_cpr_scanner():
         "source":           "table",
     }
 
-    # Cache it
     _cpr_cache = result
     _cpr_cache_time = time_module.time()
 
