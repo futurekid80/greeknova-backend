@@ -111,6 +111,10 @@ def run_full_capture():
             found = [i for i in instruments if i["name"] == symbol and i["instrument_type"] in ["CE","PE","FUT"]]
             if not found: continue
 
+            # Separate FUT instruments — always include them, no ATM filtering needed
+            fut_instruments = [i for i in found if i["instrument_type"] == "FUT"]
+            found = [i for i in found if i["instrument_type"] != "FUT"]
+
             expiries = sorted(set(i["expiry"] for i in found))
             num_expiries = 3 if is_index else 2
 
@@ -140,6 +144,9 @@ def run_full_capture():
 
             try:
                 quotes = kite.quote(["NFO:" + i["tradingsymbol"] for i in nearest])
+                # Add FUT instruments for nearest expiries
+                for exp in expiries[:num_expiries]:
+                    nearest.extend([i for i in fut_instruments if i["expiry"] == exp])
                 for inst in nearest:
                     key = f"NFO:{inst['tradingsymbol']}"
                     if key in quotes:
