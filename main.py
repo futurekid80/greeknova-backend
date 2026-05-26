@@ -116,6 +116,7 @@ def run_full_capture():
             found = [i for i in found if i["instrument_type"] != "FUT"]
 
             expiries = sorted(set(i["expiry"] for i in found))
+            fut_expiries = sorted(set(i["expiry"] for i in fut_instruments))
             num_expiries = 3 if is_index else 2
 
             current_price = _last_cmp.get(symbol, 0)
@@ -144,7 +145,7 @@ def run_full_capture():
 
             try:
                 # Add FUT instruments for nearest expiries
-                for exp in expiries[:num_expiries]:
+                for exp in fut_expiries[:num_expiries]:
                     nearest.extend([i for i in fut_instruments if i["expiry"] == exp])
                 quotes = kite.quote(["NFO:" + i["tradingsymbol"] for i in nearest])
                 for inst in nearest:
