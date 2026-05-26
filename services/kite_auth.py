@@ -5,14 +5,18 @@ import requests
 import pyotp
 from dotenv import load_dotenv
 
-load_dotenv('/Users/apple/optionspulse/.env')
+load_dotenv()  # Removed hardcoded local path — uses Railway env vars directly
 
 TOKEN_FILE = os.path.expanduser('~/.greeksnova_token')
-API_KEY = os.getenv('KITE_API_KEY', '90q9h621tubh2kkk')
+API_KEY    = os.getenv('KITE_API_KEY', '90q9h621tubh2kkk')
 API_SECRET = os.getenv('KITE_API_SECRET', '')
-USER_ID = os.getenv('ZERODHA_USER_ID', 'DQA100')
-PASSWORD = os.getenv('ZERODHA_PASSWORD', '')
+USER_ID    = os.getenv('ZERODHA_USER_ID', 'DQA100')
+PASSWORD   = os.getenv('ZERODHA_PASSWORD', '')
 TOTP_SECRET = os.getenv('ZERODHA_TOTP_SECRET', '')
+
+# ── Token health check tracking ───────────────────────────────────────────────
+_last_token_check: float = 0
+TOKEN_CHECK_INTERVAL = 30 * 60  # 30 minutes
 
 
 def save_token_to_supabase(access_token: str):
@@ -55,13 +59,17 @@ def get_token_from_supabase() -> str | None:
     return None
 
 
-def auto_login() -> str:
-    """Fully automated login using TOTP — no manual steps needed"""
-    print("🔐 Starting auto-login...")
+def _do_login() -> object:
+    """
+    Core login function — performs TOTP login and returns authenticated kite client.
+    Does NOT retry — caller handles retries.
+    """
+    from kiteconnect import KiteConnect
 
+    print("🔐 Starting auto-login...")
     session = requests.Session()
 
-    # Step 1: POST login with user_id + password
+    # Step 1: Password login
     login_res = session.post(
         "https://kite.zerodha.com/api/login",
         data={"user_id": USER_ID, "password": PASSWORD}
@@ -74,7 +82,7 @@ def auto_login() -> str:
     request_id = login_data["data"]["request_id"]
     print(f"  ✅ Password accepted, request_id: {request_id[:8]}...")
 
-    # Step 2: Generate TOTP and complete 2FA
+    # Step 2: TOTP 2FA
     totp = pyotp.TOTP(TOTP_SECRET)
     totp_value = totp.now()
     print(f"  🔢 Generated TOTP: {totp_value}")
@@ -96,11 +104,11 @@ def auto_login() -> str:
 
     print("  ✅ 2FA accepted")
 
-    # Step 3: Get request token from redirect
+    # Step 3: Get request token
     login_url = f"https://kite.trade/connect/login?api_key={API_KEY}&v=3"
     res = session.get(login_url, allow_redirects=False)
-
     redirect_url = res.headers.get('Location', '')
+
     for _ in range(5):
         if 'request_token' in redirect_url:
             break
@@ -119,13 +127,12 @@ def auto_login() -> str:
 
     print(f"  ✅ Got request_token: {request_token[:8]}...")
 
-    # Step 4: Exchange for access_token
-    from kiteconnect import KiteConnect
+    # Step 4: Exchange for access token
     kite = KiteConnect(api_key=API_KEY)
     session_data = kite.generate_session(request_token, api_secret=API_SECRET)
     access_token = session_data["access_token"]
 
-    # Save to local file (Mac) + Supabase (Railway)
+    # Save locally + Supabase
     try:
         with open(TOKEN_FILE, 'w') as f:
             json.dump({
@@ -134,23 +141,84 @@ def auto_login() -> str:
                 "date":         time.strftime("%Y-%m-%d")
             }, f)
     except Exception:
-        pass  # Local file optional — Supabase is the source of truth
+        pass
 
     save_token_to_supabase(access_token)
-
     kite.set_access_token(access_token)
     return kite
+
+
+def auto_login(max_retries: int = 3, retry_delay: int = 30) -> object:
+    """
+    Fully automated login with retry logic.
+    Retries up to max_retries times with retry_delay seconds between attempts.
+    This makes startup login bulletproof against transient network issues.
+    """
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            kite = _do_login()
+            if attempt > 1:
+                print(f"✅ Login successful on attempt {attempt}")
+            return kite
+        except Exception as e:
+            last_error = e
+            print(f"⚠️ Login attempt {attempt}/{max_retries} failed: {e}")
+            if attempt < max_retries:
+                print(f"   Retrying in {retry_delay}s...")
+                time.sleep(retry_delay)
+
+    raise Exception(f"All {max_retries} login attempts failed. Last error: {last_error}")
+
+
+def check_and_refresh_token():
+    """
+    Token health check — validates current token every 30 mins.
+    If token is invalid, auto-logins to get a fresh one.
+    Called from the keepalive ping or capture cycle.
+    """
+    global _last_token_check
+    now = time.time()
+
+    # Only check every 30 minutes
+    if now - _last_token_check < TOKEN_CHECK_INTERVAL:
+        return
+
+    _last_token_check = now
+
+    try:
+        from kiteconnect import KiteConnect
+        kite = KiteConnect(api_key=API_KEY)
+
+        # Try Supabase token first
+        supabase_token = get_token_from_supabase()
+        if supabase_token:
+            kite.set_access_token(supabase_token)
+            try:
+                kite.profile()
+                print("💚 Token health check: OK")
+                return
+            except Exception:
+                print("⚠️ Token health check: Token invalid — refreshing...")
+
+        # Token invalid — auto-login
+        auto_login()
+        print("✅ Token refreshed via health check")
+
+    except Exception as e:
+        print(f"❌ Token health check failed: {e}")
 
 
 def get_kite_client():
     """
     Get authenticated Kite client.
-    Priority: 1) Local file (Mac), 2) Supabase (Railway), 3) Auto-login
+    Priority: 1) Local file (Mac), 2) Supabase (Railway), 3) Auto-login with retry
     """
     from kiteconnect import KiteConnect
     today = time.strftime("%Y-%m-%d")
 
-    # ── 1. Try local token file (Mac dev environment) ─────────────────────────
+    # ── 1. Try local token file ───────────────────────────────────────────────
     if os.path.exists(TOKEN_FILE):
         try:
             with open(TOKEN_FILE) as f:
@@ -164,7 +232,7 @@ def get_kite_client():
         except Exception:
             print("  ⚠️ Local token invalid, trying Supabase...")
 
-    # ── 2. Try Supabase token (Railway environment) ───────────────────────────
+    # ── 2. Try Supabase token ─────────────────────────────────────────────────
     supabase_token = get_token_from_supabase()
     if supabase_token:
         kite = KiteConnect(api_key=API_KEY)
@@ -176,7 +244,7 @@ def get_kite_client():
         except Exception:
             print("  ⚠️ Supabase token invalid, attempting auto-login...")
 
-    # ── 3. Auto-login (runs on Mac, saves token to Supabase for Railway) ──────
+    # ── 3. Auto-login with retry ──────────────────────────────────────────────
     if TOTP_SECRET and PASSWORD:
         return auto_login()
     else:
