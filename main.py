@@ -459,6 +459,21 @@ def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
     from api.oi_heatmap import get_oi_heatmap
     return get_oi_heatmap(symbol=symbol, date=date, expiry=expiry)
 
+def keepalive_ping():
+    try:
+        import requests
+        requests.get("https://greeknova-backend-production.up.railway.app/health", timeout=5)
+        print("💓 Keepalive ping sent")
+    except Exception as e:
+        print(f"⚠️ Keepalive failed: {e}")
+
+    # ── Token health check every 30 mins ──────────────────────────────────────
+    try:
+        from services.kite_auth import check_and_refresh_token
+        check_and_refresh_token()
+    except Exception as e:
+        print(f"⚠️ Token health check error: {e}")
+
 # ── CommodityNova routes ───────────────────────────────────────────────────
 app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
 # ──────────────────────────────────────────────────────────────────────────
