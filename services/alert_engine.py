@@ -3,7 +3,7 @@ services/alert_engine.py
 
 GreekNova Alert Engine — runs after every OI capture cycle.
 Detects: OI Spikes, UOA High Conviction, Wall Shifts
-Delivers: Telegram personal chat via new alerts bot
+Delivers: Telegram personal chat via alerts bot
 Deduplicates: tracks sent alerts in memory to avoid spam
 """
 
@@ -60,7 +60,6 @@ def run_alert_check():
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .order("timestamp", desc=True)\
             .limit(20).execute()
 
         timestamps = sorted(set(r["timestamp"] for r in (ts_rows.data or [])))
@@ -72,15 +71,9 @@ def run_alert_check():
         ts_old = timestamps[-2]
 
         alerts_fired = []
-
-        spike_alerts = _check_oi_spikes(supabase, today, ts_new, ts_old)
-        alerts_fired.extend(spike_alerts)
-
-        uoa_alerts = _check_uoa_signals(supabase, today, timestamps)
-        alerts_fired.extend(uoa_alerts)
-
-        wall_alerts = _check_wall_shifts(supabase, today, ts_new, ts_old)
-        alerts_fired.extend(wall_alerts)
+        alerts_fired.extend(_check_oi_spikes(supabase, today, ts_new, ts_old))
+        alerts_fired.extend(_check_uoa_signals(supabase, today, timestamps))
+        alerts_fired.extend(_check_wall_shifts(supabase, today, ts_new, ts_old))
 
         for alert in alerts_fired:
             alert_key = alert.get("key", alert.get("text", "")[:50])
@@ -109,9 +102,11 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
                     .select("symbol, tradingsymbol, strike, option_type, oi, last_price, expiry")\
                     .eq("timestamp", ts)\
                     .range(offset, offset + 999).execute()
-                if not batch.data: break
+                if not batch.data:
+                    break
                 rows.extend(batch.data)
-                if len(batch.data) < 1000: break
+                if len(batch.data) < 1000:
+                    break
             return rows
 
         new_rows_raw = fetch_snap(ts_new)
@@ -143,8 +138,7 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
 
         new_rows = filter_nearest(new_rows_raw)
         old_rows = filter_nearest(old_rows_raw)
-
-        old_map = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in old_rows}
+        old_map  = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in old_rows}
 
         for row in new_rows:
             sym = row["symbol"]
@@ -156,9 +150,7 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
             new_oi = row["oi"] or 0
             old_oi = old["oi"] or 0
 
-            if old_oi < 50000:
-                continue
-            if old_oi == 0:
+            if old_oi < 50000 or old_oi == 0:
                 continue
 
             oi_pct = (new_oi - old_oi) / old_oi * 100
@@ -172,16 +164,16 @@ def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
             direction = "📈 BUILD" if oi_pct > 0 else "📉 UNWIND"
             alert_key = f"spike_{sym}_{strike}_{opt_type}_{round(oi_pct)}"
 
-    expiry_str = row.get("expiry", "")
-    expiry_tag = f" [{expiry_str[5:]}]" if expiry_str else ""  # shows MM-DD
-    text = (
-        f"🔥 *OI Spike Alert*\n"
-        f"*{sym}* {strike} {opt_type}{expiry_tag}\n"
-        f"{direction} · OI {oi_pct:+.1f}% in 5 mins\n"
-        f"LTP: ₹{ltp} · {_fmt(old_oi)} → {_fmt(new_oi)}\n"
-        f"_GreekNova · Informational only_"
-    )
+            expiry_str = row.get("expiry", "")
+            expiry_tag = f" [{expiry_str[5:]}]" if expiry_str else ""
 
+            text = (
+                f"🔥 *OI Spike Alert*\n"
+                f"*{sym}* {strike} {opt_type}{expiry_tag}\n"
+                f"{direction} · OI {oi_pct:+.1f}% in 5 mins\n"
+                f"LTP: ₹{ltp} · {_fmt(old_oi)} → {_fmt(new_oi)}\n"
+                f"_GreekNova · Informational only_"
+            )
             alerts.append({"key": alert_key, "text": text})
 
     except Exception as e:
@@ -195,7 +187,7 @@ def _check_uoa_signals(supabase, today: str, timestamps: list) -> list:
     try:
         from api.uoa import get_uoa
         uoa_data = get_uoa(date=today)
-        signals = uoa_data.get("signals", [])
+        signals  = uoa_data.get("signals", [])
 
         for sig in signals:
             if sig.get("score", 0) < 4:
@@ -223,7 +215,6 @@ def _check_uoa_signals(supabase, today: str, timestamps: list) -> list:
                 f"Bias: {bias}\n"
                 f"_GreekNova · Informational only_"
             )
-
             alerts.append({"key": alert_key, "text": text})
 
     except Exception as e:
@@ -234,7 +225,7 @@ def _check_uoa_signals(supabase, today: str, timestamps: list) -> list:
 
 def _check_wall_shifts(supabase, today: str, ts_new: str, ts_old: str) -> list:
     global _last_walls
-    alerts = []
+    alerts  = []
     INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
     try:
@@ -279,8 +270,8 @@ def _check_wall_shifts(supabase, today: str, ts_new: str, ts_old: str) -> list:
             alert_key = f"wall_{sym}_{ce_new}_{pe_new}"
             text = (
                 f"🏗️ *Wall Shift Alert — {sym}*\n"
-                + "\n".join(wall_changes) +
-                f"\n_GreekNova · Informational only_"
+                + "\n".join(wall_changes)
+                + f"\n_GreekNova · Informational only_"
             )
             alerts.append({"key": alert_key, "text": text})
 
@@ -304,7 +295,6 @@ def _maybe_send_heartbeat(supabase, today: str, ts_new: str, snapshot_count: int
             .select("cmp")\
             .eq("symbol", "NIFTY")\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .order("timestamp", desc=True)\
             .limit(1).execute()
 
         nifty_cmp = cmp_row.data[0]["cmp"] if cmp_row.data else "N/A"
@@ -342,6 +332,7 @@ def _fmt(n: int) -> str:
     if n >= 100_000:    return f"{n/100_000:.1f}L"
     if n >= 1_000:      return f"{n/1_000:.0f}K"
     return str(n)
+
 
 def _fmt_strike(s) -> str:
     if s is None: return "N/A"
