@@ -198,6 +198,14 @@ def keepalive_ping():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # ── Login on startup ───────────────────────────────────────────────────
+    try:
+        from services.kite_auth import auto_login
+        auto_login()
+        print("✅ Startup login successful")
+    except Exception as e:
+        print(f"⚠️ Startup login failed: {e}")
+
     # ── GreekNova jobs (unchanged) ─────────────────────────────────────────
     scheduler.add_job(run_full_capture, "interval", minutes=5, id="full_capture")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
