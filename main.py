@@ -65,7 +65,6 @@ def run_full_capture():
     if os.getenv("CAPTURE_ENABLED", "false").lower() != "true":
         return
     from dotenv import load_dotenv
-    load_dotenv('/Users/apple/optionspulse/.env')
     from datetime import datetime, timezone, timedelta
     ist = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(ist)
