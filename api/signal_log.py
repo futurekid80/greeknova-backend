@@ -38,6 +38,86 @@ def classify(oi_chg_pct: float, price_chg_pct: float):
     return None, None, None
 
 
+# ── Options confirmation logic ────────────────────────────────────────────────
+# Maps FUT signal type to confirming UOA signal types
+CONFIRMING_SIGNALS = {
+    "LONG_BUILDUP":   ["PUT_WRITING", "LONG_BUILDUP", "SHORT_COVERING", "BUYER_DOMINATED"],
+    "SHORT_BUILDUP":  ["CALL_WRITING", "SHORT_BUILDUP", "LONG_UNWINDING", "SELLER_DOMINATED"],
+    "SHORT_COVERING": ["PUT_WRITING", "SHORT_COVERING", "BUYER_DOMINATED"],
+    "LONG_UNWINDING": ["CALL_WRITING", "LONG_UNWINDING", "SELLER_DOMINATED"],
+}
+
+SIGNAL_LABELS = {
+    "PUT_WRITING":      "Put Writing",
+    "CALL_WRITING":     "Call Writing",
+    "LONG_BUILDUP":     "Long Buildup",
+    "SHORT_BUILDUP":    "Short Buildup",
+    "SHORT_COVERING":   "Short Covering",
+    "LONG_UNWINDING":   "Long Unwinding",
+    "BUYER_DOMINATED":  "Buyer Dominated",
+    "SELLER_DOMINATED": "Seller Dominated",
+    "FAR_OTM_ACTIVITY": "Far OTM Activity",
+    "VOLUME_SURGE":     "Volume Surge",
+}
+
+
+def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
+    """
+    Given a list of UOA signals for a symbol and the FUT signal type,
+    find the best confirming or contradicting options signal.
+    Returns a dict with confirmation details.
+    """
+    if not uoa_signals:
+        return {"has_confirmation": False, "confirms": None, "best_signal": None}
+
+    confirming = CONFIRMING_SIGNALS.get(fut_signal_type, [])
+
+    # Score each UOA signal: confirming signals scored higher
+    best_confirming = None
+    best_contradicting = None
+
+    for sig in uoa_signals:
+        sig_type = sig.get("signal_type", "")
+        score = sig.get("score", 0)
+        strike = sig.get("strike", 0)
+        opt_type = sig.get("option_type", "")
+
+        enriched = {
+            "signal_type":  sig_type,
+            "label":        SIGNAL_LABELS.get(sig_type, sig_type),
+            "strike":       strike,
+            "option_type":  opt_type,
+            "score":        score,
+            "bias":         sig.get("bias", ""),
+        }
+
+        if sig_type in confirming:
+            if best_confirming is None or score > best_confirming["score"]:
+                best_confirming = enriched
+        else:
+            if best_contradicting is None or score > best_contradicting["score"]:
+                best_contradicting = enriched
+
+    if best_confirming:
+        return {
+            "has_confirmation": True,
+            "confirms": True,
+            "best_signal": best_confirming,
+            "alignment": "✅ Confirms",
+            "alignment_color": "EMERALD",
+        }
+    elif best_contradicting:
+        return {
+            "has_confirmation": True,
+            "confirms": False,
+            "best_signal": best_contradicting,
+            "alignment": "⚠️ Contradicts",
+            "alignment_color": "AMBER",
+        }
+    else:
+        return {"has_confirmation": False, "confirms": None, "best_signal": None}
+
+
 def get_signal_log(date: str = None):
     global _signal_cache, _signal_cache_time
 
@@ -63,8 +143,8 @@ def get_signal_log(date: str = None):
         return {"signals": [], "total": 0, "date": today, "snapshots": 0,
                 "message": "Need at least 2 snapshots — check back after 9:20 AM"}
 
-    ts_open   = timestamps[0]
-    ts_latest = timestamps[-1]
+    ts_open     = timestamps[0]
+    ts_latest   = timestamps[-1]
     total_snaps = len(timestamps)
 
     # ── Step 2: Fetch ALL futures OI for today ────────────────────────────────
@@ -77,7 +157,6 @@ def get_signal_log(date: str = None):
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
             .range(offset, offset + 999)\
             .execute()
-        
         if not batch.data:
             break
         all_fut_rows.extend(batch.data)
@@ -89,7 +168,6 @@ def get_signal_log(date: str = None):
                 "message": "No futures data yet — FUT capture started today, check after next cycle"}
 
     # ── Step 3: Build per-symbol, per-timestamp maps ──────────────────────────
-    # fut_data[symbol][timestamp] = {oi, volume, last_price}
     from collections import defaultdict
     fut_data: dict = defaultdict(dict)
     for r in all_fut_rows:
@@ -105,7 +183,6 @@ def get_signal_log(date: str = None):
     cmp_result = supabase.from_("cmp_prices")\
         .select("symbol, cmp")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .order("timestamp", desc=True)\
         .limit(500)\
         .execute()
     cmp_map: dict = {}
@@ -123,8 +200,19 @@ def get_signal_log(date: str = None):
     for r in (cpr_result.data or []):
         cpr_map[r["symbol"]] = r
 
-    # ── Step 6: Compute signals per symbol ───────────────────────────────────
-    signal_log: dict = {}  # symbol → signal dict
+    # ── Step 6: Get UOA signals for options confirmation ─────────────────────
+    uoa_map: dict = defaultdict(list)  # symbol → list of UOA signals
+    try:
+        from api.uoa import get_uoa
+        uoa_data = get_uoa(date=today)
+        for sig in uoa_data.get("signals", []):
+            if sig.get("score", 0) >= 3:  # only meaningful signals
+                uoa_map[sig["symbol"]].append(sig)
+    except Exception as e:
+        print(f"[SIGNAL_LOG] UOA fetch failed: {e}")
+
+    # ── Step 7: Compute signals per symbol ───────────────────────────────────
+    signal_log: dict = {}
 
     for sym, ts_map in fut_data.items():
         open_snap   = ts_map.get(ts_open)
@@ -132,11 +220,11 @@ def get_signal_log(date: str = None):
         if not open_snap or not latest_snap:
             continue
 
-        oi_open   = open_snap["oi"]
-        oi_latest = latest_snap["oi"]
-        vol_open  = open_snap["volume"]
-        vol_latest = latest_snap["volume"]
-        price_open  = open_snap["last_price"]
+        oi_open      = open_snap["oi"]
+        oi_latest    = latest_snap["oi"]
+        vol_open     = open_snap["volume"]
+        vol_latest   = latest_snap["volume"]
+        price_open   = open_snap["last_price"]
         price_latest = latest_snap["last_price"]
 
         if oi_open == 0 or vol_open == 0 or price_open == 0:
@@ -144,27 +232,25 @@ def get_signal_log(date: str = None):
 
         oi_chg_pct    = round((oi_latest - oi_open) / oi_open * 100, 2)
         price_chg_pct = round((price_latest - price_open) / price_open * 100, 2)
-
-        # Volume: today's intraday growth — vol at latest vs vol at open
-        vol_chg_pct = round((vol_latest - vol_open) / vol_open * 100, 2) if vol_open > 0 else 0
+        vol_chg_pct   = round((vol_latest - vol_open) / vol_open * 100, 2) if vol_open > 0 else 0
 
         # Qualification thresholds
-        if abs(oi_chg_pct) < 3.0:        continue  # OI must move 3%+
-        if abs(price_chg_pct) < 0.3:     continue  # Price must move 0.3%+
-        if vol_latest < vol_open * 1.2:   continue  # Volume must be 20%+ above open
+        if abs(oi_chg_pct) < 3.0:      continue
+        if abs(price_chg_pct) < 0.3:   continue
+        if vol_latest < vol_open * 1.2: continue
 
         signal_type, label, bias = classify(oi_chg_pct, price_chg_pct)
         if not signal_type:
             continue
 
-        # Persistence — how many snapshots show same signal direction
-        persistence = 0
+        # Persistence
+        persistence   = 0
         first_seen_ts = ts_latest
         for ts in timestamps:
             snap = ts_map.get(ts)
             if not snap:
                 continue
-            snap_oi_chg = (snap["oi"] - oi_open) / oi_open * 100 if oi_open > 0 else 0
+            snap_oi_chg    = (snap["oi"] - oi_open) / oi_open * 100 if oi_open > 0 else 0
             snap_price_chg = (snap["last_price"] - price_open) / price_open * 100 if price_open > 0 else 0
             s, _, _ = classify(snap_oi_chg, snap_price_chg)
             if s == signal_type:
@@ -172,7 +258,6 @@ def get_signal_log(date: str = None):
                 if ts < first_seen_ts:
                     first_seen_ts = ts
 
-        # Require at least 2 snapshots of same signal
         if persistence < 2:
             continue
 
@@ -189,6 +274,10 @@ def get_signal_log(date: str = None):
                 cpr_position = "Below CPR"
             else:
                 cpr_position = "Inside CPR"
+
+        # ── Options confirmation ──────────────────────────────────────────────
+        uoa_signals    = uoa_map.get(sym, [])
+        options_conf   = _get_uoa_confirmation(uoa_signals, signal_type)
 
         signal_log[sym] = {
             "symbol":          sym,
@@ -212,9 +301,15 @@ def get_signal_log(date: str = None):
             "cpr_position":    cpr_position,
             "cpr_width_emoji": cpr.get("width_emoji"),
             "cpr_is_virgin":   cpr.get("is_virgin"),
+            # Options confirmation fields
+            "options_confirmation": options_conf.get("has_confirmation", False),
+            "options_confirms":     options_conf.get("confirms"),
+            "options_alignment":    options_conf.get("alignment"),
+            "options_alignment_color": options_conf.get("alignment_color"),
+            "options_signal":       options_conf.get("best_signal"),
         }
 
-    # ── Step 7: Sort — persistence first, then OI change ─────────────────────
+    # ── Step 8: Sort — persistence first, then OI change ─────────────────────
     signals = sorted(
         signal_log.values(),
         key=lambda x: (x["persistence"], abs(x["oi_chg_pct"])),
@@ -222,12 +317,12 @@ def get_signal_log(date: str = None):
     )
 
     result = {
-        "date":        today,
-        "signals":     signals,
-        "total":       len(signals),
-        "snapshots":   total_snaps,
-        "open_time":   to_ist(ts_open),
-        "latest_time": to_ist(ts_latest),
+        "date":          today,
+        "signals":       signals,
+        "total":         len(signals),
+        "snapshots":     total_snaps,
+        "open_time":     to_ist(ts_open),
+        "latest_time":   to_ist(ts_latest),
         "long_buildup":  sum(1 for s in signals if s["signal_type"] == "LONG_BUILDUP"),
         "short_buildup": sum(1 for s in signals if s["signal_type"] == "SHORT_BUILDUP"),
         "short_covering":sum(1 for s in signals if s["signal_type"] == "SHORT_COVERING"),
