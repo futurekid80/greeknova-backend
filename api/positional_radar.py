@@ -19,7 +19,7 @@ SYMBOLS = [
 def get_monthly_expiry(year: int, month: int) -> str:
     last_day = calendar.monthrange(year, month)[1]
     d = datetime(year, month, last_day)
-    while d.weekday() != 1:  # 1 = Tuesday (NSE changed from Thursday to Tuesday Sep 2025)
+    while d.weekday() != 1:  # 1 = Tuesday
         d -= timedelta(days=1)
     return d.strftime('%Y-%m-%d')
 
@@ -82,10 +82,6 @@ def check_acceleration(oi_series, dates):
 
 
 def get_oi_composition(ce_oi_start, ce_oi_end, pe_oi_start, pe_oi_end) -> dict:
-    """
-    Determine what is driving OI growth — CE writers or PE writers.
-    Returns composition analysis with dominant side and interpretation.
-    """
     ce_chg_pct = round((ce_oi_end - ce_oi_start) / ce_oi_start * 100, 1) if ce_oi_start > 0 else 0
     pe_chg_pct = round((pe_oi_end - pe_oi_start) / pe_oi_start * 100, 1) if pe_oi_start > 0 else 0
 
@@ -96,7 +92,6 @@ def get_oi_composition(ce_oi_start, ce_oi_end, pe_oi_start, pe_oi_end) -> dict:
     pcr_series = round(pe_oi_end / ce_oi_end, 2) if ce_oi_end > 0 else 0
     pcr_start  = round(pe_oi_start / ce_oi_start, 2) if ce_oi_start > 0 else 0
 
-    # Determine dominance
     if pe_chg_pct > ce_chg_pct * 1.3:
         dominant     = "PE"
         composition  = "PUT_DOMINATED"
@@ -149,7 +144,6 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
             .eq("symbol", "NIFTY")\
             .gte("timestamp", f"{today_str}T00:00:00+00:00")\
             .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
-            .order("timestamp", desc=False)\
             .limit(500).execute()
 
         timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
@@ -220,7 +214,6 @@ def get_positional_radar(min_consec: int = 0):
 
     series_start = get_series_start(current_expiry)
 
-    # On expiry day or day before expiry, exclude today to avoid rollover distortion
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     ist_today = datetime.now(ist).date()
@@ -243,26 +236,27 @@ def get_positional_radar(min_consec: int = 0):
     if len(trading_dates) < 3:
         return {"error": "Not enough trading days", "series_start": series_start, "expiry": current_expiry, "results": []}
 
-    # ── Batch fetch EOD data per day — now split CE/PE ────────────────────────
-    oi_by_date:    dict = {}   # total OI per symbol per day
-    ce_oi_by_date: dict = {}   # CE OI per symbol per day
-    pe_oi_by_date: dict = {}   # PE OI per symbol per day
+    oi_by_date:    dict = {}
+    ce_oi_by_date: dict = {}
+    pe_oi_by_date: dict = {}
     vol_by_date:   dict = {}
     cmp_by_date:   dict = {}
 
     for d in trading_dates:
+        # ── Get EOD timestamp — fetch all and take the latest ─────────────────
         ts_q = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("symbol", "NIFTY")\
             .gte("timestamp", f"{d}T00:00:00+00:00")\
             .lt("timestamp",  f"{d}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(1).execute()
+            .limit(500).execute()
 
         if not ts_q.data:
             continue
 
-        eod_ts = ts_q.data[0]["timestamp"]
+        # Sort in Python — no .order() needed
+        all_ts = sorted(set(r["timestamp"] for r in ts_q.data))
+        eod_ts = all_ts[-1]  # latest timestamp of the day
 
         raw = []
         for offset in range(0, 200000, 1000):
@@ -302,19 +296,19 @@ def get_positional_radar(min_consec: int = 0):
         pe_oi_by_date[d] = sym_pe_oi
         vol_by_date[d]   = sym_vol
 
+        # ── CMP — fetch all and dedupe in Python ──────────────────────────────
         cmp_q = supabase.from_("cmp_prices")\
-            .select("symbol, cmp")\
+            .select("symbol, cmp, timestamp")\
             .gte("timestamp", f"{d}T00:00:00+00:00")\
             .lt("timestamp",  f"{d}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
             .limit(500).execute().data or []
 
+        # Sort by timestamp desc in Python, take latest CMP per symbol
+        cmp_q_sorted = sorted(cmp_q, key=lambda r: r["timestamp"], reverse=True)
         day_cmp: dict = {}
-        seen: set = set()
-        for r in cmp_q:
-            if r["symbol"] not in seen:
+        for r in cmp_q_sorted:
+            if r["symbol"] not in day_cmp:
                 day_cmp[r["symbol"]] = float(r["cmp"])
-                seen.add(r["symbol"])
         cmp_by_date[d] = day_cmp
 
     available_dates = [d for d in trading_dates if d in oi_by_date]
@@ -393,25 +387,19 @@ def get_positional_radar(min_consec: int = 0):
             if vol_series[i] > vol_series[i-1]: vol_consec += 1
             else: break
 
-        # ── CE/PE composition analysis ────────────────────────────────────────
         composition = get_oi_composition(
             ce_oi_series[0],  ce_oi_series[-1],
             pe_oi_series[0],  pe_oi_series[-1],
         )
 
-        # ── Does composition confirm the signal bias? ─────────────────────────
-        # Long Buildup should be PE dominated (put writers = bullish)
-        # Short Buildup should be CE dominated (call writers = bearish)
         bias_confirmed = (
             (bias == "BULLISH" and composition["dominant"] == "PE") or
             (bias == "BEARISH" and composition["dominant"] == "CE") or
             composition["dominant"] == "MIXED"
         )
 
-        # ── Conviction level ──────────────────────────────────────────────────
         conviction = get_conviction_level(consec_days, vol_rising, accelerating)
 
-        # ── Ignition ─────────────────────────────────────────────────────────
         fut_signal_today = today_fut_signals.get(sym)
         ignition = False
         if conviction["level"] == "CONVICTION" and fut_signal_today:
@@ -431,8 +419,6 @@ def get_positional_radar(min_consec: int = 0):
             "is_index":            sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
             "signal":              signal,
             "bias":                bias,
-
-            # Conviction
             "conviction_level":    conviction_display["level"],
             "conviction_label":    conviction_display["label"],
             "conviction_emoji":    conviction_display["emoji"],
@@ -440,8 +426,6 @@ def get_positional_radar(min_consec: int = 0):
             "conviction_rank":     conviction_display["rank"],
             "ignition":            ignition,
             "fut_signal_today":    fut_signal_today,
-
-            # CE/PE composition — the key new addition
             "ce_oi_chg_pct":       composition["ce_oi_chg_pct"],
             "pe_oi_chg_pct":       composition["pe_oi_chg_pct"],
             "ce_pct_of_total":     composition["ce_pct_of_total"],
@@ -453,31 +437,21 @@ def get_positional_radar(min_consec: int = 0):
             "composition_interp":  composition["interp"],
             "composition_short":   composition["interp_short"],
             "bias_confirmed":      bias_confirmed,
-
-            # Backward compat
             "triple_confirm":      triple_confirm,
             "accelerating":        accelerating,
-
-            # Consistency
             "consistency_pct":     consistency_pct,
             "consistency_label":   consistency_label,
             "match_days":          match_days,
             "total_days":          total_intervals,
             "consec_days":         consec_days,
-
-            # Acceleration
             "oi_first_half_chg":   first_half_chg,
             "oi_second_half_chg":  second_half_chg,
             "vol_consec":          vol_consec,
-
-            # % changes
             "oi_chg_pct":          oi_chg_pct,
             "vol_chg_pct":         vol_chg_pct,
             "vol_series_chg":      vol_series_chg,
             "vol_avg_7d":          round(vol_avg_7d / 100000, 1),
             "cmp_chg_pct":         cmp_chg_pct,
-
-            # Sparklines
             "oi_series":           [round(x / 100000, 1) for x in oi_series],
             "ce_oi_series":        [round(x / 100000, 1) for x in ce_oi_series],
             "pe_oi_series":        [round(x / 100000, 1) for x in pe_oi_series],
@@ -488,7 +462,6 @@ def get_positional_radar(min_consec: int = 0):
             "series_days":         len(oi_series) - 1,
         })
 
-    # Sort: Ignition first, then by conviction rank, then consistency, then OI%
     results.sort(key=lambda x: (
         x["conviction_rank"],
         {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["consistency_label"]],
