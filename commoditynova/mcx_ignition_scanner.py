@@ -1,8 +1,7 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 import pytz
 from kiteconnect import KiteConnect
-from supabase import create_client
 
 logger = logging.getLogger(__name__)
 IST = pytz.timezone("Asia/Kolkata")
@@ -15,8 +14,54 @@ THRESHOLDS = {
 }
 
 
+def get_or_set_session_open_oi(
+    commodity: str,
+    current_oi: int,
+    supabase,
+    session_open_oi: dict,
+) -> int:
+    """
+    Returns today's session open OI baseline.
+    - If already in memory dict → use it (fastest path)
+    - If in Supabase for today → load into memory and use it
+    - If neither → this is first scan of day → store in both
+    Survives Railway restarts because baseline is in Supabase.
+    """
+    today = date.today().isoformat()
+
+    # Already in memory for today
+    if commodity in session_open_oi:
+        return session_open_oi[commodity]
+
+    # Try loading from Supabase
+    try:
+        result = supabase.table("mcx_ignition_signals") \
+            .select("session_open_oi, session_date") \
+            .eq("commodity", commodity) \
+            .execute()
+
+        if result.data:
+            row = result.data[0]
+            stored_date = str(row.get("session_date", ""))
+            stored_oi   = row.get("session_open_oi", 0)
+
+            if stored_date == today and stored_oi and stored_oi > 0:
+                # Valid baseline for today — load into memory
+                session_open_oi[commodity] = stored_oi
+                logger.info(f"{commodity}: loaded session baseline from Supabase — OI {stored_oi}")
+                return stored_oi
+
+    except Exception as e:
+        logger.warning(f"{commodity}: could not load session baseline — {e}")
+
+    # No baseline yet — set it now (first scan of day)
+    session_open_oi[commodity] = current_oi
+    logger.info(f"{commodity}: new session baseline set — OI {current_oi}")
+    return current_oi
+
+
 # ─────────────────────────────────────────────
-# PILLAR 1 — OI change (5-min delta)
+# PILLAR 1 — OI change (5-min delta + cumulative)
 # ─────────────────────────────────────────────
 def check_oi_pillar(
     commodity: str,
@@ -24,26 +69,15 @@ def check_oi_pillar(
     kite: KiteConnect,
     prev_oi: dict,
     session_open_oi: dict,
+    supabase,
 ) -> dict:
-    """
-    Fetch current total OI across all ATM±5 option strikes.
-    Returns:
-      - 5-min OI change (vs previous scan)
-      - Cumulative OI change (vs session open)
-      - Cumulative direction (bullish/bearish/neutral based on CE vs PE OI)
-    """
     threshold = THRESHOLDS[commodity]["oi"]
 
     try:
         quotes = kite.quote(option_symbols)
 
-        # Split CE and PE OI for direction detection
-        ce_oi = sum(
-            q.get("oi", 0) for sym, q in quotes.items() if sym.endswith("CE")
-        )
-        pe_oi = sum(
-            q.get("oi", 0) for sym, q in quotes.items() if sym.endswith("PE")
-        )
+        ce_oi = sum(q.get("oi", 0) for sym, q in quotes.items() if sym.endswith("CE"))
+        pe_oi = sum(q.get("oi", 0) for sym, q in quotes.items() if sym.endswith("PE"))
         current_oi = ce_oi + pe_oi
 
         # ── 5-min delta ──────────────────────────────
@@ -58,29 +92,27 @@ def check_oi_pillar(
             passed = abs(oi_change_pct) >= threshold
 
         # ── Cumulative since session open ─────────────
-        if commodity not in session_open_oi or session_open_oi[commodity] == 0:
-            session_open_oi[commodity] = current_oi
-            cumulative_oi_pct = 0.0
-        else:
-            open_oi = session_open_oi[commodity]
-            cumulative_oi_pct = ((current_oi - open_oi) / open_oi) * 100 if open_oi else 0
+        open_oi = get_or_set_session_open_oi(
+            commodity, current_oi, supabase, session_open_oi
+        )
+        cumulative_oi_pct = ((current_oi - open_oi) / open_oi) * 100 if open_oi else 0
 
-        # ── Directional bias from CE vs PE OI ────────
+        # ── Directional bias CE vs PE ─────────────────
         if ce_oi > pe_oi * 1.1:
-            cumulative_direction = "bearish"   # more CE writing = bearish
+            cumulative_direction = "bearish"
         elif pe_oi > ce_oi * 1.1:
-            cumulative_direction = "bullish"   # more PE writing = bullish
+            cumulative_direction = "bullish"
         else:
             cumulative_direction = "neutral"
 
         return {
-            "passed": passed,
-            "oi_change_pct": round(oi_change_pct, 2),
-            "threshold": threshold,
-            "current_oi": current_oi,
-            "cumulative_oi_pct": round(cumulative_oi_pct, 2),
+            "passed":               passed,
+            "oi_change_pct":        round(oi_change_pct, 2),
+            "threshold":            threshold,
+            "current_oi":           current_oi,
+            "cumulative_oi_pct":    round(cumulative_oi_pct, 2),
             "cumulative_direction": cumulative_direction,
-            "session_open_oi": session_open_oi[commodity],
+            "session_open_oi":      open_oi,
         }
 
     except Exception as e:
@@ -136,10 +168,8 @@ def check_price_pillar(
         return {
             "passed": passed,
             "price_chg_pct": round(price_chg_pct, 2),
-            "range_high": range_high,
-            "range_low": range_low,
-            "current_price": ltp,
-            "threshold": threshold,
+            "range_high": range_high, "range_low": range_low,
+            "current_price": ltp, "threshold": threshold,
             "breakout_direction": breakout_direction,
         }
 
@@ -162,8 +192,7 @@ def check_volume_pillar(commodity: str, candles: list) -> dict:
     try:
         if not candles or len(candles) < 5:
             return {"passed": False, "volume_ratio": 0.0,
-                    "current_volume": 0, "avg_volume": 0,
-                    "threshold": threshold}
+                    "current_volume": 0, "avg_volume": 0, "threshold": threshold}
 
         volumes = [c["volume"] for c in candles]
         current_volume = volumes[-1]
@@ -171,8 +200,8 @@ def check_volume_pillar(commodity: str, candles: list) -> dict:
 
         if avg_volume == 0:
             return {"passed": False, "volume_ratio": 0.0,
-                    "current_volume": current_volume,
-                    "avg_volume": 0, "threshold": threshold}
+                    "current_volume": current_volume, "avg_volume": 0,
+                    "threshold": threshold}
 
         volume_ratio = current_volume / avg_volume
         passed = volume_ratio >= threshold
@@ -188,8 +217,7 @@ def check_volume_pillar(commodity: str, candles: list) -> dict:
     except Exception as e:
         logger.error(f"{commodity} volume pillar error: {e}")
         return {"passed": False, "volume_ratio": 0.0,
-                "current_volume": 0, "avg_volume": 0,
-                "threshold": threshold}
+                "current_volume": 0, "avg_volume": 0, "threshold": threshold}
 
 
 # ─────────────────────────────────────────────
@@ -213,39 +241,29 @@ def compute_signal(oi: dict, price: dict, volume: dict) -> dict:
         status = "quiet"
 
     direction = price.get("breakout_direction")
-    if direction == "up":
-        direction = "bullish"
-    elif direction == "down":
-        direction = "bearish"
+    if direction == "up":   direction = "bullish"
+    elif direction == "down": direction = "bearish"
 
-    return {
-        "status": status, "pillars_met": pillars_met,
-        "signal_score": score, "direction": direction,
-    }
+    return {"status": status, "pillars_met": pillars_met,
+            "signal_score": score, "direction": direction}
 
 
 def build_scan_note(commodity: str, signal: dict, price: dict, oi: dict) -> str:
     cumulative = oi.get("cumulative_oi_pct", 0)
     cum_dir    = oi.get("cumulative_direction", "neutral")
+    sign       = "+" if cumulative >= 0 else ""
 
     if signal["status"] == "fired":
         d   = "above" if signal["direction"] == "bullish" else "below"
         ref = price.get("range_high") if signal["direction"] == "bullish" else price.get("range_low")
-        return (
-            f"{signal['direction'].capitalize()} ignition — all 3 conditions met. "
-            f"Price {d} {ref}. "
-            f"Session OI {'+' if cumulative >= 0 else ''}{cumulative:.1f}% ({cum_dir})."
-        )
+        return (f"{signal['direction'].capitalize()} ignition — all 3 conditions met. "
+                f"Price {d} {ref}. Session OI {sign}{cumulative:.1f}% ({cum_dir}).")
     elif signal["status"] == "watch":
-        return (
-            f"{signal['pillars_met']}/3 conditions met — monitoring. "
-            f"Session OI {'+' if cumulative >= 0 else ''}{cumulative:.1f}% ({cum_dir})."
-        )
+        return (f"{signal['pillars_met']}/3 conditions met — monitoring. "
+                f"Session OI {sign}{cumulative:.1f}% ({cum_dir}).")
     else:
-        return (
-            f"No signal — market quiet. "
-            f"Session OI {'+' if cumulative >= 0 else ''}{cumulative:.1f}% ({cum_dir})."
-        )
+        return (f"No signal — market quiet. "
+                f"Session OI {sign}{cumulative:.1f}% ({cum_dir}).")
 
 
 # ─────────────────────────────────────────────
@@ -268,7 +286,8 @@ def run_ignition_scan(
         logger.warning("No cached instruments — skipping scan.")
         return
 
-    now_ist = datetime.now(IST)
+    now_ist   = datetime.now(IST)
+    today_str = now_ist.date().isoformat()
     fired_commodities = []
 
     for commodity, inst in instruments.items():
@@ -279,9 +298,8 @@ def run_ignition_scan(
             atm_strike     = inst.get("atm_strike")
             expiry_date    = inst.get("expiry_date")
 
-            # Run 3 pillars
             oi_result     = check_oi_pillar(
-                commodity, option_symbols, kite, prev_oi, session_open_oi
+                commodity, option_symbols, kite, prev_oi, session_open_oi, supabase
             )
             price_result  = check_price_pillar(commodity, futures_symbol, candles, kite)
             volume_result = check_volume_pillar(commodity, candles)
@@ -319,6 +337,7 @@ def run_ignition_scan(
                 "session_open_oi":      oi_result["session_open_oi"],
                 "cumulative_oi_pct":    oi_result["cumulative_oi_pct"],
                 "cumulative_direction": oi_result["cumulative_direction"],
+                "session_date":         today_str,
                 "scanned_at":           now_ist.isoformat(),
                 "updated_at":           now_ist.isoformat(),
             }
@@ -328,7 +347,7 @@ def run_ignition_scan(
             ).execute()
 
             if signal["status"] == "fired":
-                history_row = {
+                supabase.table("mcx_ignition_history").insert({
                     "commodity":     commodity,
                     "status":        signal["status"],
                     "direction":     signal["direction"],
@@ -339,13 +358,11 @@ def run_ignition_scan(
                     "volume_ratio":  volume_result["volume_ratio"],
                     "scan_note":     note,
                     "fired_at":      now_ist.isoformat(),
-                }
-                supabase.table("mcx_ignition_history").insert(history_row).execute()
+                }).execute()
 
             logger.info(
                 f"{commodity}: {signal['status'].upper()} "
-                f"(score={signal['signal_score']}, "
-                f"pillars={signal['pillars_met']}/3, "
+                f"(score={signal['signal_score']}, pillars={signal['pillars_met']}/3, "
                 f"price={price_result['current_price']}, "
                 f"cum_oi={oi_result['cumulative_oi_pct']:+.1f}% {oi_result['cumulative_direction']})"
             )
