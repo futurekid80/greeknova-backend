@@ -192,8 +192,7 @@ def compute_and_store_cpr(trade_date: str = None):
         print(f"[CPR] Instruments fetch failed: {e}")
         token_map = {}
 
-# Use kite.ohlc() as primary — returns completed session OHLC reliably
-    # historical_data at 3:35 PM sometimes returns partial candle
+    # Use kite.ohlc() as primary — returns completed session OHLC reliably
     batch_size = 20
     all_nse_keys = [ALL_NSE_MAP[s] for s in all_symbols if s in ALL_NSE_MAP]
     for i in range(0, len(all_nse_keys), batch_size):
@@ -219,7 +218,6 @@ def compute_and_store_cpr(trade_date: str = None):
         prev_rows = supabase.from_("cpr_levels")\
             .select("symbol, tc, bc")\
             .lt("trade_date", trade_date)\
-            .order("trade_date", desc=True)\
             .limit(len(all_symbols) * 2)\
             .execute()
         seen_prev = set()
@@ -293,7 +291,6 @@ def update_cpr_status():
     cpr_rows = supabase.from_("cpr_levels")\
         .select("*")\
         .gte("trade_date", today)\
-        .order("trade_date", desc=False)\
         .limit(500)\
         .execute()
 
@@ -303,7 +300,6 @@ def update_cpr_status():
     cmp_rows = supabase.from_("cmp_prices")\
         .select("symbol, cmp")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .order("timestamp", desc=True)\
         .limit(500)\
         .execute()
 
@@ -335,7 +331,7 @@ def update_cpr_status():
                     "is_virgin":         is_virgin,
                     "status_updated_at": now_utc,
                 })\
-                .gte("trade_date", today).order("trade_date", desc=False).limit(500)\
+                .gte("trade_date", today)\
                 .eq("symbol", sym)\
                 .execute()
         except Exception as e:
@@ -363,7 +359,6 @@ def get_cpr_scanner():
     cpr_rows = supabase.from_("cpr_levels")\
         .select("*")\
         .gte("trade_date", today)\
-        .order("trade_date", desc=False)\
         .limit(500)\
         .execute()
 
@@ -493,7 +488,6 @@ def _get_cpr_live():
             batch = supabase.from_("cmp_prices")\
                 .select("symbol, cmp")\
                 .gte("timestamp", f"{today}T00:00:00+00:00")\
-                .order("timestamp", desc=True)\
                 .range(offset, offset + 999)\
                 .execute()
             if not batch.data:
