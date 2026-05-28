@@ -202,12 +202,19 @@ def get_signal_log(date: str = None):
 
     # ── Step 6: Get UOA signals for options confirmation ─────────────────────
     uoa_map: dict = defaultdict(list)  # symbol → list of UOA signals
+    uoa_fetch_ok = False
     try:
         from api.uoa import get_uoa
-        uoa_data = get_uoa(date=today)
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(get_uoa, date=today)
+            uoa_data = future.result(timeout=8)  # 8 second max
         for sig in uoa_data.get("signals", []):
-            if sig.get("score", 0) >= 3:  # only meaningful signals
+            if sig.get("score", 0) >= 3:
                 uoa_map[sig["symbol"]].append(sig)
+        uoa_fetch_ok = True
+    except concurrent.futures.TimeoutError:
+        print(f"[SIGNAL_LOG] UOA fetch timed out — showing FUT signals only")
     except Exception as e:
         print(f"[SIGNAL_LOG] UOA fetch failed: {e}")
 
@@ -329,6 +336,10 @@ def get_signal_log(date: str = None):
         "long_unwinding":sum(1 for s in signals if s["signal_type"] == "LONG_UNWINDING"),
     }
 
-    _signal_cache = result
-    _signal_cache_time = time_module.time()
+    # Only cache if signals found, OR UOA fetch worked AND market genuinely empty
+    if len(signals) > 0 or (uoa_fetch_ok and total_snaps >= 5):
+        _signal_cache = result
+        _signal_cache_time = time_module.time()
+    else:
+        print(f"[SIGNAL_LOG] Not caching — {len(signals)} signals, uoa_ok={uoa_fetch_ok}, snaps={total_snaps}")
     return result
