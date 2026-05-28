@@ -184,6 +184,20 @@ def compute_and_store_cpr(trade_date: str = None):
             next_day += timedelta(days=1)
         trade_date = next_day.isoformat()
 
+    # ── Find last trading day for OHLC ────────────────────────────────────────
+    # Walk back up to 7 days skipping weekends
+    # Actual holiday detection happens naturally — if OHLC is empty we go back further
+    ohlc_date = today
+    for _ in range(7):
+        if ohlc_date.weekday() < 5:
+            break
+        ohlc_date -= timedelta(days=1)
+    # If today is a weekday but holiday, the historical_data call returns empty
+    # In that case walk back one more day
+    from_date = ohlc_date.isoformat()
+    to_date   = ohlc_date.isoformat()
+    print(f"[CPR] OHLC date: {from_date} | CPR trade_date: {trade_date}")
+
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
@@ -198,11 +212,41 @@ def compute_and_store_cpr(trade_date: str = None):
         print(f"[CPR] Got {len(token_map)} instrument tokens")
     except Exception as e:
         print(f"[CPR] Instruments fetch failed: {e}")
+        # If no data found (holiday), try previous weekday
+    if not ohlc_map:
+        prev_date = ohlc_date - timedelta(days=1)
+        while prev_date.weekday() >= 5:
+            prev_date -= timedelta(days=1)
+        from_date = prev_date.isoformat()
+        to_date   = prev_date.isoformat()
+        print(f"[CPR] No data for {ohlc_date}, retrying with {from_date}")
+        for sym in all_symbols:
+            token = token_map.get(sym)
+            if not token:
+                continue
+            try:
+                records = kite.historical_data(
+                    instrument_token=token,
+                    from_date=from_date,
+                    to_date=to_date,
+                    interval="day",
+                    continuous=False,
+                    oi=False,
+                )
+                if records:
+                    r = records[-1]
+                    ohlc_map[sym] = {
+                        "high":  float(r["high"]),
+                        "low":   float(r["low"]),
+                        "close": float(r["close"]),
+                    }
+                time.sleep(0.05)
+            except Exception as e:
+                print(f"[CPR] Retry historical_data {sym}: {e}")
+        print(f"[CPR] Retry got OHLC for {len(ohlc_map)} symbols")
 
     # ── Fetch OHLC via historical_data (official NSE close) ───────────────────
     # historical_data returns official weighted avg close — matches Zerodha charts
-    from_date = today.isoformat()
-    to_date   = today.isoformat()
 
     for sym in all_symbols:
         token = token_map.get(sym)
