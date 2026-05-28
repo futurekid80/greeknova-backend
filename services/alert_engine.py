@@ -2,34 +2,45 @@
 services/alert_engine.py
 
 GreekNova Alert Engine — runs after every OI capture cycle.
-Detects: OI Spikes, UOA High Conviction, Wall Shifts
-Delivers: Telegram personal chat via alerts bot
-Deduplicates: tracks sent alerts in memory to avoid spam
+
+Two alert types only:
+1. HIGH CONV — FUT signal + Options Confirmation aligned, persistence ≥ 10 snaps
+2. Near-ATM writing — UOA put/call writing within 2% of CMP, score ≥ 4
+
+Delivers: Telegram only
+Deduplicates: once per symbol per alert type per day
 """
 
 import os
 import requests
-from datetime import datetime, timezone, timedelta, date as date_type
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 # ── Telegram config ───────────────────────────────────────────────────────────
-ALERT_BOT_TOKEN = "8659302604:AAFWa38GGioCI6iEJwD1ZBS88MILPVhJys8"
+ALERT_BOT_TOKEN  = "8659302604:AAFWa38GGioCI6iEJwD1ZBS88MILPVhJys8"
 PERSONAL_CHAT_ID = "5513733966"
-TELEGRAM_URL = f"https://api.telegram.org/bot{ALERT_BOT_TOKEN}/sendMessage"
+TELEGRAM_URL     = f"https://api.telegram.org/bot{ALERT_BOT_TOKEN}/sendMessage"
 
-# ── Alert deduplication ───────────────────────────────────────────────────────
+# ── Deduplication — reset daily ───────────────────────────────────────────────
 _sent_alerts: set = set()
-_last_walls:  dict = {}
-_last_heartbeat: Optional[datetime] = None
+_sent_date:   str = ""
 
 IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _reset_if_new_day():
+    global _sent_alerts, _sent_date
+    today = datetime.now(IST).strftime('%Y-%m-%d')
+    if today != _sent_date:
+        _sent_alerts = set()
+        _sent_date   = today
 
 
 def send_telegram(text: str) -> bool:
     try:
         r = requests.post(TELEGRAM_URL, json={
-            "chat_id": PERSONAL_CHAT_ID,
-            "text": text,
+            "chat_id":    PERSONAL_CHAT_ID,
+            "text":       text,
             "parse_mode": "Markdown"
         }, timeout=10)
         return r.status_code == 200
@@ -39,7 +50,7 @@ def send_telegram(text: str) -> bool:
 
 
 def is_market_hours() -> bool:
-    now = datetime.now(IST)
+    now   = datetime.now(IST)
     if now.weekday() >= 5:
         return False
     total = now.hour * 60 + now.minute
@@ -51,290 +62,141 @@ def run_alert_check():
         return
 
     print("[ALERTS] Running alert check...")
+    _reset_if_new_day()
+
     try:
-        from utils.db import get_supabase
-        supabase = get_supabase()
-        today = datetime.now(IST).strftime('%Y-%m-%d')
-
-        ts_rows = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .limit(20).execute()
-
-        timestamps = sorted(set(r["timestamp"] for r in (ts_rows.data or [])))
-        if len(timestamps) < 2:
-            print("[ALERTS] Not enough snapshots yet")
-            return
-
-        ts_new = timestamps[-1]
-        ts_old = timestamps[-2]
-
-        alerts_fired = []
-        alerts_fired.extend(_check_oi_spikes(supabase, today, ts_new, ts_old))
-        alerts_fired.extend(_check_uoa_signals(supabase, today, timestamps))
-        alerts_fired.extend(_check_wall_shifts(supabase, today, ts_new, ts_old))
-
-        for alert in alerts_fired:
-            alert_key = alert.get("key", alert.get("text", "")[:50])
-            if alert_key not in _sent_alerts:
-                send_telegram(alert["text"])
-                _sent_alerts.add(alert_key)
-                print(f"[ALERTS] Sent: {alert_key}")
-
-        if not alerts_fired:
-            print("[ALERTS] No new alerts this cycle")
-
-        _maybe_send_heartbeat(supabase, today, ts_new, len(timestamps))
-
+        _check_high_conv_signals()
+        _check_near_atm_writing()
     except Exception as e:
         print(f"[ALERTS] Alert check error: {e}")
 
 
-def _check_oi_spikes(supabase, today: str, ts_new: str, ts_old: str,
-                     threshold: float = 15.0) -> list:
-    alerts = []
+# ── Alert 1: HIGH CONV ────────────────────────────────────────────────────────
+def _check_high_conv_signals():
+    """
+    Fire when FUT signal + Options Confirmation both align,
+    persistence >= 10 snapshots. Once per symbol per day.
+    """
     try:
-        def fetch_snap(ts):
-            rows = []
-            for offset in range(0, 50000, 1000):
-                batch = supabase.from_("oi_snapshots")\
-                    .select("symbol, tradingsymbol, strike, option_type, oi, last_price, expiry")\
-                    .eq("timestamp", ts)\
-                    .range(offset, offset + 999).execute()
-                if not batch.data:
-                    break
-                rows.extend(batch.data)
-                if len(batch.data) < 1000:
-                    break
-            return rows
+        from api.signal_log import get_signal_log
+        data    = get_signal_log()
+        signals = data.get("signals", [])
 
-        new_rows_raw = fetch_snap(ts_new)
-        old_rows_raw = fetch_snap(ts_old)
+        for sig in signals:
+            sym         = sig["symbol"]
+            persistence = sig.get("persistence", 0)
+            confirms    = sig.get("options_confirms")
+            signal_type = sig.get("signal_type", "")
+            label       = sig.get("label", "")
+            oi_chg      = sig.get("oi_chg_pct", 0)
+            price_chg   = sig.get("price_chg_pct", 0)
+            cmp         = sig.get("cmp", 0)
+            cpr_pos     = sig.get("cpr_position", "")
+            opt_sig     = sig.get("options_signal")
 
-        # Build nearest active expiry map per symbol
-        today_str = date_type.today().isoformat()
-        nearest_expiry_map: dict = {}
-        for r in new_rows_raw:
-            sym = r["symbol"]
-            exp = r.get("expiry")
-            if not exp or exp < today_str:
+            # Must be HIGH CONV: FUT signal + options confirms + persistence >= 10
+            if not confirms:
                 continue
-            if sym not in nearest_expiry_map or exp < nearest_expiry_map[sym]:
-                nearest_expiry_map[sym] = exp
-
-        def filter_nearest(rows):
-            filtered = []
-            for r in rows:
-                sym = r["symbol"]
-                exp = r.get("expiry")
-                if sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
-                    filtered.append(r)
-                else:
-                    nearest = nearest_expiry_map.get(sym)
-                    if nearest and exp == nearest:
-                        filtered.append(r)
-            return filtered
-
-        new_rows = filter_nearest(new_rows_raw)
-        old_rows = filter_nearest(old_rows_raw)
-        old_map  = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in old_rows}
-
-        for row in new_rows:
-            sym = row["symbol"]
-            key = f"{sym}_{row['tradingsymbol']}"
-            old = old_map.get(key)
-            if not old:
+            if persistence < 10:
                 continue
 
-            new_oi = row["oi"] or 0
-            old_oi = old["oi"] or 0
-
-            if old_oi < 50000 or old_oi == 0:
+            alert_key = f"highconv_{sym}_{signal_type}"
+            if alert_key in _sent_alerts:
                 continue
 
-            oi_pct = (new_oi - old_oi) / old_oi * 100
-
-            if abs(oi_pct) < threshold:
-                continue
-
-            strike    = row["strike"]
-            opt_type  = row["option_type"]
-            ltp       = row["last_price"] or 0
-            direction = "📈 BUILD" if oi_pct > 0 else "📉 UNWIND"
-            alert_key = f"spike_{sym}_{strike}_{opt_type}_{round(oi_pct)}"
-
-            expiry_str = row.get("expiry", "")
-            expiry_tag = f" [{expiry_str[5:]}]" if expiry_str else ""
+            bias_icon = "🟢" if sig.get("bias") == "BULLISH" else "🔴"
+            opt_line  = ""
+            if opt_sig:
+                opt_line = f"Options: {opt_sig.get('label','')} · {opt_sig.get('strike','')} {opt_sig.get('option_type','')} · Score {opt_sig.get('score','')}/5\n"
 
             text = (
-                f"🔥 *OI Spike Alert*\n"
-                f"*{sym}* {strike} {opt_type}{expiry_tag}\n"
-                f"{direction} · OI {oi_pct:+.1f}% in 5 mins\n"
-                f"LTP: ₹{ltp} · {_fmt(old_oi)} → {_fmt(new_oi)}\n"
+                f"🎯 *HIGH CONV Signal* {bias_icon}\n"
+                f"*{sym}* · ₹{cmp}\n"
+                f"FUT: {label} · OI {oi_chg:+.1f}% · Price {price_chg:+.2f}%\n"
+                f"{opt_line}"
+                f"CPR: {cpr_pos.replace('_',' ').title()} · Persistence: {persistence} snaps\n"
                 f"_GreekNova · Informational only_"
             )
-            alerts.append({"key": alert_key, "text": text})
+
+            if send_telegram(text):
+                _sent_alerts.add(alert_key)
+                print(f"[ALERTS] HIGH CONV sent: {sym}")
 
     except Exception as e:
-        print(f"[ALERTS] OI spike check error: {e}")
-
-    return alerts
+        print(f"[ALERTS] High conv check error: {e}")
 
 
-def _check_uoa_signals(supabase, today: str, timestamps: list) -> list:
-    alerts = []
+# ── Alert 2: Near-ATM Writing ─────────────────────────────────────────────────
+def _check_near_atm_writing():
+    """
+    Fire when put/call writing appears within 2% of CMP, score >= 4.
+    Once per symbol per option_type per day.
+    """
     try:
         from api.uoa import get_uoa
+        from utils.db import get_supabase
+
+        today    = datetime.now(IST).strftime('%Y-%m-%d')
         uoa_data = get_uoa(date=today)
         signals  = uoa_data.get("signals", [])
 
+        # Get CMP map
+        supabase = get_supabase()
+        cmp_rows = supabase.from_("cmp_prices")\
+            .select("symbol, cmp")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .limit(500).execute()
+
+        cmp_map: dict = {}
+        seen = set()
+        for r in (cmp_rows.data or []):
+            if r["symbol"] not in seen:
+                cmp_map[r["symbol"]] = float(r["cmp"])
+                seen.add(r["symbol"])
+
         for sig in signals:
+            signal_type = sig.get("signal_type", "")
+            if signal_type not in ["PUT_WRITING", "CALL_WRITING"]:
+                continue
             if sig.get("score", 0) < 4:
                 continue
 
-            sym       = sig["symbol"]
-            strike    = sig["strike"]
-            opt_type  = sig["option_type"]
-            signal_t  = sig["signal_type"]
-            bias      = sig["bias"]
-            score     = sig["score"]
-            ltp       = sig.get("ltp", 0)
-            oi_chg    = sig.get("oi_chg_30min", 0)
-            vol_ratio = sig.get("vol_oi_ratio", 0)
-            alert_key = f"uoa_{sym}_{strike}_{opt_type}_{signal_t}"
+            sym      = sig["symbol"]
+            strike   = float(sig.get("strike", 0))
+            opt_type = sig.get("option_type", "")
+            score    = sig.get("score", 0)
+            ltp      = sig.get("ltp", 0)
+            oi_chg   = sig.get("oi_chg_30min", 0)
+            persist  = sig.get("persistence_pct", 0)
+            cmp      = cmp_map.get(sym, 0)
 
-            bias_icon    = "🟢" if bias == "BULLISH" else "🔴"
-            signal_label = signal_t.replace("_", " ").title()
+            if cmp <= 0 or strike <= 0:
+                continue
+
+            distance_pct = abs(strike - cmp) / cmp * 100
+            if distance_pct > 2.0:
+                continue
+
+            alert_key = f"nearatm_{sym}_{strike}_{opt_type}"
+            if alert_key in _sent_alerts:
+                continue
+
+            bias_icon    = "🟢" if signal_type == "PUT_WRITING" else "🔴"
+            signal_label = "Put Writing" if signal_type == "PUT_WRITING" else "Call Writing"
+            direction    = "defending support" if signal_type == "PUT_WRITING" else "capping upside"
 
             text = (
-                f"🐋 *High Conviction UOA* {bias_icon}\n"
-                f"*{sym}* {strike} {opt_type} · Score {score}/5\n"
-                f"Signal: {signal_label}\n"
-                f"OI 30m: {oi_chg:+.1f}% · Vol/OI: {vol_ratio:.1f}x · LTP: ₹{ltp}\n"
-                f"Bias: {bias}\n"
+                f"📍 *Near-ATM {signal_label}* {bias_icon}\n"
+                f"*{sym}* · ₹{cmp:.1f} CMP\n"
+                f"{strike} {opt_type} · {distance_pct:.1f}% from CMP · Score {score}/5\n"
+                f"OI 30m: {oi_chg:+.1f}% · LTP: ₹{ltp} · Persist: {persist}%\n"
+                f"Writer {direction}\n"
                 f"_GreekNova · Informational only_"
             )
-            alerts.append({"key": alert_key, "text": text})
+
+            if send_telegram(text):
+                _sent_alerts.add(alert_key)
+                print(f"[ALERTS] Near-ATM {signal_label} sent: {sym} {strike} {opt_type}")
 
     except Exception as e:
-        print(f"[ALERTS] UOA check error: {e}")
-
-    return alerts
-
-
-def _check_wall_shifts(supabase, today: str, ts_new: str, ts_old: str) -> list:
-    global _last_walls
-    alerts  = []
-    INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
-
-    try:
-        def get_walls(ts, symbol):
-            rows = supabase.from_("oi_snapshots")\
-                .select("strike, option_type, oi")\
-                .eq("symbol", symbol)\
-                .eq("timestamp", ts)\
-                .limit(5000).execute().data or []
-
-            ce_oi: dict = {}
-            pe_oi: dict = {}
-            for r in rows:
-                s  = r["strike"]
-                oi = r["oi"] or 0
-                if r["option_type"] == "CE":
-                    ce_oi[s] = ce_oi.get(s, 0) + oi
-                else:
-                    pe_oi[s] = pe_oi.get(s, 0) + oi
-
-            ce_wall = max(ce_oi, key=ce_oi.get) if ce_oi else None
-            pe_wall = max(pe_oi, key=pe_oi.get) if pe_oi else None
-            return ce_wall, pe_wall
-
-        for sym in INDICES:
-            ce_new, pe_new = get_walls(ts_new, sym)
-            ce_old, pe_old = _last_walls.get(sym, (None, None))
-            _last_walls[sym] = (ce_new, pe_new)
-
-            if ce_old is None:
-                continue
-
-            wall_changes = []
-            if ce_new != ce_old and ce_new is not None:
-                wall_changes.append(f"CE wall: {_fmt_strike(ce_old)} → *{_fmt_strike(ce_new)}*")
-            if pe_new != pe_old and pe_new is not None:
-                wall_changes.append(f"PE wall: {_fmt_strike(pe_old)} → *{_fmt_strike(pe_new)}*")
-
-            if not wall_changes:
-                continue
-
-            alert_key = f"wall_{sym}_{ce_new}_{pe_new}"
-            text = (
-                f"🏗️ *Wall Shift Alert — {sym}*\n"
-                + "\n".join(wall_changes)
-                + f"\n_GreekNova · Informational only_"
-            )
-            alerts.append({"key": alert_key, "text": text})
-
-    except Exception as e:
-        print(f"[ALERTS] Wall shift check error: {e}")
-
-    return alerts
-
-
-def _maybe_send_heartbeat(supabase, today: str, ts_new: str, snapshot_count: int):
-    global _last_heartbeat
-    now = datetime.now(IST)
-
-    if _last_heartbeat and (now - _last_heartbeat).total_seconds() < 30 * 60:
-        return
-
-    _last_heartbeat = now
-
-    try:
-        cmp_row = supabase.from_("cmp_prices")\
-            .select("cmp")\
-            .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .limit(1).execute()
-
-        nifty_cmp = cmp_row.data[0]["cmp"] if cmp_row.data else "N/A"
-
-        rows = supabase.from_("oi_snapshots")\
-            .select("option_type, oi")\
-            .eq("symbol", "NIFTY")\
-            .eq("timestamp", ts_new)\
-            .limit(5000).execute().data or []
-
-        total_ce = sum(r["oi"] or 0 for r in rows if r["option_type"] == "CE")
-        total_pe = sum(r["oi"] or 0 for r in rows if r["option_type"] == "PE")
-        pcr = round(total_pe / total_ce, 2) if total_ce > 0 else "N/A"
-
-        ce_wall, pe_wall = _last_walls.get("NIFTY", ("N/A", "N/A"))
-        time_str = now.strftime("%H:%M IST")
-
-        text = (
-            f"💓 *GreekNova Heartbeat* · {time_str}\n"
-            f"NIFTY: ₹{nifty_cmp}\n"
-            f"PCR: {pcr} · CE Wall: {_fmt_strike(ce_wall)} · PE Wall: {_fmt_strike(pe_wall)}\n"
-            f"Snapshots today: {snapshot_count}\n"
-            f"Alert engine: ✅ Running\n"
-            f"_Market hours · Auto-monitoring active_"
-        )
-        send_telegram(text)
-        print(f"[ALERTS] Heartbeat sent at {time_str}")
-
-    except Exception as e:
-        print(f"[ALERTS] Heartbeat error: {e}")
-
-
-def _fmt(n: int) -> str:
-    if n >= 10_000_000: return f"{n/10_000_000:.1f}Cr"
-    if n >= 100_000:    return f"{n/100_000:.1f}L"
-    if n >= 1_000:      return f"{n/1_000:.0f}K"
-    return str(n)
-
-
-def _fmt_strike(s) -> str:
-    if s is None: return "N/A"
-    try: return f"{int(s):,}"
-    except: return str(s)
+        print(f"[ALERTS] Near-ATM check error: {e}")
