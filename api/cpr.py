@@ -150,7 +150,7 @@ def _get_uoa_signals_cached() -> dict:
                 "signal_type": sig["signal_type"],
                 "bias":        sig["bias"],
                 "option_type": sig["option_type"],
-                "strike":      sig["strike"],
+                "strike":      float(sig["strike"]),
                 "score":       sig["score"],
             })
     except Exception as e:
@@ -374,6 +374,33 @@ def update_cpr_status():
     _cpr_cache = {}
     _cpr_cache_time = 0
 
+def _get_nearest_signal(sym_signals: list, cmp: float) -> dict | None:
+    """
+    Return the UOA signal with strike nearest to CMP (within 5%).
+    Falls back to highest score if nothing within 5%.
+    Also adds otm_distance_pct field to the signal.
+    """
+    if not sym_signals:
+        return None
+
+    # Filter score >= 3
+    qualified = [s for s in sym_signals if s.get("score", 0) >= 3]
+    if not qualified:
+        return None
+
+    # Add distance from CMP to each signal
+    for s in qualified:
+        strike = s.get("strike", 0)
+        s["otm_distance_pct"] = round(abs(strike - cmp) / cmp * 100, 2) if cmp > 0 else 99
+
+    # Primary: nearest to CMP within 5%
+    near_money = [s for s in qualified if s["otm_distance_pct"] <= 5.0]
+    if near_money:
+        return min(near_money, key=lambda s: s["otm_distance_pct"])
+
+    # Fallback: highest score (far OTM)
+    return max(qualified, key=lambda s: s["score"])
+
 
 def get_cpr_scanner():
     global _cpr_cache, _cpr_cache_time
@@ -409,7 +436,7 @@ def get_cpr_scanner():
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
         confluence    = row["width_priority"] <= 2 and has_oi_signal
-        best_signal   = max(sym_signals, key=lambda s: s["score"]) if sym_signals else None
+        best_signal   = _get_nearest_signal(sym_signals, cmp)
 
         trend_labels = {
             "ASCENDING":  {"label": "↑ Ascending", "color": "EMERALD"},
@@ -551,7 +578,7 @@ def _get_cpr_live():
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
         confluence    = label["priority"] <= 2 and has_oi_signal
-        best_signal   = max(sym_signals, key=lambda s: s["score"]) if sym_signals else None
+        best_signal   = _get_nearest_signal(sym_signals, cmp)
         results.append({
             "symbol":         sym,
             "is_index":       sym in INDICES,
