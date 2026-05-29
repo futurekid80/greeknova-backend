@@ -9,25 +9,29 @@ IST = pytz.timezone("Asia/Kolkata")
 MCX_COMMODITIES = {
     "CRUDEOIL": {
         "strike_step": 100,
-        "atm_range": 10,
+        "atm_range": 10,    # ±1000 pts — covers full intraday range
+        "oi_range": 5,      # ±500 pts — for OI pillar / cumulative tracking
         "lot_size": 1,
         "tick_size": 1.0,
     },
     "GOLD": {
         "strike_step": 500,
-        "atm_range": 10,
+        "atm_range": 5,     # ±2500 pts — covers intraday range
+        "oi_range": 5,      # same as atm_range for Gold
         "lot_size": 1,
         "tick_size": 1.0,
     },
     "SILVER": {
         "strike_step": 1000,
-        "atm_range": 10,
+        "atm_range": 5,     # ±5000 pts — covers intraday range
+        "oi_range": 5,      # same as atm_range for Silver
         "lot_size": 1,
         "tick_size": 1.0,
     },
     "NATURALGAS": {
         "strike_step": 10,
-        "atm_range": 10,
+        "atm_range": 10,    # ±100 pts — covers intraday range
+        "oi_range": 5,      # ±50 pts — for OI pillar / cumulative tracking
         "lot_size": 1,
         "tick_size": 0.1,
     },
@@ -189,6 +193,7 @@ def seed_mcx_instruments(kite: KiteConnect, supabase) -> bool:
                 "option_tokens":  option_tokens,
                 "lot_size":       config["lot_size"],
                 "tick_size":      config["tick_size"],
+                "oi_range":       config["oi_range"],
                 "updated_at":     datetime.now(IST).isoformat(),
             }
 
