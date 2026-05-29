@@ -119,14 +119,25 @@ def check_oi_pillar(
         # 5-min delta
         prev = prev_oi.get(commodity, 0)
         prev_oi_change_pct = prev_oi.get(f"{commodity}_prev_change", 0.0)
+        prev_ce_oi = prev_oi.get(f"{commodity}_ce", 0)
+        prev_pe_oi = prev_oi.get(f"{commodity}_pe", 0)
+
         if prev == 0:
-            prev_oi[commodity] = current_oi
+            prev_oi[commodity]          = current_oi
+            prev_oi[f"{commodity}_ce"]  = ce_oi
+            prev_oi[f"{commodity}_pe"]  = pe_oi
             oi_change_pct = 0.0
             passed = False
+            ce_oi_delta = 0
+            pe_oi_delta = 0
         else:
             oi_change_pct = ((current_oi - prev) / prev) * 100 if prev else 0
             prev_oi[f"{commodity}_prev_change"] = oi_change_pct
-            prev_oi[commodity] = current_oi
+            prev_oi[commodity]          = current_oi
+            ce_oi_delta = ce_oi - prev_ce_oi
+            pe_oi_delta = pe_oi - prev_pe_oi
+            prev_oi[f"{commodity}_ce"]  = ce_oi
+            prev_oi[f"{commodity}_pe"]  = pe_oi
             passed = abs(oi_change_pct) >= threshold
 
         # Cumulative since open
@@ -196,6 +207,8 @@ def check_oi_pillar(
             "support_oi":           support_oi,
             "resistance_strike":    resistance_strike,
             "resistance_oi":        resistance_oi,
+            "ce_oi_delta":          ce_oi_delta,
+            "pe_oi_delta":          pe_oi_delta,
         }
 
     except Exception as e:
@@ -207,6 +220,7 @@ def check_oi_pillar(
             "session_peak_oi_pct": 0.0, "oi_unwind_status": "building",
             "support_strike": 0, "support_oi": 0,
             "resistance_strike": 0, "resistance_oi": 0,
+            "ce_oi_delta": 0, "pe_oi_delta": 0,
         }
 
 
@@ -468,6 +482,8 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 "support_oi":           oi_result["support_oi"],
                 "resistance_strike":    oi_result["resistance_strike"],
                 "resistance_oi":        oi_result["resistance_oi"],
+                "ce_oi_delta":          oi_result["ce_oi_delta"],
+                "pe_oi_delta":          oi_result["pe_oi_delta"],
                 "session_date":         today_str,
                 "scanned_at":           now_ist.isoformat(),
                 "updated_at":           now_ist.isoformat(),
