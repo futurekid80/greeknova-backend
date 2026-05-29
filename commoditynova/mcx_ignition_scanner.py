@@ -296,9 +296,11 @@ def check_volume_pillar(commodity, candles):
 
 
 
-def compute_divergence(price_chg_pct, oi_change_pct, prev_oi_change_pct, oi_unwind_status):
+def compute_divergence(price_chg_pct, oi_change_pct, prev_oi_change_pct, oi_unwind_status, breakout_direction=None):
     """Price vs OI divergence — continuation / exhaustion / coiling / trap / neutral."""
-    price_direction = "moving" if price_chg_pct >= 0.15 else "flat"
+    # Use breakout_direction to determine if price is actually moving meaningfully
+    # breakout_direction is None when price is inside range (flat)
+    price_direction = "moving" if (price_chg_pct >= 0.15 and breakout_direction is not None) else "flat"
 
     if oi_unwind_status in ("unwinding", "rolling_over"):
         oi_momentum = "unwinding"
@@ -440,6 +442,7 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 oi_result["oi_change_pct"],
                 oi_result["prev_oi_change_pct"],
                 oi_result["oi_unwind_status"],
+                price_result["breakout_direction"],
             )
             note   = build_scan_note(commodity, signal, price_result, oi_result)
 
