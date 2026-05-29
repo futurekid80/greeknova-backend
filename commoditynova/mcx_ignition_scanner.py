@@ -137,6 +137,42 @@ def check_oi_pillar(
         peak_pct       = get_or_set_session_peak(commodity, cumulative_oi_pct, supabase, session_peak_oi)
         unwind_status  = compute_unwind_status(cumulative_oi_pct, peak_pct)
 
+        # Support/resistance from strike-level OI
+        # PE wall = strike with highest PE OI = support
+        # CE wall = strike with highest CE OI = resistance
+        support_strike    = 0
+        support_oi        = 0
+        resistance_strike = 0
+        resistance_oi     = 0
+
+        for sym, q in quotes.items():
+            oi_val = q.get("oi", 0)
+            if oi_val == 0:
+                continue
+            # Extract strike from symbol e.g. MCX:CRUDEOIL26JUN8300PE
+            try:
+                ts = sym.split(":")[1]  # CRUDEOIL26JUN8300PE
+                opt_type = ts[-2:]      # PE or CE
+                # Strike is between last alpha chars and option type
+                strike_str = ""
+                for ch in reversed(ts[:-2]):
+                    if ch.isdigit():
+                        strike_str = ch + strike_str
+                    else:
+                        break
+                if not strike_str:
+                    continue
+                strike_val = float(strike_str)
+            except Exception:
+                continue
+
+            if opt_type == "PE" and oi_val > support_oi:
+                support_oi     = oi_val
+                support_strike = strike_val
+            elif opt_type == "CE" and oi_val > resistance_oi:
+                resistance_oi     = oi_val
+                resistance_strike = strike_val
+
         return {
             "passed":               passed,
             "oi_change_pct":        round(oi_change_pct, 2),
@@ -148,6 +184,10 @@ def check_oi_pillar(
             "session_open_oi":      open_oi,
             "session_peak_oi_pct":  round(peak_pct, 2),
             "oi_unwind_status":     unwind_status,
+            "support_strike":       support_strike,
+            "support_oi":           support_oi,
+            "resistance_strike":    resistance_strike,
+            "resistance_oi":        resistance_oi,
         }
 
     except Exception as e:
@@ -157,6 +197,8 @@ def check_oi_pillar(
             "threshold": threshold, "current_oi": 0, "cumulative_oi_pct": 0.0,
             "cumulative_direction": "neutral", "session_open_oi": 0,
             "session_peak_oi_pct": 0.0, "oi_unwind_status": "building",
+            "support_strike": 0, "support_oi": 0,
+            "resistance_strike": 0, "resistance_oi": 0,
         }
 
 
@@ -382,6 +424,10 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 "prev_oi_change_pct":   oi_result["prev_oi_change_pct"],
                 "divergence_label":     divergence["divergence_label"],
                 "divergence_note":      divergence["divergence_note"],
+                "support_strike":       oi_result["support_strike"],
+                "support_oi":           oi_result["support_oi"],
+                "resistance_strike":    oi_result["resistance_strike"],
+                "resistance_oi":        oi_result["resistance_oi"],
                 "session_date":         today_str,
                 "scanned_at":           now_ist.isoformat(),
                 "updated_at":           now_ist.isoformat(),
