@@ -79,11 +79,13 @@ def compute_unwind_status(current_pct: float, peak_pct: float) -> str:
     """
     Compare current cumulative OI vs session peak.
     Returns: 'building' | 'rolling_over' | 'unwinding'
+    Drop is calculated as peak - current (not abs) to handle
+    cases where OI goes from positive to negative.
     """
     if abs(peak_pct) < 1.0:
         return "building"  # peak too small to matter yet
 
-    drop_from_peak = abs(peak_pct) - abs(current_pct)
+    drop_from_peak = abs(peak_pct) - current_pct  # no abs() on current
 
     if drop_from_peak >= UNWIND_CONFIRM_PCT:
         return "unwinding"
