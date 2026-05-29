@@ -480,7 +480,18 @@ def get_cpr_scanner():
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
         confluence    = row["width_priority"] <= 2 and has_oi_signal
-        best_signal   = _get_nearest_signal(sym_signals, cmp)
+        best_signal = _get_nearest_signal(sym_signals, cmp)
+        if best_signal:
+            pos = position["position"]
+            sig_type = best_signal.get("signal_type", "")
+            if (pos == "BELOW_CPR" and sig_type == "PUT_WRITING") or \
+               (pos == "ABOVE_CPR" and sig_type == "CALL_WRITING"):
+                best_signal["alignment"] = "⚠️ Contradicts"
+                best_signal["alignment_color"] = "AMBER"
+            elif (pos == "BELOW_CPR" and sig_type == "CALL_WRITING") or \
+                 (pos == "ABOVE_CPR" and sig_type == "PUT_WRITING"):
+                best_signal["alignment"] = "✅ Confirms"
+                best_signal["alignment_color"] = "EMERALD"
 
         trend_labels = {
             "ASCENDING":  {"label": "↑ Ascending", "color": "EMERALD"},
@@ -623,6 +634,18 @@ def _get_cpr_live():
         has_oi_signal = len(sym_signals) > 0
         confluence    = label["priority"] <= 2 and has_oi_signal
         best_signal   = _get_nearest_signal(sym_signals, cmp)
+        best_signal = _get_nearest_signal(sym_signals, cmp)
+        if best_signal:
+            pos = position["position"]
+            sig_type = best_signal.get("signal_type", "")
+            if (pos == "BELOW_CPR" and sig_type == "PUT_WRITING") or \
+               (pos == "ABOVE_CPR" and sig_type == "CALL_WRITING"):
+                best_signal["alignment"] = "⚠️ Contradicts"
+                best_signal["alignment_color"] = "AMBER"
+            elif (pos == "BELOW_CPR" and sig_type == "CALL_WRITING") or \
+                 (pos == "ABOVE_CPR" and sig_type == "PUT_WRITING"):
+                best_signal["alignment"] = "✅ Confirms"
+                best_signal["alignment_color"] = "EMERALD"
         results.append({
             "symbol":         sym,
             "is_index":       sym in INDICES,
