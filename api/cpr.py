@@ -492,6 +492,15 @@ def get_cpr_scanner():
                  (pos == "ABOVE_CPR" and sig_type == "PUT_WRITING"):
                 best_signal["alignment"] = "✅ Confirms"
                 best_signal["alignment_color"] = "EMERALD"
+        alignment = (best_signal or {}).get("alignment", "")
+        if confluence and "Confirms" in alignment:
+            confluence_type = "CONFIRMS"
+        elif confluence and "Contradicts" in alignment:
+            confluence_type = "CONTRADICTS"
+        elif confluence:
+            confluence_type = "NEUTRAL"
+        else:
+            confluence_type = None
 
         trend_labels = {
             "ASCENDING":  {"label": "↑ Ascending", "color": "EMERALD"},
@@ -541,6 +550,7 @@ def get_cpr_scanner():
             "confluence":     confluence,
             "oi_signals":     sym_signals[:3],
             "best_signal":    best_signal,
+            "confluence_type": confluence_type,
         })
 
     results.sort(key=lambda x: (not x["confluence"], x["width_priority"], x["width_pct"]))
@@ -634,7 +644,6 @@ def _get_cpr_live():
         has_oi_signal = len(sym_signals) > 0
         confluence    = label["priority"] <= 2 and has_oi_signal
         best_signal   = _get_nearest_signal(sym_signals, cmp)
-        best_signal = _get_nearest_signal(sym_signals, cmp)
         if best_signal:
             pos = position["position"]
             sig_type = best_signal.get("signal_type", "")
@@ -646,6 +655,15 @@ def _get_cpr_live():
                  (pos == "ABOVE_CPR" and sig_type == "PUT_WRITING"):
                 best_signal["alignment"] = "✅ Confirms"
                 best_signal["alignment_color"] = "EMERALD"
+        alignment = (best_signal or {}).get("alignment", "")
+        if confluence and "Confirms" in alignment:
+            confluence_type = "CONFIRMS"
+        elif confluence and "Contradicts" in alignment:
+            confluence_type = "CONTRADICTS"
+        elif confluence:
+            confluence_type = "NEUTRAL"
+        else:
+            confluence_type = None
         results.append({
             "symbol":         sym,
             "is_index":       sym in INDICES,
