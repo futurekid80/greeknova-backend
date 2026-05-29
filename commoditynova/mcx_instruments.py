@@ -9,25 +9,25 @@ IST = pytz.timezone("Asia/Kolkata")
 MCX_COMMODITIES = {
     "CRUDEOIL": {
         "strike_step": 100,
-        "atm_range": 5,
+        "atm_range": 10,
         "lot_size": 1,
         "tick_size": 1.0,
     },
     "GOLD": {
         "strike_step": 500,
-        "atm_range": 5,
+        "atm_range": 10,
         "lot_size": 1,
         "tick_size": 1.0,
     },
     "SILVER": {
         "strike_step": 1000,
-        "atm_range": 5,
+        "atm_range": 10,
         "lot_size": 1,
         "tick_size": 1.0,
     },
     "NATURALGAS": {
         "strike_step": 10,
-        "atm_range": 5,
+        "atm_range": 10,
         "lot_size": 1,
         "tick_size": 0.1,
     },
