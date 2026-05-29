@@ -110,12 +110,14 @@ def check_oi_pillar(
 
         # 5-min delta
         prev = prev_oi.get(commodity, 0)
+        prev_oi_change_pct = prev_oi.get(f"{commodity}_prev_change", 0.0)
         if prev == 0:
             prev_oi[commodity] = current_oi
             oi_change_pct = 0.0
             passed = False
         else:
             oi_change_pct = ((current_oi - prev) / prev) * 100 if prev else 0
+            prev_oi[f"{commodity}_prev_change"] = oi_change_pct
             prev_oi[commodity] = current_oi
             passed = abs(oi_change_pct) >= threshold
 
@@ -138,6 +140,7 @@ def check_oi_pillar(
         return {
             "passed":               passed,
             "oi_change_pct":        round(oi_change_pct, 2),
+            "prev_oi_change_pct":   round(prev_oi_change_pct, 2),
             "threshold":            threshold,
             "current_oi":           current_oi,
             "cumulative_oi_pct":    round(cumulative_oi_pct, 2),
@@ -150,8 +153,8 @@ def check_oi_pillar(
     except Exception as e:
         logger.error(f"{commodity} OI pillar error: {e}")
         return {
-            "passed": False, "oi_change_pct": 0.0, "threshold": threshold,
-            "current_oi": 0, "cumulative_oi_pct": 0.0,
+            "passed": False, "oi_change_pct": 0.0, "prev_oi_change_pct": 0.0,
+            "threshold": threshold, "current_oi": 0, "cumulative_oi_pct": 0.0,
             "cumulative_direction": "neutral", "session_open_oi": 0,
             "session_peak_oi_pct": 0.0, "oi_unwind_status": "building",
         }
@@ -226,6 +229,34 @@ def check_volume_pillar(commodity, candles):
         logger.error(f"{commodity} volume pillar error: {e}")
         return {"passed": False, "volume_ratio": 0.0,
                 "current_volume": 0, "avg_volume": 0, "threshold": threshold}
+
+
+
+def compute_divergence(price_chg_pct, oi_change_pct, prev_oi_change_pct, oi_unwind_status):
+    """Price vs OI divergence — continuation / exhaustion / coiling / trap / neutral."""
+    price_direction = "moving" if price_chg_pct >= 0.15 else "flat"
+
+    if oi_unwind_status in ("unwinding", "rolling_over"):
+        oi_momentum = "unwinding"
+    elif abs(oi_change_pct) >= 0.5:
+        oi_decel = abs(prev_oi_change_pct) - abs(oi_change_pct)
+        oi_momentum = "slowing" if oi_decel >= 1.0 else "building"
+    else:
+        oi_momentum = "quiet"
+
+    if oi_momentum == "unwinding" and price_direction == "moving":
+        return {"divergence_label": "trap",
+                "divergence_note": "Price moving but OI unwinding — possible fake move"}
+    elif price_direction == "moving" and oi_momentum == "building":
+        return {"divergence_label": "continuation",
+                "divergence_note": "OI confirming price move — trend intact"}
+    elif price_direction == "moving" and oi_momentum == "slowing":
+        return {"divergence_label": "exhaustion",
+                "divergence_note": "Price moving but OI momentum slowing — possible exhaustion"}
+    elif price_direction == "flat" and oi_momentum == "building":
+        return {"divergence_label": "coiling",
+                "divergence_note": "OI building with price flat — breakout likely coming"}
+    return {"divergence_label": "neutral", "divergence_note": ""}
 
 
 # ─────────────────────────────────────────────
@@ -307,7 +338,13 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             price_result  = check_price_pillar(commodity, futures_symbol, candles, kite)
             volume_result = check_volume_pillar(commodity, candles)
 
-            signal = compute_signal(oi_result, price_result, volume_result)
+            signal    = compute_signal(oi_result, price_result, volume_result)
+            divergence = compute_divergence(
+                price_result["price_chg_pct"],
+                oi_result["oi_change_pct"],
+                oi_result["prev_oi_change_pct"],
+                oi_result["oi_unwind_status"],
+            )
             note   = build_scan_note(commodity, signal, price_result, oi_result)
 
             if signal["status"] == "fired":
@@ -342,6 +379,9 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 "cumulative_direction": oi_result["cumulative_direction"],
                 "session_peak_oi_pct":  oi_result["session_peak_oi_pct"],
                 "oi_unwind_status":     oi_result["oi_unwind_status"],
+                "prev_oi_change_pct":   oi_result["prev_oi_change_pct"],
+                "divergence_label":     divergence["divergence_label"],
+                "divergence_note":      divergence["divergence_note"],
                 "session_date":         today_str,
                 "scanned_at":           now_ist.isoformat(),
                 "updated_at":           now_ist.isoformat(),
