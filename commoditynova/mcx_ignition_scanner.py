@@ -97,15 +97,23 @@ def compute_unwind_status(current_pct: float, peak_pct: float) -> str:
 # PILLAR 1 — OI change
 # ─────────────────────────────────────────────
 def check_oi_pillar(
-    commodity, option_symbols, kite, prev_oi,
+    commodity, option_symbols, oi_symbols, kite, prev_oi,
     session_open_oi, session_peak_oi, supabase
 ):
+    """
+    option_symbols — full ATM±10 range, used for support/resistance
+    oi_symbols     — tight ATM±5 range, used for OI pillar + cumulative tracking
+    """
     threshold = THRESHOLDS[commodity]["oi"]
 
     try:
+        # Fetch all symbols (wide range) for SR levels
         quotes = kite.quote(option_symbols)
-        ce_oi  = sum(q.get("oi", 0) for sym, q in quotes.items() if sym.endswith("CE"))
-        pe_oi  = sum(q.get("oi", 0) for sym, q in quotes.items() if sym.endswith("PE"))
+
+        # Use only tight range symbols for OI calculation
+        oi_quotes = {k: v for k, v in quotes.items() if k in set(oi_symbols)}
+        ce_oi  = sum(q.get("oi", 0) for sym, q in oi_quotes.items() if sym.endswith("CE"))
+        pe_oi  = sum(q.get("oi", 0) for sym, q in oi_quotes.items() if sym.endswith("PE"))
         current_oi = ce_oi + pe_oi
 
         # 5-min delta
@@ -373,8 +381,40 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             atm_strike     = inst.get("atm_strike")
             expiry_date    = inst.get("expiry_date")
 
+            # Build tight OI symbols (ATM±oi_range) from cached instruments
+            atm            = inst.get("atm_strike", 0)
+            strike_step    = inst.get("tick_size", 1)  # reuse tick_size as proxy
+            oi_range       = inst.get("oi_range", 5)
+            all_syms       = inst.get("option_symbols", [])
+
+            # Filter to ATM±oi_range strikes for OI pillar calculation
+            # Extract strike from symbol and keep only those within oi_range
+            oi_symbols = []
+            from commoditynova.mcx_instruments import MCX_COMMODITIES
+            cfg = MCX_COMMODITIES.get(commodity, {})
+            s_step = cfg.get("strike_step", 100)
+            o_range = cfg.get("oi_range", 5)
+            for sym in all_syms:
+                try:
+                    ts = sym.split(":")[1]
+                    strike_str = ""
+                    for ch in reversed(ts[:-2]):
+                        if ch.isdigit():
+                            strike_str = ch + strike_str
+                        else:
+                            break
+                    if strike_str:
+                        sv = float(strike_str)
+                        if abs(sv - atm) <= o_range * s_step:
+                            oi_symbols.append(sym)
+                except Exception:
+                    continue
+
+            if not oi_symbols:
+                oi_symbols = option_symbols  # fallback to all
+
             oi_result     = check_oi_pillar(
-                commodity, option_symbols, kite,
+                commodity, option_symbols, oi_symbols, kite,
                 prev_oi, session_open_oi, session_peak_oi, supabase
             )
             price_result  = check_price_pillar(commodity, futures_symbol, candles, kite)
