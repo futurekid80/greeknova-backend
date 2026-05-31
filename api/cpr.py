@@ -672,9 +672,20 @@ def _get_cpr_live():
         cpr      = compute_cpr(high, low, close)
         label    = get_cpr_label(cpr["width_pct"])
         position = get_cpr_position(cmp, cpr["tc"], cpr["bc"])
+
+        # CPR holding strength — in live mode derive from position
+        live_status = get_cpr_status(cmp, cpr["tc"], cpr["bc"])
+        holding_score = {
+            "HOLDING_ABOVE": 3,
+            "HOLDING_BELOW": 3,
+            "BROKEN_UP":     2,
+            "BROKEN_DOWN":   2,
+            "INSIDE_CPR":    0,
+        }.get(live_status, 1)
+
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
-        confluence    = label["priority"] <= 2 and has_oi_signal
+        confluence    = label["priority"] <= 2 and has_oi_signal and holding_score >= 2
         best_signal   = _get_nearest_signal(sym_signals, cmp)
         if best_signal:
             pos = position["position"]
@@ -696,6 +707,7 @@ def _get_cpr_live():
             confluence_type = "NEUTRAL"
         else:
             confluence_type = None
+
         results.append({
             "symbol":         sym,
             "is_index":       sym in INDICES,
@@ -716,7 +728,7 @@ def _get_cpr_live():
             "trend_label":    "— Unknown",
             "trend_color":    "GRAY",
             "is_virgin":      True,
-            "cpr_status":     None,
+            "cpr_status":     live_status,
             "status_label":   None,
             "status_color":   None,
             "cpr_position":   position["position"],
@@ -725,11 +737,18 @@ def _get_cpr_live():
             "position_color": position["color"],
             "has_oi_signal":  has_oi_signal,
             "confluence":     confluence,
+            "confluence_type": confluence_type,
+            "holding_score":  holding_score,
             "oi_signals":     sym_signals[:3],
             "best_signal":    best_signal,
         })
 
-    results.sort(key=lambda x: (not x["confluence"], x["width_priority"], x["width_pct"]))
+    results.sort(key=lambda x: (
+        not x["confluence"],
+        -x.get("holding_score", 0),
+        x["width_priority"],
+        x["width_pct"]
+    ))
 
     return {
         "data":             results,
