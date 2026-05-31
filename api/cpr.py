@@ -495,7 +495,17 @@ def get_cpr_scanner():
 
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
-        confluence    = row["width_priority"] <= 2 and has_oi_signal
+        # CPR holding strength score — rewards stocks holding firmly above/below CPR
+        cpr_status = row.get("cpr_status")
+        holding_score = {
+            "HOLDING_ABOVE": 3,
+            "HOLDING_BELOW": 3,
+            "BROKEN_UP":     2,
+            "BROKEN_DOWN":   2,
+            "INSIDE_CPR":    0,
+        }.get(cpr_status, 1)
+
+        confluence = row["width_priority"] <= 2 and has_oi_signal and holding_score >= 2
         best_signal = _get_nearest_signal(sym_signals, cmp)
         if best_signal:
             pos = position["position"]
@@ -567,9 +577,15 @@ def get_cpr_scanner():
             "oi_signals":     sym_signals[:3],
             "best_signal":    best_signal,
             "confluence_type": confluence_type,
+            "holding_score":  holding_score,
         })
 
-    results.sort(key=lambda x: (not x["confluence"], x["width_priority"], x["width_pct"]))
+    results.sort(key=lambda x: (
+        not x["confluence"],
+        -x.get("holding_score", 0),
+        x["width_priority"],
+        x["width_pct"]
+    ))
 
     result = {
         "data":             results,
