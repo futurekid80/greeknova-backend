@@ -420,9 +420,9 @@ def update_cpr_status():
 
 def _get_nearest_signal(sym_signals: list, cmp: float) -> dict | None:
     """
-    Return the UOA signal with strike nearest to CMP (within 5%).
-    Falls back to highest score if nothing within 5%.
-    Also adds otm_distance_pct field to the signal.
+    Return the UOA signal with strike nearest to CMP — within 2 strikes from ATM.
+    Strike interval is auto-detected from available signals.
+    Falls back to highest score if nothing within 2 strikes.
     """
     if not sym_signals:
         return None
@@ -432,18 +432,34 @@ def _get_nearest_signal(sym_signals: list, cmp: float) -> dict | None:
     if not qualified:
         return None
 
-    # Add distance from CMP to each signal
+    # Auto-detect strike interval from available strikes
+    strikes = sorted(set(s.get("strike", 0) for s in qualified if s.get("strike", 0) > 0))
+    if len(strikes) >= 2:
+        intervals = [strikes[i+1] - strikes[i] for i in range(len(strikes)-1)]
+        strike_interval = min(intervals)  # use smallest gap as the interval
+    else:
+        # Fallback — estimate from CMP
+        if cmp > 5000:   strike_interval = 100
+        elif cmp > 1000: strike_interval = 50
+        elif cmp > 500:  strike_interval = 20
+        elif cmp > 100:  strike_interval = 5
+        else:            strike_interval = 2.5
+
+    # Add distance fields to each signal
     for s in qualified:
         strike = s.get("strike", 0)
-        s["otm_distance_pct"] = round(abs(strike - cmp) / cmp * 100, 2) if cmp > 0 else 99
+        abs_distance = abs(strike - cmp)
+        s["otm_distance_pct"]    = round(abs_distance / cmp * 100, 2) if cmp > 0 else 99
+        s["strikes_from_atm"]    = round(abs_distance / strike_interval, 1) if strike_interval > 0 else 99
 
-    # Primary: nearest to CMP within 5%
-    near_money = [s for s in qualified if s["otm_distance_pct"] <= 5.0]
+    # Primary: within 2 strikes of ATM
+    near_money = [s for s in qualified if s["strikes_from_atm"] <= 2.0]
     if near_money:
-        return min(near_money, key=lambda s: s["otm_distance_pct"])
+        return min(near_money, key=lambda s: s["strikes_from_atm"])
 
     # Fallback: highest score (far OTM)
-    return max(qualified, key=lambda s: s["score"])
+    best = max(qualified, key=lambda s: s["score"])
+    return best
 
 
 def get_cpr_scanner():
