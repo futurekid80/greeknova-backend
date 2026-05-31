@@ -286,6 +286,22 @@ def get_signal_log(date: str = None):
         uoa_signals    = uoa_map.get(sym, [])
         options_conf   = _get_uoa_confirmation(uoa_signals, signal_type)
 
+        import math
+        conviction_score = round(
+            (persistence / total_snaps) * 100 *  # persistence %
+            math.log1p(abs(oi_chg_pct)) *         # magnitude of OI move
+            math.log1p(vol_chg_pct / 100 + 1),    # volume confirmation
+            2
+        )
+
+        import math
+        conviction_score = round(
+            (persistence / total_snaps) * 100 *
+            math.log1p(abs(oi_chg_pct)) *
+            math.log1p(max(vol_chg_pct, 0) / 100 + 1),
+            2
+        )
+
         signal_log[sym] = {
             "symbol":          sym,
             "cmp":             round(cmp, 2),
@@ -302,6 +318,7 @@ def get_signal_log(date: str = None):
             "bias":            bias,
             "persistence":     persistence,
             "persistence_pct": round(persistence / total_snaps * 100),
+            "conviction_score": conviction_score,
             "first_seen":      to_ist(first_seen_ts),
             "first_seen_ts":   first_seen_ts,
             "is_active":       True,
@@ -319,7 +336,7 @@ def get_signal_log(date: str = None):
     # ── Step 8: Sort — persistence first, then OI change ─────────────────────
     signals = sorted(
         signal_log.values(),
-        key=lambda x: (x["persistence"], abs(x["oi_chg_pct"])),
+        key=lambda x: x["conviction_score"],
         reverse=True
     )
 
