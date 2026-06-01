@@ -24,7 +24,7 @@ def is_mcx_market_open():
     return open_minutes <= now_minutes <= close_minutes
 
 
-def run_seed_job(supabase, session_open_oi, session_peak_oi):
+def run_seed_job(supabase, session_open_oi, session_peak_oi, session_open_price_dict=None):
     from services.kite_auth import get_kite_client
     from commoditynova.mcx_instruments import seed_mcx_instruments
     try:
@@ -33,6 +33,7 @@ def run_seed_job(supabase, session_open_oi, session_peak_oi):
         seed_mcx_instruments(kite, supabase)
         session_open_oi.clear()
         session_peak_oi.clear()
+        session_open_price_dict.clear()
         logger.info("MCX session state reset for new trading day")
     except Exception as e:
         logger.error(f"MCX seed job failed: {e}")
@@ -62,11 +63,12 @@ def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak
 
 
 def start_mcx_scheduler(kite, supabase):
-    candles_cache:   dict = {}
-    prev_oi:         dict = {}
-    session_open_oi: dict = {}
-    session_peak_oi: dict = {}   # tracks session OI peak per commodity
-    prev_strike_oi:  dict = {}   # tracks per-strike OI for writing vs buying detection
+    candles_cache:          dict = {}
+    prev_oi:                dict = {}
+    session_open_oi:        dict = {}
+    session_peak_oi:        dict = {}
+    prev_strike_oi:         dict = {}
+    session_open_price_dict: dict = {}  # persisted session open price per commodity
 
     scheduler = BackgroundScheduler(timezone=IST)
 
@@ -77,7 +79,8 @@ def start_mcx_scheduler(kite, supabase):
             day_of_week="mon-fri", timezone=IST,
         ),
         kwargs={"supabase": supabase, "session_open_oi": session_open_oi,
-                "session_peak_oi": session_peak_oi},
+                "session_peak_oi": session_peak_oi,
+                "session_open_price_dict": session_open_price_dict},
         id="mcx_morning_seed", name="MCX morning instrument seed",
         replace_existing=True, misfire_grace_time=120,
     )
@@ -88,7 +91,8 @@ def start_mcx_scheduler(kite, supabase):
         kwargs={"supabase": supabase, "candles_cache": candles_cache,
                 "prev_oi": prev_oi, "session_open_oi": session_open_oi,
                 "session_peak_oi": session_peak_oi,
-                "prev_strike_oi": prev_strike_oi},
+                "prev_strike_oi": prev_strike_oi,
+                "session_open_price_dict": session_open_price_dict},
         id="mcx_ignition_scan", name="MCX trend ignition 5-min scan",
         replace_existing=True, misfire_grace_time=60,
     )
