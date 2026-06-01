@@ -302,6 +302,10 @@ def get_signal_log(date: str = None):
             2
         )
 
+        # OI Walls
+        from utils.oi_walls import get_oi_walls
+        walls = get_oi_walls(sym, supabase, cmp)
+
         signal_log[sym] = {
             "symbol":          sym,
             "cmp":             round(cmp, 2),
@@ -331,6 +335,14 @@ def get_signal_log(date: str = None):
             "options_alignment":    options_conf.get("alignment"),
             "options_alignment_color": options_conf.get("alignment_color"),
             "options_signal":       options_conf.get("best_signal"),
+            # OI Walls
+            "ce_wall":              walls.get("ce_wall"),
+            "pe_wall":              walls.get("pe_wall"),
+            "ce_wall_oi_L":         walls.get("ce_wall_oi_L"),
+            "pe_wall_oi_L":         walls.get("pe_wall_oi_L"),
+            "trade_range":          walls.get("trade_range"),
+            "trade_range_pct":      walls.get("trade_range_pct"),
+            "range_label":          walls.get("range_label"),
         }
 
     # ── Step 8: Sort — persistence first, then OI change ─────────────────────
