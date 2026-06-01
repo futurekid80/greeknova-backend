@@ -100,11 +100,12 @@ def compute_unwind_status(current_pct: float, peak_pct: float) -> str:
 # ─────────────────────────────────────────────
 def check_oi_pillar(
     commodity, option_symbols, oi_symbols, kite, prev_oi,
-    session_open_oi, session_peak_oi, supabase
+    session_open_oi, session_peak_oi, supabase, candles=None
 ):
     """
     option_symbols — full ATM±10 range, used for support/resistance
     oi_symbols     — tight ATM±5 range, used for OI pillar + cumulative tracking
+    candles        — futures candles with OI, used for direction detection
     """
     threshold = THRESHOLDS[commodity]["oi"]
 
@@ -146,7 +147,33 @@ def check_oi_pillar(
         open_oi = get_or_set_session_open_oi(commodity, current_oi, supabase, session_open_oi)
         cumulative_oi_pct = ((current_oi - open_oi) / open_oi) * 100 if open_oi else 0
 
-        # CE/PE direction
+        # Futures OI direction — Layer 1 (primary directional signal)
+        # FUT OI + price tells us: long buildup / short buildup / short covering / long unwinding
+        futures_oi_direction = "neutral"
+        if candles and len(candles) >= 2:
+            fut_oi_now  = candles[-1].get("oi", 0)
+            fut_oi_prev = candles[-2].get("oi", 0)
+            fut_oi_delta = fut_oi_now - fut_oi_prev
+
+            # Get session open futures OI from first candle
+            fut_oi_open = candles[0].get("oi", 0) if candles else 0
+            fut_oi_session_delta = fut_oi_now - fut_oi_open
+
+            # Price direction from prev_oi stored price
+            price_now  = prev_oi.get(f"{commodity}_price_now", 0)
+            price_prev = prev_oi.get(f"{commodity}_price_prev", price_now)
+            price_up   = price_now > price_prev
+
+            if fut_oi_delta > 0 and price_up:
+                futures_oi_direction = "long buildup"
+            elif fut_oi_delta > 0 and not price_up:
+                futures_oi_direction = "short buildup"
+            elif fut_oi_delta < 0 and price_up:
+                futures_oi_direction = "short covering"
+            elif fut_oi_delta < 0 and not price_up:
+                futures_oi_direction = "long unwinding"
+
+        # CE/PE ratio for cumulative_direction (kept for compatibility)
         if ce_oi > pe_oi * 1.1:
             cumulative_direction = "bearish"
         elif pe_oi > ce_oi * 1.1:
@@ -195,22 +222,23 @@ def check_oi_pillar(
                 resistance_strike = strike_val
 
         return {
-            "passed":               passed,
-            "oi_change_pct":        round(oi_change_pct, 2),
-            "prev_oi_change_pct":   round(prev_oi_change_pct, 2),
-            "threshold":            threshold,
-            "current_oi":           current_oi,
-            "cumulative_oi_pct":    round(cumulative_oi_pct, 2),
-            "cumulative_direction": cumulative_direction,
-            "session_open_oi":      open_oi,
-            "session_peak_oi_pct":  round(peak_pct, 2),
-            "oi_unwind_status":     unwind_status,
-            "support_strike":       support_strike,
-            "support_oi":           support_oi,
-            "resistance_strike":    resistance_strike,
-            "resistance_oi":        resistance_oi,
-            "ce_oi_delta":          ce_oi_delta,
-            "pe_oi_delta":          pe_oi_delta,
+            "passed":                passed,
+            "oi_change_pct":         round(oi_change_pct, 2),
+            "prev_oi_change_pct":    round(prev_oi_change_pct, 2),
+            "threshold":             threshold,
+            "current_oi":            current_oi,
+            "cumulative_oi_pct":     round(cumulative_oi_pct, 2),
+            "cumulative_direction":  cumulative_direction,
+            "futures_oi_direction":  futures_oi_direction,
+            "session_open_oi":       open_oi,
+            "session_peak_oi_pct":   round(peak_pct, 2),
+            "oi_unwind_status":      unwind_status,
+            "support_strike":        support_strike,
+            "support_oi":            support_oi,
+            "resistance_strike":     resistance_strike,
+            "resistance_oi":         resistance_oi,
+            "ce_oi_delta":           ce_oi_delta,
+            "pe_oi_delta":           pe_oi_delta,
         }
 
     except Exception as e:
@@ -218,9 +246,9 @@ def check_oi_pillar(
         return {
             "passed": False, "oi_change_pct": 0.0, "prev_oi_change_pct": 0.0,
             "threshold": threshold, "current_oi": 0, "cumulative_oi_pct": 0.0,
-            "cumulative_direction": "neutral", "session_open_oi": 0,
-            "session_peak_oi_pct": 0.0, "oi_unwind_status": "building",
-            "support_strike": 0, "support_oi": 0,
+            "cumulative_direction": "neutral", "futures_oi_direction": "neutral",
+            "session_open_oi": 0, "session_peak_oi_pct": 0.0,
+            "oi_unwind_status": "building", "support_strike": 0, "support_oi": 0,
             "resistance_strike": 0, "resistance_oi": 0,
             "ce_oi_delta": 0, "pe_oi_delta": 0,
         }
@@ -436,9 +464,13 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
 
             oi_result     = check_oi_pillar(
                 commodity, option_symbols, oi_symbols, kite,
-                prev_oi, session_open_oi, session_peak_oi, supabase
+                prev_oi, session_open_oi, session_peak_oi, supabase, candles
             )
             price_result  = check_price_pillar(commodity, futures_symbol, candles, kite)
+
+            # Track price across scans for futures OI direction
+            prev_oi[f"{commodity}_price_prev"] = prev_oi.get(f"{commodity}_price_now", price_result["current_price"])
+            prev_oi[f"{commodity}_price_now"]  = price_result["current_price"]
             volume_result = check_volume_pillar(commodity, candles)
 
             signal    = compute_signal(oi_result, price_result, volume_result)
