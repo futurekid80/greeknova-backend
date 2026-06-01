@@ -113,28 +113,35 @@ def analyze_strikes(
             })
 
             # Categorise for summary
-            if activity == "writing" and opt_type == "CE" and oi_delta > 50:
+            if activity == "writing" and opt_type == "CE" and oi_delta > 5:
                 ce_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
-            elif activity == "writing" and opt_type == "PE" and oi_delta > 50:
+            elif activity == "writing" and opt_type == "PE" and oi_delta > 5:
                 pe_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
-            elif activity == "buying" and opt_type == "CE" and oi_delta > 50:
+            elif activity == "buying" and opt_type == "CE" and oi_delta > 5:
                 ce_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
-            elif activity == "buying" and opt_type == "PE" and oi_delta > 50:
+            elif activity == "buying" and opt_type == "PE" and oi_delta > 5:
                 pe_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
 
         except Exception as e:
             logger.debug(f"Strike parse error for {sym}: {e}")
             continue
 
-    # Write to Supabase (last 2 scans only — delete older)
+    # Write to Supabase — keep only last 2 scans per commodity
     try:
         if strike_rows:
             supabase.table("mcx_strike_oi").insert(strike_rows).execute()
-            # Keep only last 2 scans per commodity to avoid table bloat
-            supabase.rpc("cleanup_old_strike_oi", {
-                "p_commodity": commodity,
-                "p_keep": 2
-            }).execute()
+
+            # Delete rows older than last 2 scan timestamps for this commodity
+            old_scans = supabase.table("mcx_strike_oi")                 .select("scanned_at")                 .eq("commodity", commodity)                 .order("scanned_at", desc=True)                 .execute()
+
+            timestamps = sorted(set(
+                r["scanned_at"] for r in old_scans.data
+            ), reverse=True)
+
+            if len(timestamps) > 2:
+                cutoff = timestamps[2]
+                supabase.table("mcx_strike_oi")                     .delete()                     .eq("commodity", commodity)                     .lte("scanned_at", cutoff)                     .execute()
+
     except Exception as e:
         logger.warning(f"{commodity} strike OI write error: {e}")
 
