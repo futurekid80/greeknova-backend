@@ -199,6 +199,7 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
 
     return fut_signals
 
+from utils.oi_walls import get_oi_walls
 
 def get_positional_radar(min_consec: int = 0):
     supabase = get_supabase()
@@ -460,6 +461,8 @@ def get_positional_radar(min_consec: int = 0):
             "date_labels":         date_labels,
             "cmp":                 cmp_series[-1],
             "series_days":         len(oi_series) - 1,
+            # OI Walls
+            **get_oi_walls(sym, supabase, cmp_series[-1]),
         })
 
     results.sort(key=lambda x: (
