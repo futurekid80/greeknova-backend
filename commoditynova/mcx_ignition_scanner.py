@@ -148,30 +148,32 @@ def check_oi_pillar(
         cumulative_oi_pct = ((current_oi - open_oi) / open_oi) * 100 if open_oi else 0
 
         # Futures OI direction — Layer 1 (primary directional signal)
-        # FUT OI + price tells us: long buildup / short buildup / short covering / long unwinding
+        # Use futures OI from quotes (more reliable than candle OI for MCX intraday)
         futures_oi_direction = "neutral"
-        if candles and len(candles) >= 2:
-            fut_oi_now  = candles[-1].get("oi", 0)
-            fut_oi_prev = candles[-2].get("oi", 0)
-            fut_oi_delta = fut_oi_now - fut_oi_prev
+        try:
+            # Get futures symbol from prev_oi cache (set by run_ignition_scan)
+            futures_symbol = prev_oi.get(f"{commodity}_futures_symbol", "")
+            if futures_symbol:
+                fut_quote    = kite.quote([futures_symbol])
+                fut_oi_now   = fut_quote[futures_symbol].get("oi", 0)
+                fut_oi_prev  = prev_oi.get(f"{commodity}_fut_oi", fut_oi_now)
+                fut_oi_delta = fut_oi_now - fut_oi_prev
+                prev_oi[f"{commodity}_fut_oi"] = fut_oi_now
 
-            # Get session open futures OI from first candle
-            fut_oi_open = candles[0].get("oi", 0) if candles else 0
-            fut_oi_session_delta = fut_oi_now - fut_oi_open
+                price_now  = prev_oi.get(f"{commodity}_price_now", 0)
+                price_prev = prev_oi.get(f"{commodity}_price_prev", price_now)
+                price_up   = price_now > price_prev if price_prev else True
 
-            # Price direction from prev_oi stored price
-            price_now  = prev_oi.get(f"{commodity}_price_now", 0)
-            price_prev = prev_oi.get(f"{commodity}_price_prev", price_now)
-            price_up   = price_now > price_prev
-
-            if fut_oi_delta > 0 and price_up:
-                futures_oi_direction = "long buildup"
-            elif fut_oi_delta > 0 and not price_up:
-                futures_oi_direction = "short buildup"
-            elif fut_oi_delta < 0 and price_up:
-                futures_oi_direction = "short covering"
-            elif fut_oi_delta < 0 and not price_up:
-                futures_oi_direction = "long unwinding"
+                if fut_oi_delta > 0 and price_up:
+                    futures_oi_direction = "long buildup"
+                elif fut_oi_delta > 0 and not price_up:
+                    futures_oi_direction = "short buildup"
+                elif fut_oi_delta < 0 and price_up:
+                    futures_oi_direction = "short covering"
+                elif fut_oi_delta < 0 and not price_up:
+                    futures_oi_direction = "long unwinding"
+        except Exception as e:
+            logger.debug(f"{commodity} futures OI direction error: {e}")
 
         # CE/PE ratio for cumulative_direction (kept for compatibility)
         if ce_oi > pe_oi * 1.1:
@@ -462,15 +464,19 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             if not oi_symbols:
                 oi_symbols = option_symbols  # fallback to all
 
-            oi_result     = check_oi_pillar(
-                commodity, option_symbols, oi_symbols, kite,
-                prev_oi, session_open_oi, session_peak_oi, supabase, candles
-            )
+            # Store futures symbol so check_oi_pillar can fetch futures OI
+            prev_oi[f"{commodity}_futures_symbol"] = futures_symbol
+
             price_result  = check_price_pillar(commodity, futures_symbol, candles, kite)
 
             # Track price across scans for futures OI direction
             prev_oi[f"{commodity}_price_prev"] = prev_oi.get(f"{commodity}_price_now", price_result["current_price"])
             prev_oi[f"{commodity}_price_now"]  = price_result["current_price"]
+
+            oi_result     = check_oi_pillar(
+                commodity, option_symbols, oi_symbols, kite,
+                prev_oi, session_open_oi, session_peak_oi, supabase, candles
+            )
             volume_result = check_volume_pillar(commodity, candles)
 
             signal    = compute_signal(oi_result, price_result, volume_result)
