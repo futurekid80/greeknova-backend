@@ -184,26 +184,29 @@ def seed_mcx_instruments(kite: KiteConnect, supabase) -> bool:
             )
 
             # Compute overnight direction using today vs yesterday futures OI
-            today_futures_oi = int(kite.quote([futures_info["futures_symbol"]])                [futures_info["futures_symbol"]].get("oi", 0))
+            try:
+                fut_quote = kite.quote([futures_info["futures_symbol"]])
+                today_futures_oi = int(
+                    fut_quote[futures_info["futures_symbol"]].get("oi", 0)
+                )
+            except Exception:
+                today_futures_oi = 0
 
             # Load yesterday's futures OI from cache
             try:
-                prev_cache = supabase.table("mcx_instruments_cache")                    .select("today_futures_oi")                    .eq("commodity", commodity).execute()
+                prev_cache = supabase.table("mcx_instruments_cache")                     .select("today_futures_oi")                     .eq("commodity", commodity)                     .execute()
                 prev_day_oi = prev_cache.data[0]["today_futures_oi"] if prev_cache.data else 0
             except Exception:
                 prev_day_oi = 0
 
             # Determine overnight direction
-            oi_diff = today_futures_oi - (prev_day_oi or today_futures_oi)
-            if prev_day_oi and oi_diff != 0:
-                if oi_diff > 0 and ltp >= (prev_day_oi * 0):  # oi increased
-                    overnight_direction = "long buildup" if ltp > 0 else "short buildup"
+            overnight_direction = "neutral"
+            if prev_day_oi and today_futures_oi and prev_day_oi != today_futures_oi:
+                oi_diff = today_futures_oi - prev_day_oi
+                if oi_diff > 0:
+                    overnight_direction = "long buildup"
                 elif oi_diff < 0:
                     overnight_direction = "short covering"
-                else:
-                    overnight_direction = "neutral"
-            else:
-                overnight_direction = "neutral"
 
             row = {
                 "commodity":          commodity,
