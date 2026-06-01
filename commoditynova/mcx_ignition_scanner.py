@@ -148,32 +148,25 @@ def check_oi_pillar(
         cumulative_oi_pct = ((current_oi - open_oi) / open_oi) * 100 if open_oi else 0
 
         # Futures OI direction — Layer 1 (primary directional signal)
-        # Use futures OI from quotes (more reliable than candle OI for MCX intraday)
+        # futures_oi is passed from price_pillar quote (same API call, no extra request)
         futures_oi_direction = "neutral"
-        try:
-            # Get futures symbol from prev_oi cache (set by run_ignition_scan)
-            futures_symbol = prev_oi.get(f"{commodity}_futures_symbol", "")
-            if futures_symbol:
-                fut_quote    = kite.quote([futures_symbol])
-                fut_oi_now   = fut_quote[futures_symbol].get("oi", 0)
-                fut_oi_prev  = prev_oi.get(f"{commodity}_fut_oi", fut_oi_now)
-                fut_oi_delta = fut_oi_now - fut_oi_prev
-                prev_oi[f"{commodity}_fut_oi"] = fut_oi_now
+        fut_oi_now  = prev_oi.get(f"{commodity}_fut_oi_current", 0)
+        fut_oi_prev = prev_oi.get(f"{commodity}_fut_oi_prev", fut_oi_now)
+        fut_oi_delta = fut_oi_now - fut_oi_prev
 
-                price_now  = prev_oi.get(f"{commodity}_price_now", 0)
-                price_prev = prev_oi.get(f"{commodity}_price_prev", price_now)
-                price_up   = price_now > price_prev if price_prev else True
+        price_now  = prev_oi.get(f"{commodity}_price_now", 0)
+        price_prev = prev_oi.get(f"{commodity}_price_prev", price_now)
+        price_up   = price_now > price_prev if price_prev and price_prev != price_now else True
 
-                if fut_oi_delta > 0 and price_up:
-                    futures_oi_direction = "long buildup"
-                elif fut_oi_delta > 0 and not price_up:
-                    futures_oi_direction = "short buildup"
-                elif fut_oi_delta < 0 and price_up:
-                    futures_oi_direction = "short covering"
-                elif fut_oi_delta < 0 and not price_up:
-                    futures_oi_direction = "long unwinding"
-        except Exception as e:
-            logger.debug(f"{commodity} futures OI direction error: {e}")
+        if fut_oi_now > 0 and fut_oi_prev > 0 and fut_oi_delta != 0:
+            if fut_oi_delta > 0 and price_up:
+                futures_oi_direction = "long buildup"
+            elif fut_oi_delta > 0 and not price_up:
+                futures_oi_direction = "short buildup"
+            elif fut_oi_delta < 0 and price_up:
+                futures_oi_direction = "short covering"
+            elif fut_oi_delta < 0 and not price_up:
+                futures_oi_direction = "long unwinding"
 
         # CE/PE ratio for cumulative_direction (kept for compatibility)
         if ce_oi > pe_oi * 1.1:
@@ -263,7 +256,8 @@ def check_price_pillar(commodity, futures_symbol, candles, kite):
     threshold = THRESHOLDS[commodity]["price"]
     try:
         quote = kite.quote([futures_symbol])
-        ltp = quote[futures_symbol]["last_price"]
+        ltp        = quote[futures_symbol]["last_price"]
+        futures_oi = quote[futures_symbol].get("oi", 0)
 
         if not candles or len(candles) < 2:
             return {"passed": False, "price_chg_pct": 0.0, "range_high": 0,
@@ -289,12 +283,13 @@ def check_price_pillar(commodity, futures_symbol, candles, kite):
             "range_high": range_high, "range_low": range_low,
             "current_price": ltp, "threshold": threshold,
             "breakout_direction": breakout_direction,
+            "futures_oi": futures_oi,
         }
     except Exception as e:
         logger.error(f"{commodity} price pillar error: {e}")
         return {"passed": False, "price_chg_pct": 0.0, "range_high": 0,
                 "range_low": 0, "current_price": 0, "threshold": threshold,
-                "breakout_direction": None}
+                "breakout_direction": None, "futures_oi": 0}
 
 
 # ─────────────────────────────────────────────
@@ -464,14 +459,13 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             if not oi_symbols:
                 oi_symbols = option_symbols  # fallback to all
 
-            # Store futures symbol so check_oi_pillar can fetch futures OI
-            prev_oi[f"{commodity}_futures_symbol"] = futures_symbol
-
             price_result  = check_price_pillar(commodity, futures_symbol, candles, kite)
 
-            # Track price across scans for futures OI direction
-            prev_oi[f"{commodity}_price_prev"] = prev_oi.get(f"{commodity}_price_now", price_result["current_price"])
-            prev_oi[f"{commodity}_price_now"]  = price_result["current_price"]
+            # Store futures OI and price for direction tracking across scans
+            prev_oi[f"{commodity}_price_prev"]     = prev_oi.get(f"{commodity}_price_now", price_result["current_price"])
+            prev_oi[f"{commodity}_price_now"]      = price_result["current_price"]
+            prev_oi[f"{commodity}_fut_oi_prev"]    = prev_oi.get(f"{commodity}_fut_oi_current", price_result.get("futures_oi", 0))
+            prev_oi[f"{commodity}_fut_oi_current"] = price_result.get("futures_oi", 0)
 
             oi_result     = check_oi_pillar(
                 commodity, option_symbols, oi_symbols, kite,
