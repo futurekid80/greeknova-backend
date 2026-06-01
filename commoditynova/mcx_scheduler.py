@@ -38,7 +38,7 @@ def run_seed_job(supabase, session_open_oi, session_peak_oi):
         logger.error(f"MCX seed job failed: {e}")
 
 
-def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak_oi):
+def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak_oi, prev_strike_oi=None):
     if not is_mcx_market_open():
         return
 
@@ -56,7 +56,7 @@ def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak
         fresh_candles = fetch_all_candles(instruments, kite)
         candles_cache.update(fresh_candles)
         run_ignition_scan(kite, supabase, candles_cache, prev_oi,
-                          session_open_oi, session_peak_oi)
+                          session_open_oi, session_peak_oi, prev_strike_oi)
     except Exception as e:
         logger.error(f"MCX scan job failed: {e}")
 
@@ -65,7 +65,8 @@ def start_mcx_scheduler(kite, supabase):
     candles_cache:   dict = {}
     prev_oi:         dict = {}
     session_open_oi: dict = {}
-    session_peak_oi: dict = {}   # NEW — tracks session OI peak per commodity
+    session_peak_oi: dict = {}   # tracks session OI peak per commodity
+    prev_strike_oi:  dict = {}   # tracks per-strike OI for writing vs buying detection
 
     scheduler = BackgroundScheduler(timezone=IST)
 
@@ -86,7 +87,8 @@ def start_mcx_scheduler(kite, supabase):
         trigger=IntervalTrigger(minutes=5, timezone=IST),
         kwargs={"supabase": supabase, "candles_cache": candles_cache,
                 "prev_oi": prev_oi, "session_open_oi": session_open_oi,
-                "session_peak_oi": session_peak_oi},
+                "session_peak_oi": session_peak_oi,
+                "prev_strike_oi": prev_strike_oi},
         id="mcx_ignition_scan", name="MCX trend ignition 5-min scan",
         replace_existing=True, misfire_grace_time=60,
     )
