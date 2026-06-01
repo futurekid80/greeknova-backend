@@ -53,6 +53,35 @@ def classify_activity(oi_delta: int, moneyness: str, option_type: str) -> str:
         return "buying"    # ATM/ITM options being added = likely buying
 
 
+def load_prev_strike_oi_from_supabase(commodity: str, prev_strike_oi: dict, supabase):
+    """
+    Load previous scan's per-strike OI from Supabase into memory dict.
+    Called when prev_strike_oi is empty (after restart or first run).
+    Keyed as: commodity_TRADINGSYMBOL → previous OI value
+    """
+    try:
+        prev_rows = supabase.table("mcx_strike_oi")             .select("strike, option_type, current_oi, scanned_at")             .eq("commodity", commodity)             .order("scanned_at", desc=True)             .limit(42)             .execute()
+
+        if not prev_rows.data:
+            return
+
+        # Get latest scan timestamp
+        latest_ts = prev_rows.data[0]["scanned_at"]
+
+        # Only load rows from the most recent scan
+        for r in prev_rows.data:
+            if r["scanned_at"] != latest_ts:
+                break
+            # Reconstruct key using strike and option_type
+            key = f"{commodity}_{int(r['strike'])}_{r['option_type']}"
+            prev_strike_oi[key] = r["current_oi"]
+
+        logger.info(f"{commodity}: loaded {len(prev_strike_oi)} prev strike OI values from Supabase")
+
+    except Exception as e:
+        logger.warning(f"{commodity}: could not load prev strike OI — {e}")
+
+
 def analyze_strikes(
     commodity: str,
     quotes: dict,
@@ -64,9 +93,14 @@ def analyze_strikes(
     Analyze per-strike OI to detect writing vs buying activity.
     Returns summary for frontend display.
     """
+    # Load prev OI from Supabase if memory is empty (after restart)
+    commodity_keys = [k for k in prev_strike_oi if k.startswith(f"{commodity}_")]
+    if not commodity_keys:
+        load_prev_strike_oi_from_supabase(commodity, prev_strike_oi, supabase)
+
     now_ist = datetime.now(IST)
     strike_rows = []
-    
+
     ce_writing_strikes = []   # OTM CE being written = resistance levels
     pe_writing_strikes = []   # OTM PE being written = support levels
     ce_buying_strikes  = []   # CE being bought = bullish speculation
@@ -90,9 +124,11 @@ def analyze_strikes(
             strike = float(strike_str)
 
             current_oi = q.get("oi", 0)
-            prev_key   = f"{commodity}_{sym}"
-            prev_oi    = prev_strike_oi.get(prev_key, current_oi)
-            oi_delta   = current_oi - prev_oi
+
+            # Key: commodity_strike_opttype — matches Supabase load key format
+            prev_key = f"{commodity}_{int(strike)}_{opt_type}"
+            prev_oi  = prev_strike_oi.get(prev_key, current_oi)
+            oi_delta = current_oi - prev_oi
 
             # Update prev OI for next scan
             prev_strike_oi[prev_key] = current_oi
