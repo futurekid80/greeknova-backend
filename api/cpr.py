@@ -505,10 +505,9 @@ def get_cpr_scanner():
             "INSIDE_CPR":    0,
         }.get(cpr_status, 1)
 
-        # Only count as confluence if best signal is near-ATM (within 2 strikes)
+        best_signal = _get_nearest_signal(sym_signals, cmp)
         best_is_near_atm = best_signal is not None and (best_signal.get("strikes_from_atm", 99) <= 2.0)
         confluence = row["width_priority"] <= 2 and has_oi_signal and holding_score >= 2 and best_is_near_atm
-        best_signal = _get_nearest_signal(sym_signals, cmp)
         if best_signal:
             pos = position["position"]
             sig_type = best_signal.get("signal_type", "")
@@ -687,8 +686,9 @@ def _get_cpr_live():
 
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
-        confluence    = label["priority"] <= 2 and has_oi_signal and holding_score >= 2
         best_signal   = _get_nearest_signal(sym_signals, cmp)
+        best_is_near_atm = best_signal is not None and (best_signal.get("strikes_from_atm", 99) <= 2.0)
+        confluence    = label["priority"] <= 2 and has_oi_signal and holding_score >= 2 and best_is_near_atm
         if best_signal:
             pos = position["position"]
             sig_type = best_signal.get("signal_type", "")
