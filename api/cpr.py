@@ -518,9 +518,9 @@ def get_cpr_scanner():
                 best_signal["alignment"] = "✅ Confirms"
                 best_signal["alignment_color"] = "EMERALD"
         alignment = (best_signal or {}).get("alignment", "")
-        if confluence and "Confirms" in alignment:
+        if "Confirms" in alignment:
             confluence_type = "CONFIRMS"
-        elif confluence and "Contradicts" in alignment:
+        elif "Contradicts" in alignment:
             confluence_type = "CONTRADICTS"
         elif confluence:
             confluence_type = "NEUTRAL"
@@ -699,9 +699,9 @@ def _get_cpr_live():
                 best_signal["alignment"] = "✅ Confirms"
                 best_signal["alignment_color"] = "EMERALD"
         alignment = (best_signal or {}).get("alignment", "")
-        if confluence and "Confirms" in alignment:
+        if "Confirms" in alignment:
             confluence_type = "CONFIRMS"
-        elif confluence and "Contradicts" in alignment:
+        elif "Contradicts" in alignment:
             confluence_type = "CONTRADICTS"
         elif confluence:
             confluence_type = "NEUTRAL"
