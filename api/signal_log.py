@@ -288,14 +288,6 @@ def get_signal_log(date: str = None):
 
         import math
         conviction_score = round(
-            (persistence / total_snaps) * 100 *  # persistence %
-            math.log1p(abs(oi_chg_pct)) *         # magnitude of OI move
-            math.log1p(vol_chg_pct / 100 + 1),    # volume confirmation
-            2
-        )
-
-        import math
-        conviction_score = round(
             (persistence / total_snaps) * 100 *
             math.log1p(abs(oi_chg_pct)) *
             math.log1p(max(vol_chg_pct, 0) / 100 + 1),
