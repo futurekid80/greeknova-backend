@@ -1,0 +1,198 @@
+import logging
+from datetime import datetime
+import pytz
+
+logger = logging.getLogger(__name__)
+IST = pytz.timezone("Asia/Kolkata")
+
+# How close to ATM to be considered "ATM"
+ATM_BAND_PCT = 0.005  # 0.5% either side of current price
+
+
+def classify_moneyness(strike: float, current_price: float, option_type: str) -> str:
+    """
+    Classify strike as ITM / ATM / OTM relative to current price.
+    For CE: ITM = strike below price, OTM = strike above price
+    For PE: ITM = strike above price, OTM = strike below price
+    """
+    band = current_price * ATM_BAND_PCT
+    if abs(strike - current_price) <= band:
+        return "ATM"
+    if option_type == "CE":
+        return "ITM" if strike < current_price else "OTM"
+    else:  # PE
+        return "ITM" if strike > current_price else "OTM"
+
+
+def classify_activity(oi_delta: int, moneyness: str, option_type: str) -> str:
+    """
+    Determine if OI change represents writing, buying, or closing.
+
+    Writing (selling options):
+    - OTM CE OI increasing = call writers → bearish, defending overhead resistance
+    - OTM PE OI increasing = put writers → bullish, defending floor support
+
+    Buying (buying options):
+    - OTM CE OI increasing rapidly = call buyers → bullish speculation
+    - OTM PE OI increasing rapidly = put buyers → bearish speculation
+    - ATM/ITM OI increasing = directional conviction
+
+    We differentiate writing vs buying by:
+    - OTM + moderate OI increase = likely writing (premium collection)
+    - ATM/ITM + OI increase = likely buying (directional bet)
+    - Any OI decrease = closing positions
+    """
+    if oi_delta == 0:
+        return "unchanged"
+    if oi_delta < 0:
+        return "closing"
+    # OI increasing
+    if moneyness == "OTM":
+        return "writing"   # OTM options being added = likely writing
+    else:
+        return "buying"    # ATM/ITM options being added = likely buying
+
+
+def analyze_strikes(
+    commodity: str,
+    quotes: dict,
+    current_price: float,
+    prev_strike_oi: dict,
+    supabase,
+) -> dict:
+    """
+    Analyze per-strike OI to detect writing vs buying activity.
+    Returns summary for frontend display.
+    """
+    now_ist = datetime.now(IST)
+    strike_rows = []
+    
+    ce_writing_strikes = []   # OTM CE being written = resistance levels
+    pe_writing_strikes = []   # OTM PE being written = support levels
+    ce_buying_strikes  = []   # CE being bought = bullish speculation
+    pe_buying_strikes  = []   # PE being bought = bearish speculation
+
+    for sym, q in quotes.items():
+        try:
+            # Parse symbol — e.g. MCX:CRUDEOIL26JUN9000CE
+            ts = sym.split(":")[1]
+            opt_type = ts[-2:]  # CE or PE
+
+            # Extract strike
+            strike_str = ""
+            for ch in reversed(ts[:-2]):
+                if ch.isdigit():
+                    strike_str = ch + strike_str
+                else:
+                    break
+            if not strike_str:
+                continue
+            strike = float(strike_str)
+
+            current_oi = q.get("oi", 0)
+            prev_key   = f"{commodity}_{sym}"
+            prev_oi    = prev_strike_oi.get(prev_key, current_oi)
+            oi_delta   = current_oi - prev_oi
+
+            # Update prev OI for next scan
+            prev_strike_oi[prev_key] = current_oi
+
+            moneyness = classify_moneyness(strike, current_price, opt_type)
+            activity  = classify_activity(oi_delta, moneyness, opt_type)
+
+            strike_rows.append({
+                "commodity":     commodity,
+                "strike":        strike,
+                "option_type":   opt_type,
+                "current_oi":    current_oi,
+                "oi_delta":      oi_delta,
+                "moneyness":     moneyness,
+                "activity":      activity,
+                "price_at_scan": current_price,
+                "scanned_at":    now_ist.isoformat(),
+            })
+
+            # Categorise for summary
+            if activity == "writing" and opt_type == "CE" and oi_delta > 50:
+                ce_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
+            elif activity == "writing" and opt_type == "PE" and oi_delta > 50:
+                pe_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
+            elif activity == "buying" and opt_type == "CE" and oi_delta > 50:
+                ce_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
+            elif activity == "buying" and opt_type == "PE" and oi_delta > 50:
+                pe_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
+
+        except Exception as e:
+            logger.debug(f"Strike parse error for {sym}: {e}")
+            continue
+
+    # Write to Supabase (last 2 scans only — delete older)
+    try:
+        if strike_rows:
+            supabase.table("mcx_strike_oi").insert(strike_rows).execute()
+            # Keep only last 2 scans per commodity to avoid table bloat
+            supabase.rpc("cleanup_old_strike_oi", {
+                "p_commodity": commodity,
+                "p_keep": 2
+            }).execute()
+    except Exception as e:
+        logger.warning(f"{commodity} strike OI write error: {e}")
+
+    # Build summary for the ignition signal
+    # Sort by oi_delta descending to find most active strikes
+    ce_writing_strikes.sort(key=lambda x: x["oi_delta"], reverse=True)
+    pe_writing_strikes.sort(key=lambda x: x["oi_delta"], reverse=True)
+
+    # Key resistance = most active CE writing strike above price
+    key_resistance = None
+    for s in ce_writing_strikes:
+        if s["strike"] > current_price:
+            key_resistance = s["strike"]
+            break
+
+    # Key support = most active PE writing strike below price
+    key_support = None
+    for s in pe_writing_strikes:
+        if s["strike"] < current_price:
+            key_support = s["strike"]
+            break
+
+    # Rally sustainability check
+    # Sustainable rally: CE writing above price (bears defending) + PE buying below (bulls entering)
+    # Fake rally: CE writing near ATM (bears not scared) + no real CE buying
+    ce_writing_near_atm = any(
+        abs(s["strike"] - current_price) / current_price < 0.03
+        for s in ce_writing_strikes
+    )
+    genuine_ce_buying = len(ce_buying_strikes) > 0
+
+    if genuine_ce_buying and not ce_writing_near_atm:
+        rally_quality = "genuine"
+        rally_note    = "Call buying active — rally has conviction"
+    elif ce_writing_near_atm and not genuine_ce_buying:
+        rally_quality = "suspect"
+        rally_note    = "Call writing near ATM — bears not convinced, rally may fade"
+    elif len(pe_buying_strikes) > len(ce_buying_strikes):
+        rally_quality = "suspect"
+        rally_note    = "More put buying than call buying — bears hedging the rally"
+    else:
+        rally_quality = "neutral"
+        rally_note    = ""
+
+    logger.info(
+        f"{commodity} strike analysis: "
+        f"CE_write={len(ce_writing_strikes)} PE_write={len(pe_writing_strikes)} "
+        f"CE_buy={len(ce_buying_strikes)} PE_buy={len(pe_buying_strikes)} "
+        f"rally={rally_quality}"
+    )
+
+    return {
+        "key_resistance":     key_resistance,
+        "key_support":        key_support,
+        "rally_quality":      rally_quality,
+        "rally_note":         rally_note,
+        "ce_writing_count":   len(ce_writing_strikes),
+        "pe_writing_count":   len(pe_writing_strikes),
+        "ce_buying_count":    len(ce_buying_strikes),
+        "pe_buying_count":    len(pe_buying_strikes),
+    }
