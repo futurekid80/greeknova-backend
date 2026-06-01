@@ -516,6 +516,44 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             )
             # Get overnight direction from instruments cache
             overnight_oi_direction = inst.get("overnight_direction", "neutral") or "neutral"
+
+            # Compute intraday direction using current price vs session open
+            # Done here so we have both price_result and oi_result available
+            current_price = price_result["current_price"]
+
+            # Get or set session open price — persisted in Supabase
+            if session_open_price_dict is not None and current_price > 0:
+                open_price = get_or_set_session_open_price(
+                    commodity, current_price, supabase, session_open_price_dict
+                )
+            else:
+                open_price = current_price
+
+            futures_oi_direction = "neutral"
+            if open_price and open_price > 0 and current_price > 0:
+                price_chg_from_open = ((current_price - open_price) / open_price) * 100
+                cumulative = oi_result["cumulative_oi_pct"]
+
+                price_up   = price_chg_from_open > 0.3
+                price_down = price_chg_from_open < -0.3
+                oi_up      = cumulative > 1.0
+                oi_down    = cumulative < -1.0
+
+                if price_up and oi_up:
+                    futures_oi_direction = "long buildup"
+                elif price_down and oi_up:
+                    futures_oi_direction = "short buildup"
+                elif price_up and oi_down:
+                    futures_oi_direction = "short covering"
+                elif price_down and oi_down:
+                    futures_oi_direction = "long unwinding"
+                elif price_up:
+                    futures_oi_direction = "short covering"
+                elif price_down:
+                    futures_oi_direction = "short buildup"
+
+            # Override oi_result direction with computed value
+            oi_result["futures_oi_direction"] = futures_oi_direction
             volume_result = check_volume_pillar(commodity, candles)
 
             signal    = compute_signal(oi_result, price_result, volume_result)
