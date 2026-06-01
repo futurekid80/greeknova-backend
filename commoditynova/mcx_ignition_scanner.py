@@ -48,16 +48,21 @@ def get_or_set_session_open_price(commodity, current_price, supabase, session_op
         return session_open_price_dict[commodity]
 
     try:
-        result = supabase.table("mcx_ignition_signals")             .select("session_open_price, session_date")             .eq("commodity", commodity).execute()
+        result = supabase.table("mcx_ignition_signals") \
+            .select("session_open_price, session_date") \
+            .eq("commodity", commodity) \
+            .execute()
         if result.data:
             row = result.data[0]
-            if str(row.get("session_date", "")) == today and row.get("session_open_price", 0):
-                session_open_price_dict[commodity] = float(row["session_open_price"])
-                return session_open_price_dict[commodity]
+            stored_price = float(row.get("session_open_price") or 0)
+            if str(row.get("session_date", "")) == today and stored_price > 0:
+                session_open_price_dict[commodity] = stored_price
+                return stored_price
     except Exception as e:
         logger.warning(f"{commodity}: could not load session open price — {e}")
 
-    session_open_price_dict[commodity] = current_price
+    if current_price and current_price > 0:
+        session_open_price_dict[commodity] = current_price
     return current_price
 
 
@@ -518,16 +523,19 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             overnight_oi_direction = inst.get("overnight_direction", "neutral") or "neutral"
 
             # Compute intraday direction using current price vs session open
-            # Done here so we have both price_result and oi_result available
             current_price = price_result["current_price"]
 
             # Get or set session open price — persisted in Supabase
+            # Only store if price is valid (> 0) to avoid bad baselines
+            open_price = current_price  # default fallback
             if session_open_price_dict is not None and current_price > 0:
                 open_price = get_or_set_session_open_price(
                     commodity, current_price, supabase, session_open_price_dict
                 )
-            else:
-                open_price = current_price
+                # Safety: if Supabase returned 0, use current price
+                if not open_price or open_price <= 0:
+                    open_price = current_price
+                    session_open_price_dict[commodity] = current_price
 
             futures_oi_direction = "neutral"
             if open_price and open_price > 0 and current_price > 0:
