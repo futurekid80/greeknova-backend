@@ -39,7 +39,7 @@ def run_seed_job(supabase, session_open_oi, session_peak_oi, session_open_price_
         logger.error(f"MCX seed job failed: {e}")
 
 
-def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak_oi, prev_strike_oi=None):
+def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak_oi, prev_strike_oi=None, session_open_price_dict=None):
     if not is_mcx_market_open():
         return
 
@@ -57,7 +57,8 @@ def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak
         fresh_candles = fetch_all_candles(instruments, kite)
         candles_cache.update(fresh_candles)
         run_ignition_scan(kite, supabase, candles_cache, prev_oi,
-                          session_open_oi, session_peak_oi, prev_strike_oi)
+                          session_open_oi, session_peak_oi, prev_strike_oi,
+                          session_open_price_dict)
     except Exception as e:
         logger.error(f"MCX scan job failed: {e}")
 
