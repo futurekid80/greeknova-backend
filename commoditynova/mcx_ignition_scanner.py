@@ -147,16 +147,11 @@ def check_oi_pillar(
         open_oi = get_or_set_session_open_oi(commodity, current_oi, supabase, session_open_oi)
         cumulative_oi_pct = ((current_oi - open_oi) / open_oi) * 100 if open_oi else 0
 
-        # Intraday direction — price vs session open + cumulative OI
-        # MCX futures OI updates EOD not intraday, so we use price movement
+        # Intraday direction — price vs session open + options OI
+        # MCX futures OI is EOD only, so use price movement from session open
         futures_oi_direction = "neutral"
         price_now  = prev_oi.get(f"{commodity}_price_now", 0)
-
-        # Set session open price on first scan of day
-        if f"{commodity}_session_open_price" not in prev_oi:
-            prev_oi[f"{commodity}_session_open_price"] = price_now
-
-        price_open = prev_oi[f"{commodity}_session_open_price"]
+        price_open = prev_oi.get(f"{commodity}_session_open_price", 0)
 
         if price_open and price_open > 0:
             price_chg_from_open = ((price_now - price_open) / price_open) * 100
@@ -473,11 +468,13 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
 
             price_result  = check_price_pillar(commodity, futures_symbol, candles, kite)
 
-            # Store futures OI and price for direction tracking across scans
-            prev_oi[f"{commodity}_price_prev"]     = prev_oi.get(f"{commodity}_price_now", price_result["current_price"])
-            prev_oi[f"{commodity}_price_now"]      = price_result["current_price"]
-            prev_oi[f"{commodity}_fut_oi_prev"]    = prev_oi.get(f"{commodity}_fut_oi_current", price_result.get("futures_oi", 0))
-            prev_oi[f"{commodity}_fut_oi_current"] = price_result.get("futures_oi", 0)
+            # Store price BEFORE calling check_oi_pillar so direction logic has current price
+            prev_oi[f"{commodity}_price_prev"]  = prev_oi.get(f"{commodity}_price_now", price_result["current_price"])
+            prev_oi[f"{commodity}_price_now"]   = price_result["current_price"]
+
+            # Set session open price on first scan of day
+            if f"{commodity}_session_open_price" not in prev_oi:
+                prev_oi[f"{commodity}_session_open_price"] = price_result["current_price"]
 
             oi_result     = check_oi_pillar(
                 commodity, option_symbols, oi_symbols, kite,
