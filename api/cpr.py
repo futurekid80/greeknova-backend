@@ -452,14 +452,12 @@ def _get_nearest_signal(sym_signals: list, cmp: float) -> dict | None:
         s["otm_distance_pct"]    = round(abs_distance / cmp * 100, 2) if cmp > 0 else 99
         s["strikes_from_atm"]    = round(abs_distance / strike_interval, 1) if strike_interval > 0 else 99
 
-    # Primary: within 2 strikes of ATM
+    # Only return if within 2 strikes of ATM — no fallback to far OTM
     near_money = [s for s in qualified if s["strikes_from_atm"] <= 2.0]
     if near_money:
         return min(near_money, key=lambda s: s["strikes_from_atm"])
 
-    # Fallback: highest score (far OTM)
-    best = max(qualified, key=lambda s: s["score"])
-    return best
+    return None
 
 
 def get_cpr_scanner():
