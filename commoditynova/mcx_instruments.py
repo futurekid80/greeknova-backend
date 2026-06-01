@@ -183,18 +183,43 @@ def seed_mcx_instruments(kite: KiteConnect, supabase) -> bool:
                 kite=kite,
             )
 
+            # Compute overnight direction using today vs yesterday futures OI
+            today_futures_oi = int(kite.quote([futures_info["futures_symbol"]])                [futures_info["futures_symbol"]].get("oi", 0))
+
+            # Load yesterday's futures OI from cache
+            try:
+                prev_cache = supabase.table("mcx_instruments_cache")                    .select("today_futures_oi")                    .eq("commodity", commodity).execute()
+                prev_day_oi = prev_cache.data[0]["today_futures_oi"] if prev_cache.data else 0
+            except Exception:
+                prev_day_oi = 0
+
+            # Determine overnight direction
+            oi_diff = today_futures_oi - (prev_day_oi or today_futures_oi)
+            if prev_day_oi and oi_diff != 0:
+                if oi_diff > 0 and ltp >= (prev_day_oi * 0):  # oi increased
+                    overnight_direction = "long buildup" if ltp > 0 else "short buildup"
+                elif oi_diff < 0:
+                    overnight_direction = "short covering"
+                else:
+                    overnight_direction = "neutral"
+            else:
+                overnight_direction = "neutral"
+
             row = {
-                "commodity":      commodity,
-                "futures_symbol": futures_info["futures_symbol"],
-                "futures_token":  futures_info["futures_token"],
-                "expiry_date":    str(futures_info["expiry_date"]),
-                "atm_strike":     atm_strike,
-                "option_symbols": option_symbols,
-                "option_tokens":  option_tokens,
-                "lot_size":       config["lot_size"],
-                "tick_size":      config["tick_size"],
-                "oi_range":       config["oi_range"],
-                "updated_at":     datetime.now(IST).isoformat(),
+                "commodity":          commodity,
+                "futures_symbol":     futures_info["futures_symbol"],
+                "futures_token":      futures_info["futures_token"],
+                "expiry_date":        str(futures_info["expiry_date"]),
+                "atm_strike":         atm_strike,
+                "option_symbols":     option_symbols,
+                "option_tokens":      option_tokens,
+                "lot_size":           config["lot_size"],
+                "tick_size":          config["tick_size"],
+                "oi_range":           config["oi_range"],
+                "today_futures_oi":   today_futures_oi,
+                "prev_day_futures_oi": prev_day_oi,
+                "overnight_direction": overnight_direction,
+                "updated_at":         datetime.now(IST).isoformat(),
             }
 
             supabase.table("mcx_instruments_cache").upsert(
