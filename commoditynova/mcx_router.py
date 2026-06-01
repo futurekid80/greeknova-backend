@@ -119,9 +119,12 @@ def trigger_scan_now():
         if not instruments:
             return {"status": "error", "message": "No instruments cached — run /mcx/seed-now first"}
 
-        candles_cache = fetch_all_candles(instruments, kite)
-        prev_oi: dict = {}
-        run_ignition_scan(kite, supabase, candles_cache, prev_oi)
+        candles_cache            = fetch_all_candles(instruments, kite)
+        prev_oi:                 dict = {}
+        session_open_price_dict: dict = {}
+
+        run_ignition_scan(kite, supabase, candles_cache, prev_oi,
+                          session_open_price_dict=session_open_price_dict)
 
         return {"status": "scan completed — check /mcx/ignition for results"}
 
