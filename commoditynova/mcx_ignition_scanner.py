@@ -37,6 +37,30 @@ def get_or_set_session_open_oi(commodity, current_oi, supabase, session_open_oi)
     return current_oi
 
 
+def get_or_set_session_open_price(commodity, current_price, supabase, session_open_price_dict):
+    """
+    Returns today's session open price.
+    Persists in Supabase so Railway restarts don't wipe it.
+    """
+    today = date.today().isoformat()
+
+    if commodity in session_open_price_dict:
+        return session_open_price_dict[commodity]
+
+    try:
+        result = supabase.table("mcx_ignition_signals")             .select("session_open_price, session_date")             .eq("commodity", commodity).execute()
+        if result.data:
+            row = result.data[0]
+            if str(row.get("session_date", "")) == today and row.get("session_open_price", 0):
+                session_open_price_dict[commodity] = float(row["session_open_price"])
+                return session_open_price_dict[commodity]
+    except Exception as e:
+        logger.warning(f"{commodity}: could not load session open price — {e}")
+
+    session_open_price_dict[commodity] = current_price
+    return current_price
+
+
 def get_or_set_session_peak(commodity, current_cumulative_pct, supabase, session_peak_oi):
     """
     Returns the session peak cumulative OI %.
@@ -100,7 +124,8 @@ def compute_unwind_status(current_pct: float, peak_pct: float) -> str:
 # ─────────────────────────────────────────────
 def check_oi_pillar(
     commodity, option_symbols, oi_symbols, kite, prev_oi,
-    session_open_oi, session_peak_oi, supabase, candles=None
+    session_open_oi, session_peak_oi, supabase, candles=None,
+    session_open_price_dict=None
 ):
     """
     option_symbols — full ATM±10 range, used for support/resistance
@@ -151,7 +176,14 @@ def check_oi_pillar(
         # MCX futures OI is EOD only, so use price movement from session open
         futures_oi_direction = "neutral"
         price_now  = prev_oi.get(f"{commodity}_price_now", 0)
-        price_open = prev_oi.get(f"{commodity}_session_open_price", 0)
+
+        # Get session open price — persisted in Supabase to survive restarts
+        if session_open_price_dict is not None and price_now > 0:
+            price_open = get_or_set_session_open_price(
+                commodity, price_now, supabase, session_open_price_dict
+            )
+        else:
+            price_open = prev_oi.get(f"{commodity}_session_open_price", 0)
 
         if price_open and price_open > 0:
             price_chg_from_open = ((price_now - price_open) / price_open) * 100
@@ -409,13 +441,14 @@ def build_scan_note(commodity, signal, price, oi):
 # ─────────────────────────────────────────────
 def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                       session_open_oi=None, session_peak_oi=None,
-                      prev_strike_oi=None):
+                      prev_strike_oi=None, session_open_price_dict=None):
     from commoditynova.mcx_instruments import get_cached_instruments
     from commoditynova.mcx_strike_analyzer import analyze_strikes
 
-    if session_open_oi is None:  session_open_oi = {}
-    if session_peak_oi is None:  session_peak_oi = {}
-    if prev_strike_oi is None:   prev_strike_oi  = {}
+    if session_open_oi is None:         session_open_oi = {}
+    if session_peak_oi is None:         session_peak_oi = {}
+    if prev_strike_oi is None:          prev_strike_oi  = {}
+    if session_open_price_dict is None: session_open_price_dict = {}
 
     instruments = get_cached_instruments(supabase)
     if not instruments:
@@ -478,7 +511,8 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
 
             oi_result     = check_oi_pillar(
                 commodity, option_symbols, oi_symbols, kite,
-                prev_oi, session_open_oi, session_peak_oi, supabase, candles
+                prev_oi, session_open_oi, session_peak_oi, supabase, candles,
+                session_open_price_dict
             )
             # Get overnight direction from instruments cache
             overnight_oi_direction = inst.get("overnight_direction", "neutral") or "neutral"
