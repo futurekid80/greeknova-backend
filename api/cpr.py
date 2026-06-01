@@ -505,7 +505,9 @@ def get_cpr_scanner():
             "INSIDE_CPR":    0,
         }.get(cpr_status, 1)
 
-        confluence = row["width_priority"] <= 2 and has_oi_signal and holding_score >= 2
+        # Only count as confluence if best signal is near-ATM (within 2 strikes)
+        best_is_near_atm = best_signal is not None and (best_signal.get("strikes_from_atm", 99) <= 2.0)
+        confluence = row["width_priority"] <= 2 and has_oi_signal and holding_score >= 2 and best_is_near_atm
         best_signal = _get_nearest_signal(sym_signals, cmp)
         if best_signal:
             pos = position["position"]
