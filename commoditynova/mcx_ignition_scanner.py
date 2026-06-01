@@ -376,11 +376,14 @@ def build_scan_note(commodity, signal, price, oi):
 # MAIN SCAN FUNCTION
 # ─────────────────────────────────────────────
 def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
-                      session_open_oi=None, session_peak_oi=None):
+                      session_open_oi=None, session_peak_oi=None,
+                      prev_strike_oi=None):
     from commoditynova.mcx_instruments import get_cached_instruments
+    from commoditynova.mcx_strike_analyzer import analyze_strikes
 
-    if session_open_oi is None: session_open_oi = {}
-    if session_peak_oi is None: session_peak_oi = {}
+    if session_open_oi is None:  session_open_oi = {}
+    if session_peak_oi is None:  session_peak_oi = {}
+    if prev_strike_oi is None:   prev_strike_oi  = {}
 
     instruments = get_cached_instruments(supabase)
     if not instruments:
@@ -448,6 +451,15 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             )
             note   = build_scan_note(commodity, signal, price_result, oi_result)
 
+            # Strike-level analysis — writing vs buying
+            strike_analysis = analyze_strikes(
+                commodity=commodity,
+                quotes=kite.quote(option_symbols),
+                current_price=price_result["current_price"],
+                prev_strike_oi=prev_strike_oi,
+                supabase=supabase,
+            )
+
             if signal["status"] == "fired":
                 fired_commodities.append(commodity)
 
@@ -489,6 +501,12 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 "resistance_oi":        oi_result["resistance_oi"],
                 "ce_oi_delta":          oi_result["ce_oi_delta"],
                 "pe_oi_delta":          oi_result["pe_oi_delta"],
+                "rally_quality":        strike_analysis["rally_quality"],
+                "rally_note":           strike_analysis["rally_note"],
+                "ce_writing_count":     strike_analysis["ce_writing_count"],
+                "pe_writing_count":     strike_analysis["pe_writing_count"],
+                "ce_buying_count":      strike_analysis["ce_buying_count"],
+                "pe_buying_count":      strike_analysis["pe_buying_count"],
                 "session_date":         today_str,
                 "scanned_at":           now_ist.isoformat(),
                 "updated_at":           now_ist.isoformat(),
