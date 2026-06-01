@@ -147,26 +147,38 @@ def check_oi_pillar(
         open_oi = get_or_set_session_open_oi(commodity, current_oi, supabase, session_open_oi)
         cumulative_oi_pct = ((current_oi - open_oi) / open_oi) * 100 if open_oi else 0
 
-        # Futures OI direction — Layer 1 (primary directional signal)
-        # futures_oi is passed from price_pillar quote (same API call, no extra request)
+        # Intraday direction — price vs session open + cumulative OI
+        # MCX futures OI updates EOD not intraday, so we use price movement
         futures_oi_direction = "neutral"
-        fut_oi_now  = prev_oi.get(f"{commodity}_fut_oi_current", 0)
-        fut_oi_prev = prev_oi.get(f"{commodity}_fut_oi_prev", fut_oi_now)
-        fut_oi_delta = fut_oi_now - fut_oi_prev
-
         price_now  = prev_oi.get(f"{commodity}_price_now", 0)
-        price_prev = prev_oi.get(f"{commodity}_price_prev", price_now)
-        price_up   = price_now > price_prev if price_prev and price_prev != price_now else True
 
-        if fut_oi_now > 0 and fut_oi_prev > 0 and fut_oi_delta != 0:
-            if fut_oi_delta > 0 and price_up:
+        # Set session open price on first scan of day
+        if f"{commodity}_session_open_price" not in prev_oi:
+            prev_oi[f"{commodity}_session_open_price"] = price_now
+
+        price_open = prev_oi[f"{commodity}_session_open_price"]
+
+        if price_open and price_open > 0:
+            price_chg_from_open = ((price_now - price_open) / price_open) * 100
+
+            # Classify using price change from open + options OI direction
+            price_up   = price_chg_from_open > 0.3
+            price_down = price_chg_from_open < -0.3
+            oi_up      = cumulative_oi_pct > 1.0
+            oi_down    = cumulative_oi_pct < -1.0
+
+            if price_up and oi_up:
                 futures_oi_direction = "long buildup"
-            elif fut_oi_delta > 0 and not price_up:
+            elif price_down and oi_up:
                 futures_oi_direction = "short buildup"
-            elif fut_oi_delta < 0 and price_up:
+            elif price_up and oi_down:
                 futures_oi_direction = "short covering"
-            elif fut_oi_delta < 0 and not price_up:
+            elif price_down and oi_down:
                 futures_oi_direction = "long unwinding"
+            elif price_up:
+                futures_oi_direction = "short covering"  # price up, OI flat = covering
+            elif price_down:
+                futures_oi_direction = "short buildup"   # price down, OI flat = building shorts
 
         # CE/PE ratio for cumulative_direction (kept for compatibility)
         if ce_oi > pe_oi * 1.1:
@@ -471,6 +483,8 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 commodity, option_symbols, oi_symbols, kite,
                 prev_oi, session_open_oi, session_peak_oi, supabase, candles
             )
+            # Get overnight direction from instruments cache
+            overnight_oi_direction = inst.get("overnight_direction", "neutral") or "neutral"
             volume_result = check_volume_pillar(commodity, candles)
 
             signal    = compute_signal(oi_result, price_result, volume_result)
