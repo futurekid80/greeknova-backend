@@ -8,6 +8,15 @@ IST = pytz.timezone("Asia/Kolkata")
 # How close to ATM to be considered "ATM"
 ATM_BAND_PCT = 0.005  # 0.5% either side of current price
 
+# Max distance from current price to consider a strike "meaningful"
+# Based on typical daily range per commodity
+STRIKE_PROXIMITY = {
+    "CRUDEOIL":   500,    # ±₹500 — covers 2-3 days of moves
+    "GOLD":       2000,   # ±₹2,000
+    "SILVER":     8000,   # ±₹8,000
+    "NATURALGAS": 30,     # ±₹30 — covers 2-3 days of moves
+}
+
 
 def classify_moneyness(strike: float, current_price: float, option_type: str) -> str:
     """
@@ -148,15 +157,19 @@ def analyze_strikes(
                 "scanned_at":    now_ist.isoformat(),
             })
 
-            # Categorise for summary
-            if activity == "writing" and opt_type == "CE" and oi_delta > 5:
-                ce_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
-            elif activity == "writing" and opt_type == "PE" and oi_delta > 5:
-                pe_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
-            elif activity == "buying" and opt_type == "CE" and oi_delta > 5:
-                ce_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
-            elif activity == "buying" and opt_type == "PE" and oi_delta > 5:
-                pe_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
+            # Categorise for summary — only include strikes within meaningful range
+            max_dist = STRIKE_PROXIMITY.get(commodity, 500)
+            within_range = abs(strike - current_price) <= max_dist
+
+            if within_range and oi_delta > 5:
+                if activity == "writing" and opt_type == "CE":
+                    ce_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
+                elif activity == "writing" and opt_type == "PE":
+                    pe_writing_strikes.append({"strike": strike, "oi_delta": oi_delta})
+                elif activity == "buying" and opt_type == "CE":
+                    ce_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
+                elif activity == "buying" and opt_type == "PE":
+                    pe_buying_strikes.append({"strike": strike, "oi_delta": oi_delta})
 
         except Exception as e:
             logger.debug(f"Strike parse error for {sym}: {e}")
