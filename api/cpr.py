@@ -470,11 +470,23 @@ def get_cpr_scanner():
     supabase = get_supabase()
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
-    today = datetime.now(ist).date().isoformat()
+    now_ist = datetime.now(ist)
+    today = now_ist.date().isoformat()
+
+    # After 4:30 PM show tomorrow's pre-computed CPR
+    # Before 4:30 PM show today's CPR
+    if now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
+        from datetime import timedelta
+        next_day = now_ist.date() + timedelta(days=1)
+        while next_day.weekday() >= 5:
+            next_day += timedelta(days=1)
+        query_date = next_day.isoformat()
+    else:
+        query_date = today
 
     cpr_rows = supabase.from_("cpr_levels")\
         .select("*")\
-        .gte("trade_date", today)\
+        .eq("trade_date", query_date)\
         .limit(500)\
         .execute()
 
@@ -589,7 +601,7 @@ def get_cpr_scanner():
     result = {
         "data":             results,
         "total":            len(results),
-        "trade_date":       today,
+        "trade_date":       query_date,
         "confluence_count": sum(1 for r in results if r["confluence"]),
         "narrow_count":     sum(1 for r in results if r["width_priority"] <= 2),
         "source":           "table",
