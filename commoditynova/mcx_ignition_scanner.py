@@ -434,15 +434,17 @@ def compute_trade_signal(
 
     # 2. Coiling — OI building, price flat
     if price_direction == "flat" and cumulative_oi_pct > 2 and total_writing > 0:
-        detail = ""
+        # Build clean strike detail — one side at a time
+        parts = []
         if ce_writing_strikes_str:
-            detail += f" CE writing{strike_detail('CE', ce_writing_strikes_str)}"
+            parts.append(f"CE resistance at {ce_writing_strikes_str}")
         if pe_writing_strikes_str:
-            detail += f" PE writing{strike_detail('PE', pe_writing_strikes_str)}"
+            parts.append(f"PE support at {pe_writing_strikes_str}")
+        detail = " · ".join(parts)
         return {
             "trade_signal":      "coiling",
             "trade_signal_icon": "◎",
-            "trade_signal_note": f"OI building with price flat — breakout coming.{detail}",
+            "trade_signal_note": f"OI building, price flat — {detail}" if detail else "OI building with price flat — breakout coming",
             "trade_signal_action": "wait for breakout direction",
         }
 
