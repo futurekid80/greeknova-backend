@@ -151,7 +151,7 @@ def get_signal_log(date: str = None):
     all_fut_rows = []
     for offset in range(0, 100000, 1000):
         batch = supabase.from_("oi_snapshots")\
-            .select("timestamp, symbol, oi, volume, last_price")\
+            .select("timestamp, symbol, oi, volume, last_price, expiry")\
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
             .lt("timestamp",  f"{today}T23:59:59+00:00")\
@@ -169,10 +169,22 @@ def get_signal_log(date: str = None):
 
     # ── Step 3: Build per-symbol, per-timestamp maps ──────────────────────────
     from collections import defaultdict
+    # First find nearest expiry per symbol
+    nearest_expiry: dict = {}
+    for r in all_fut_rows:
+        sym    = r["symbol"]
+        expiry = r.get("expiry", "")
+        if sym not in nearest_expiry or expiry < nearest_expiry[sym]:
+            nearest_expiry[sym] = expiry
+
+    # Only aggregate nearest expiry FUT data
     fut_data: dict = defaultdict(dict)
     for r in all_fut_rows:
-        sym = r["symbol"]
-        ts  = r["timestamp"]
+        sym    = r["symbol"]
+        expiry = r.get("expiry", "")
+        if expiry != nearest_expiry.get(sym):
+            continue
+        ts = r["timestamp"]
         if ts not in fut_data[sym]:
             fut_data[sym][ts] = {"oi": 0, "volume": 0, "last_price": 0}
         fut_data[sym][ts]["oi"]         += int(r["oi"] or 0)
