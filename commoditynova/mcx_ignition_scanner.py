@@ -620,31 +620,15 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             # Get overnight direction from instruments cache
             overnight_oi_direction = inst.get("overnight_direction", "neutral") or "neutral"
 
-            # Compute composite trade signal
-            bd = price_result["breakout_direction"]
-            price_dir = "up" if bd == "up" else "down" if bd == "down" else "flat"
-
-            trade_signal = compute_trade_signal(
-                price_direction    = price_dir,
-                ce_writing_count   = strike_analysis["ce_writing_count"],
-                pe_writing_count   = strike_analysis["pe_writing_count"],
-                ce_buying_count    = strike_analysis["ce_buying_count"],
-                pe_buying_count    = strike_analysis["pe_buying_count"],
-                oi_unwind_status   = oi_result["oi_unwind_status"],
-                cumulative_oi_pct  = oi_result["cumulative_oi_pct"],
-            )
-
             # Compute intraday direction using current price vs session open
             current_price = price_result["current_price"]
 
             # Get or set session open price — persisted in Supabase
-            # Only store if price is valid (> 0) to avoid bad baselines
             open_price = current_price  # default fallback
             if session_open_price_dict is not None and current_price > 0:
                 open_price = get_or_set_session_open_price(
                     commodity, current_price, supabase, session_open_price_dict
                 )
-                # Safety: if Supabase returned 0, use current price
                 if not open_price or open_price <= 0:
                     open_price = current_price
                     session_open_price_dict[commodity] = current_price
@@ -653,12 +637,10 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             if open_price and open_price > 0 and current_price > 0:
                 price_chg_from_open = ((current_price - open_price) / open_price) * 100
                 cumulative = oi_result["cumulative_oi_pct"]
-
                 price_up   = price_chg_from_open > 0.3
                 price_down = price_chg_from_open < -0.3
                 oi_up      = cumulative > 1.0
                 oi_down    = cumulative < -1.0
-
                 if price_up and oi_up:
                     futures_oi_direction = "long buildup"
                 elif price_down and oi_up:
@@ -672,7 +654,6 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 elif price_down:
                     futures_oi_direction = "short buildup"
 
-            # Override oi_result direction with computed value
             oi_result["futures_oi_direction"] = futures_oi_direction
             volume_result = check_volume_pillar(commodity, candles)
 
@@ -693,6 +674,20 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 current_price=price_result["current_price"],
                 prev_strike_oi=prev_strike_oi,
                 supabase=supabase,
+            )
+
+            # Compute composite trade signal — AFTER strike_analysis is available
+            bd = price_result["breakout_direction"]
+            price_dir = "up" if bd == "up" else "down" if bd == "down" else "flat"
+
+            trade_signal = compute_trade_signal(
+                price_direction    = price_dir,
+                ce_writing_count   = strike_analysis["ce_writing_count"],
+                pe_writing_count   = strike_analysis["pe_writing_count"],
+                ce_buying_count    = strike_analysis["ce_buying_count"],
+                pe_buying_count    = strike_analysis["pe_buying_count"],
+                oi_unwind_status   = oi_result["oi_unwind_status"],
+                cumulative_oi_pct  = oi_result["cumulative_oi_pct"],
             )
 
             if signal["status"] == "fired":
