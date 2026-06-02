@@ -67,6 +67,7 @@ def run_alert_check():
     try:
         _check_high_conv_signals()
         _check_near_atm_writing()
+        _check_intraday_signals()
     except Exception as e:
         print(f"[ALERTS] Alert check error: {e}")
 
@@ -200,3 +201,100 @@ def _check_near_atm_writing():
 
     except Exception as e:
         print(f"[ALERTS] Near-ATM check error: {e}")
+
+# ── Alert 3: Intraday Signal ──────────────────────────────────────────────────
+def _check_intraday_signals():
+    """
+    Fire when a new intraday FUT signal appears with:
+    - persistence >= 10 snapshots (confirmed, not noise)
+    - vol_surge = True (volume confirmation)
+    - OI change >= 5%
+    Once per symbol per signal_type per day.
+    Separate higher-priority alert for HIGH CONV.
+    """
+    try:
+        from api.signal_log import get_signal_log
+        data    = get_signal_log()
+        signals = data.get("signals", [])
+
+        for sig in signals:
+            sym         = sig["symbol"]
+            persistence = sig.get("persistence", 0)
+            signal_type = sig.get("signal_type", "")
+            label       = sig.get("label", "")
+            oi_chg      = sig.get("oi_chg_pct", 0)
+            price_chg   = sig.get("price_chg_pct", 0)
+            vol_chg     = sig.get("vol_chg_pct", 0)
+            vol_surge   = sig.get("vol_surge", False)
+            cmp         = sig.get("cmp", 0)
+            cpr_pos     = sig.get("cpr_position", "")
+            first_seen  = sig.get("first_seen", "")
+            confirms    = sig.get("options_confirms")
+            ce_wall     = sig.get("ce_wall")
+            pe_wall     = sig.get("pe_wall")
+            trade_range_pct = sig.get("trade_range_pct")
+            range_label = sig.get("range_label", "")
+
+            # Qualification — persistence >= 10, vol surge, OI >= 5%
+            if persistence < 10:
+                continue
+            if not vol_surge:
+                continue
+            if abs(oi_chg) < 5.0:
+                continue
+
+            # Skip if already sent HIGH CONV alert for same signal
+            # (HIGH CONV is handled by _check_high_conv_signals)
+            alert_key = f"intraday_{sym}_{signal_type}"
+            if alert_key in _sent_alerts:
+                continue
+
+            # Build alert
+            bias_icon = "🟢" if sig.get("bias") == "BULLISH" else "🔴"
+
+            signal_icons = {
+                "LONG_BUILDUP":   "🐂",
+                "SHORT_BUILDUP":  "🐻",
+                "SHORT_COVERING": "🔄",
+                "LONG_UNWINDING": "⚠️",
+            }
+            sig_icon = signal_icons.get(signal_type, "📊")
+
+            # CPR context
+            cpr_line = ""
+            if cpr_pos:
+                virgin = "🔵 Virgin · " if sig.get("cpr_is_virgin") else ""
+                cpr_line = f"CPR: {virgin}{cpr_pos}\n"
+
+            # OI Walls
+            walls_line = ""
+            if ce_wall and pe_wall:
+                walls_line = f"📈 CE ₹{ce_wall:,.0f} · 📉 PE ₹{pe_wall:,.0f}"
+                if trade_range_pct:
+                    walls_line += f" · {trade_range_pct}% {range_label}"
+                walls_line += "\n"
+
+            # Options confirmation
+            conf_line = ""
+            if confirms is True:
+                conf_line = "✅ Options Confirms\n"
+            elif confirms is False:
+                conf_line = "⚠️ Options Contradicts\n"
+
+            text = (
+                f"{sig_icon} *GreekNova Intraday Signal* {bias_icon}\n"
+                f"*{sym}* · ₹{cmp:,.1f}\n"
+                f"{label} · OI {oi_chg:+.1f}% · Price {price_chg:+.2f}%\n"
+                f"Vol: {vol_chg:+.0f}% ⚡ · Since: {first_seen}\n"
+                f"{cpr_line}"
+                f"{walls_line}"
+                f"{conf_line}"
+                f"_GreekNova · Informational only · Not investment advice_"
+            )
+
+            if send_telegram(text):
+                _sent_alerts.add(alert_key)
+                print(f"[ALERTS] Intraday signal sent: {sym} {signal_type}")
+
+    except Exception as e:
+        print(f"[ALERTS] Intraday signal check error: {e}")
