@@ -507,6 +507,77 @@ def keepalive_ping():
     except Exception as e:
         print(f"⚠️ Token health check error: {e}")
 
+@app.get("/oi-walls/{symbol}")
+def oi_walls_detail(symbol: str):
+    from utils.db import get_supabase
+    from datetime import datetime, timezone
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.now(ist).date().isoformat()
+    supabase = get_supabase()
+
+    # Get latest snapshot
+    latest = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", symbol.upper())\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
+
+    if not latest.data:
+        return {"symbol": symbol, "strikes": []}
+
+    ts = latest.data[0]["timestamp"]
+
+    # Get CMP
+    cmp_row = supabase.from_("cmp_prices")\
+        .select("cmp")\
+        .eq("symbol", symbol.upper())\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
+    cmp = float(cmp_row.data[0]["cmp"]) if cmp_row.data else 0
+
+    # Get strike OI within 15% of CMP
+    rows = supabase.from_("oi_snapshots")\
+        .select("strike, option_type, oi, last_price")\
+        .eq("symbol", symbol.upper())\
+        .eq("timestamp", ts)\
+        .in_("option_type", ["CE", "PE"])\
+        .execute()
+
+    # Aggregate per strike
+    strike_map: dict = {}
+    for r in (rows.data or []):
+        s = float(r["strike"])
+        if cmp > 0 and abs(s - cmp) / cmp > 0.15:
+            continue
+        if s not in strike_map:
+            strike_map[s] = {"strike": s, "ce_oi": 0, "pe_oi": 0,
+                             "ce_ltp": 0, "pe_ltp": 0}
+        if r["option_type"] == "CE":
+            strike_map[s]["ce_oi"] += int(r["oi"] or 0)
+            strike_map[s]["ce_ltp"] = float(r["last_price"] or 0)
+        else:
+            strike_map[s]["pe_oi"] += int(r["oi"] or 0)
+            strike_map[s]["pe_ltp"] = float(r["last_price"] or 0)
+
+    strikes = sorted(strike_map.values(), key=lambda x: x["strike"], reverse=True)
+
+    # Find walls
+    ce_wall = max(strikes, key=lambda x: x["ce_oi"])["strike"] if strikes else 0
+    pe_wall = max(strikes, key=lambda x: x["pe_oi"])["strike"] if strikes else 0
+
+    return {
+        "symbol": symbol.upper(),
+        "cmp": cmp,
+        "strikes": strikes,
+        "ce_wall": ce_wall,
+        "pe_wall": pe_wall,
+        "trade_range": abs(ce_wall - pe_wall),
+        "trade_range_pct": round(abs(ce_wall - pe_wall) / cmp * 100, 1) if cmp > 0 else 0
+    }
+
 # ── CommodityNova routes ───────────────────────────────────────────────────
 app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
 # ──────────────────────────────────────────────────────────────────────────
