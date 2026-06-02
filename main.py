@@ -510,26 +510,25 @@ def keepalive_ping():
 @app.get("/oi-walls/{symbol}")
 def oi_walls_detail(symbol: str):
     from utils.db import get_supabase
-    from datetime import datetime, timezone
+    from datetime import datetime
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     today = datetime.now(ist).date().isoformat()
     supabase = get_supabase()
 
-    # Get latest snapshot
+    # Latest snapshot timestamp
     latest = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", symbol.upper())\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
         .order("timestamp", desc=True)\
         .limit(1).execute()
-
     if not latest.data:
-        return {"symbol": symbol, "strikes": []}
+        return {"symbol": symbol, "strikes": [], "cmp": 0}
 
     ts = latest.data[0]["timestamp"]
 
-    # Get CMP
+    # Latest CMP
     cmp_row = supabase.from_("cmp_prices")\
         .select("cmp")\
         .eq("symbol", symbol.upper())\
@@ -538,15 +537,14 @@ def oi_walls_detail(symbol: str):
         .limit(1).execute()
     cmp = float(cmp_row.data[0]["cmp"]) if cmp_row.data else 0
 
-    # Get strike OI within 15% of CMP
+    # Strike OI within 15% of CMP
     rows = supabase.from_("oi_snapshots")\
         .select("strike, option_type, oi, last_price")\
         .eq("symbol", symbol.upper())\
         .eq("timestamp", ts)\
         .in_("option_type", ["CE", "PE"])\
-        .execute()
+        .limit(2000).execute()
 
-    # Aggregate per strike
     strike_map: dict = {}
     for r in (rows.data or []):
         s = float(r["strike"])
@@ -563,19 +561,56 @@ def oi_walls_detail(symbol: str):
             strike_map[s]["pe_ltp"] = float(r["last_price"] or 0)
 
     strikes = sorted(strike_map.values(), key=lambda x: x["strike"], reverse=True)
+    if not strikes:
+        return {"symbol": symbol.upper(), "strikes": [], "cmp": cmp}
 
-    # Find walls
-    ce_wall = max(strikes, key=lambda x: x["ce_oi"])["strike"] if strikes else 0
-    pe_wall = max(strikes, key=lambda x: x["pe_oi"])["strike"] if strikes else 0
+    # ── Max OI walls — highest OI anywhere in range ───────────────────────
+    ce_candidates = [s for s in strikes if s["strike"] > cmp]
+    pe_candidates = [s for s in strikes if s["strike"] < cmp]
+
+    # Fallback if no strikes above/below
+    if not ce_candidates: ce_candidates = strikes
+    if not pe_candidates: pe_candidates = strikes
+
+    ce_wall = max(ce_candidates, key=lambda x: x["ce_oi"])["strike"]
+    pe_wall = max(pe_candidates, key=lambda x: x["pe_oi"])["strike"]
+    ce_wall_oi = max(ce_candidates, key=lambda x: x["ce_oi"])["ce_oi"]
+    pe_wall_oi = max(pe_candidates, key=lambda x: x["pe_oi"])["pe_oi"]
+
+    # ── Intraday walls — nearest significant strike above/below CMP ───────
+    # Significant = OI >= 10% of max OI in that direction
+    ce_threshold = ce_wall_oi * 0.10
+    pe_threshold = pe_wall_oi * 0.10
+
+    ce_significant = [s for s in ce_candidates if s["ce_oi"] >= ce_threshold]
+    pe_significant = [s for s in pe_candidates if s["pe_oi"] >= pe_threshold]
+
+    # Nearest = smallest distance from CMP
+    intraday_ce = min(ce_significant, key=lambda x: x["strike"])["strike"] if ce_significant else ce_wall
+    intraday_pe = max(pe_significant, key=lambda x: x["strike"])["strike"] if pe_significant else pe_wall
+
+    # ── Trade range ───────────────────────────────────────────────────────
+    intraday_range = round(abs(intraday_ce - intraday_pe), 1)
+    intraday_range_pct = round(intraday_range / cmp * 100, 1) if cmp > 0 else 0
+    maxoi_range = round(abs(ce_wall - pe_wall), 1)
+    maxoi_range_pct = round(maxoi_range / cmp * 100, 1) if cmp > 0 else 0
 
     return {
-        "symbol": symbol.upper(),
-        "cmp": cmp,
-        "strikes": strikes,
-        "ce_wall": ce_wall,
-        "pe_wall": pe_wall,
-        "trade_range": abs(ce_wall - pe_wall),
-        "trade_range_pct": round(abs(ce_wall - pe_wall) / cmp * 100, 1) if cmp > 0 else 0
+        "symbol":              symbol.upper(),
+        "cmp":                 cmp,
+        "strikes":             strikes,
+        # Max OI walls — highest committed OI (positional/writing context)
+        "ce_wall":             ce_wall,
+        "pe_wall":             pe_wall,
+        "ce_wall_oi_L":        round(ce_wall_oi / 100000, 2),
+        "pe_wall_oi_L":        round(pe_wall_oi / 100000, 2),
+        "trade_range":         maxoi_range,
+        "trade_range_pct":     maxoi_range_pct,
+        # Intraday walls — nearest significant strike (intraday context)
+        "intraday_ce_wall":    intraday_ce,
+        "intraday_pe_wall":    intraday_pe,
+        "intraday_range":      intraday_range,
+        "intraday_range_pct":  intraday_range_pct,
     }
 
 # ── CommodityNova routes ───────────────────────────────────────────────────
