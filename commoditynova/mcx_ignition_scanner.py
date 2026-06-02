@@ -621,7 +621,8 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             overnight_oi_direction = inst.get("overnight_direction", "neutral") or "neutral"
 
             # Compute composite trade signal
-            price_dir = "up" if price_result["breakout_direction"] == "up"                 else "down" if price_result["breakout_direction"] == "down"                 else "flat"
+            bd = price_result["breakout_direction"]
+            price_dir = "up" if bd == "up" else "down" if bd == "down" else "flat"
 
             trade_signal = compute_trade_signal(
                 price_direction    = price_dir,
