@@ -222,6 +222,29 @@ def analyze_strikes(
         rally_quality = "neutral"
         rally_note    = ""
 
+    # Top writing strikes — for display in trade signal
+    # Sort by delta descending, take top 4, format as strike labels
+    top_ce_writing = sorted(ce_writing_strikes, key=lambda x: x["oi_delta"], reverse=True)[:4]
+    top_pe_writing = sorted(pe_writing_strikes, key=lambda x: x["oi_delta"], reverse=True)[:4]
+    top_ce_buying  = sorted(ce_buying_strikes,  key=lambda x: x["oi_delta"], reverse=True)[:4]
+    top_pe_buying  = sorted(pe_buying_strikes,  key=lambda x: x["oi_delta"], reverse=True)[:4]
+
+    def fmt_strikes(strikes, commodity):
+        """Format strike list as readable string e.g. ₹300 · ₹310 · ₹320"""
+        formatted = []
+        for s in strikes:
+            strike = s["strike"]
+            if strike >= 1000:
+                formatted.append(f"₹{int(strike):,}")
+            else:
+                formatted.append(f"₹{strike:.0f}")
+        return " · ".join(formatted) if formatted else ""
+
+    ce_writing_strikes_str = fmt_strikes(top_ce_writing, commodity)
+    pe_writing_strikes_str = fmt_strikes(top_pe_writing, commodity)
+    ce_buying_strikes_str  = fmt_strikes(top_ce_buying,  commodity)
+    pe_buying_strikes_str  = fmt_strikes(top_pe_buying,  commodity)
+
     logger.info(
         f"{commodity} strike analysis: "
         f"CE_write={len(ce_writing_strikes)} PE_write={len(pe_writing_strikes)} "
@@ -230,12 +253,16 @@ def analyze_strikes(
     )
 
     return {
-        "key_resistance":     key_resistance,
-        "key_support":        key_support,
-        "rally_quality":      rally_quality,
-        "rally_note":         rally_note,
-        "ce_writing_count":   len(ce_writing_strikes),
-        "pe_writing_count":   len(pe_writing_strikes),
-        "ce_buying_count":    len(ce_buying_strikes),
-        "pe_buying_count":    len(pe_buying_strikes),
+        "key_resistance":          key_resistance,
+        "key_support":             key_support,
+        "rally_quality":           rally_quality,
+        "rally_note":              rally_note,
+        "ce_writing_count":        len(ce_writing_strikes),
+        "pe_writing_count":        len(pe_writing_strikes),
+        "ce_buying_count":         len(ce_buying_strikes),
+        "pe_buying_count":         len(pe_buying_strikes),
+        "ce_writing_strikes_str":  ce_writing_strikes_str,
+        "pe_writing_strikes_str":  pe_writing_strikes_str,
+        "ce_buying_strikes_str":   ce_buying_strikes_str,
+        "pe_buying_strikes_str":   pe_buying_strikes_str,
     }
