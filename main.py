@@ -230,6 +230,15 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=600
     )
     scheduler.add_job(keepalive_ping, "interval", minutes=10, id="keepalive")
+    scheduler.add_job(
+        archive_old_snapshots,
+        "cron",
+        day_of_week="sun", hour=20, minute=0,
+        timezone="Asia/Kolkata",
+        id="weekly_archive",
+        misfire_grace_time=3600,
+        replace_existing=True
+    )
     scheduler.start()
 
     # ── CommodityNova scheduler ────────────────────────────────────────────
@@ -334,6 +343,25 @@ def confluence():
 def max_pain():
     from api.max_pain import get_max_pain_all
     return get_max_pain_all()
+
+def archive_old_snapshots():
+    """
+    Weekly job — moves non-EOD intraday snapshots older than 7 days to archive.
+    Keeps only last snapshot of each day for older dates.
+    Nothing deleted without archiving first.
+    """
+    from utils.db import get_supabase
+    from datetime import datetime, timedelta
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    cutoff = (datetime.now(ist) - timedelta(days=7)).strftime('%Y-%m-%dT00:00:00+00:00')
+    supabase = get_supabase()
+    try:
+        print(f"[ARCHIVE] Starting weekly archive — cutoff: {cutoff}")
+        supabase.rpc('archive_old_oi_snapshots', {'cutoff_ts': cutoff}).execute()
+        print(f"[ARCHIVE] Weekly archive complete ✅")
+    except Exception as e:
+        print(f"[ARCHIVE] Error: {e}")
 
 def auto_refresh_token():
     from datetime import datetime
