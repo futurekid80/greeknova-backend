@@ -396,6 +396,104 @@ def compute_divergence(price_chg_pct, oi_change_pct, prev_oi_change_pct, oi_unwi
     return {"divergence_label": "neutral", "divergence_note": ""}
 
 
+def compute_trade_signal(
+    price_direction: str,
+    ce_writing_count: int,
+    pe_writing_count: int,
+    ce_buying_count: int,
+    pe_buying_count: int,
+    oi_unwind_status: str,
+    cumulative_oi_pct: float,
+) -> dict:
+    """
+    Single composite trade signal combining:
+    - Price direction (up/down/flat)
+    - Options writing activity (PE/CE writers = smart money)
+    - OI unwind status (exhaustion detection)
+
+    Returns one clear actionable label per commodity.
+    """
+    total_writing = ce_writing_count + pe_writing_count
+
+    # 1. Exhaustion overrides everything
+    if oi_unwind_status == "unwinding" and abs(cumulative_oi_pct) > 5:
+        return {
+            "trade_signal":      "exhaustion",
+            "trade_signal_icon": "🔴",
+            "trade_signal_note": "OI unwinding after large buildup — move likely done",
+            "trade_signal_action": "exit or avoid entry",
+        }
+
+    # 2. Coiling — OI building, price flat
+    if price_direction == "flat" and cumulative_oi_pct > 2 and total_writing > 0:
+        return {
+            "trade_signal":      "coiling",
+            "trade_signal_icon": "◎",
+            "trade_signal_note": "OI building with price flat — breakout coming",
+            "trade_signal_action": "wait for breakout direction",
+        }
+
+    pe_dominant = pe_writing_count > ce_writing_count
+    ce_dominant = ce_writing_count > pe_writing_count
+    both_equal  = ce_writing_count == pe_writing_count and total_writing >= 2
+
+    # 3. Price moving — check options writing for confirmation
+    if price_direction == "up":
+        if pe_dominant:
+            return {
+                "trade_signal":      "confirmed_move",
+                "trade_signal_icon": "✅",
+                "trade_signal_note": f"PE writers defending floor ({pe_writing_count} strikes) — bulls in control",
+                "trade_signal_action": "trade with the move",
+            }
+        elif ce_dominant:
+            return {
+                "trade_signal":      "likely_fade",
+                "trade_signal_icon": "⚠",
+                "trade_signal_note": f"CE writers capping the rally ({ce_writing_count} strikes) — expect resistance",
+                "trade_signal_action": "fade the rally or wait",
+            }
+        elif pe_buying_count > ce_buying_count:
+            return {
+                "trade_signal":      "suspect_move",
+                "trade_signal_icon": "⚠",
+                "trade_signal_note": "Bears buying puts against the rally — conviction low",
+                "trade_signal_action": "caution — bears hedging",
+            }
+
+    elif price_direction == "down":
+        if ce_dominant:
+            return {
+                "trade_signal":      "confirmed_move",
+                "trade_signal_icon": "✅",
+                "trade_signal_note": f"CE writers defending ceiling ({ce_writing_count} strikes) — bears in control",
+                "trade_signal_action": "trade with the move",
+            }
+        elif pe_dominant:
+            return {
+                "trade_signal":      "watch_reversal",
+                "trade_signal_icon": "↗",
+                "trade_signal_note": f"PE writers stepping in ({pe_writing_count} strikes) — possible floor forming",
+                "trade_signal_action": "watch for reversal entry",
+            }
+
+    # 4. Mixed or insufficient data
+    if both_equal:
+        return {
+            "trade_signal":      "mixed",
+            "trade_signal_icon": "↔",
+            "trade_signal_note": "Both sides writing equally — market undecided",
+            "trade_signal_action": "wait for clarity",
+        }
+
+    return {
+        "trade_signal":      "neutral",
+        "trade_signal_icon": "",
+        "trade_signal_note": "",
+        "trade_signal_action": "",
+    }
+
+
 # ─────────────────────────────────────────────
 # SIGNAL ENGINE
 # ─────────────────────────────────────────────
@@ -522,6 +620,19 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             # Get overnight direction from instruments cache
             overnight_oi_direction = inst.get("overnight_direction", "neutral") or "neutral"
 
+            # Compute composite trade signal
+            price_dir = "up" if price_result["breakout_direction"] == "up"                 else "down" if price_result["breakout_direction"] == "down"                 else "flat"
+
+            trade_signal = compute_trade_signal(
+                price_direction    = price_dir,
+                ce_writing_count   = strike_analysis["ce_writing_count"],
+                pe_writing_count   = strike_analysis["pe_writing_count"],
+                ce_buying_count    = strike_analysis["ce_buying_count"],
+                pe_buying_count    = strike_analysis["pe_buying_count"],
+                oi_unwind_status   = oi_result["oi_unwind_status"],
+                cumulative_oi_pct  = oi_result["cumulative_oi_pct"],
+            )
+
             # Compute intraday direction using current price vs session open
             current_price = price_result["current_price"]
 
@@ -630,6 +741,10 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 "pe_writing_count":     strike_analysis["pe_writing_count"],
                 "ce_buying_count":      strike_analysis["ce_buying_count"],
                 "pe_buying_count":      strike_analysis["pe_buying_count"],
+                "trade_signal":         trade_signal["trade_signal"],
+                "trade_signal_icon":    trade_signal["trade_signal_icon"],
+                "trade_signal_note":    trade_signal["trade_signal_note"],
+                "trade_signal_action":  trade_signal["trade_signal_action"],
                 "session_date":         today_str,
                 "scanned_at":           now_ist.isoformat(),
                 "updated_at":           now_ist.isoformat(),
