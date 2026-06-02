@@ -40,19 +40,26 @@ def get_oi_walls(symbol: str, supabase, cmp: float = 0) -> dict:
         if not ce_oi or not pe_oi:
             return {}
 
-       # CE wall = highest CE OI ABOVE CMP (resistance)
-        # PE wall = highest PE OI BELOW CMP (support)
+       # CE wall = nearest significant CE OI above CMP (intraday resistance)
+        # PE wall = nearest significant PE OI below CMP (intraday support)
         ce_above = {s: v for s, v in ce_oi.items() if s > cmp} if cmp > 0 else ce_oi
         pe_below = {s: v for s, v in pe_oi.items() if s < cmp} if cmp > 0 else pe_oi
 
-        # Fallback to all strikes if no strikes above/below CMP
-        if not ce_above:
-            ce_above = ce_oi
-        if not pe_below:
-            pe_below = pe_oi
+        if not ce_above: ce_above = ce_oi
+        if not pe_below: pe_below = pe_oi
 
-        ce_wall = max(ce_above, key=lambda s: ce_above[s])
-        pe_wall = max(pe_below, key=lambda s: pe_below[s])
+        # Significant threshold = 10% of max OI in that direction
+        max_ce = max(ce_above.values(), default=1)
+        max_pe = max(pe_below.values(), default=1)
+        ce_significant = {s: v for s, v in ce_above.items() if v >= max_ce * 0.10}
+        pe_significant = {s: v for s, v in pe_below.items() if v >= max_pe * 0.10}
+
+        if not ce_significant: ce_significant = ce_above
+        if not pe_significant: pe_significant = pe_below
+
+        # Nearest significant = smallest distance from CMP
+        ce_wall = min(ce_significant.keys())  # lowest strike above CMP
+        pe_wall = max(pe_significant.keys())  # highest strike below CMP
 
         # CE wall = highest CE OI ABOVE CMP (resistance)
         # PE wall = highest PE OI BELOW CMP (support)
