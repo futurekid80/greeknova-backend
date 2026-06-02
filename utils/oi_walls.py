@@ -40,7 +40,7 @@ def get_oi_walls(symbol: str, supabase, cmp: float = 0) -> dict:
         if not ce_oi or not pe_oi:
             return {}
 
-       # CE wall = nearest significant CE OI above CMP (intraday resistance)
+        # CE wall = nearest significant CE OI above CMP (intraday resistance)
         # PE wall = nearest significant PE OI below CMP (intraday support)
         ce_above = {s: v for s, v in ce_oi.items() if s > cmp} if cmp > 0 else ce_oi
         pe_below = {s: v for s, v in pe_oi.items() if s < cmp} if cmp > 0 else pe_oi
