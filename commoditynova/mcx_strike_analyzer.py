@@ -235,12 +235,12 @@ def analyze_strikes(
         rally_quality = "neutral"
         rally_note    = ""
 
-    # Top writing strikes — for display in trade signal
-    # Sort by delta descending, take top 4, format as strike labels
-    top_ce_writing = sorted(ce_writing_strikes, key=lambda x: x["oi_delta"], reverse=True)[:4]
-    top_pe_writing = sorted(pe_writing_strikes, key=lambda x: x["oi_delta"], reverse=True)[:4]
-    top_ce_buying  = sorted(ce_buying_strikes,  key=lambda x: x["oi_delta"], reverse=True)[:4]
-    top_pe_buying  = sorted(pe_buying_strikes,  key=lambda x: x["oi_delta"], reverse=True)[:4]
+    # Top writing strikes — sort by proximity to current price (nearest first)
+    # This puts the most actionable strike level first
+    top_ce_writing = sorted(ce_writing_strikes, key=lambda x: abs(x["strike"] - current_price))[:4]
+    top_pe_writing = sorted(pe_writing_strikes, key=lambda x: abs(x["strike"] - current_price))[:4]
+    top_ce_buying  = sorted(ce_buying_strikes,  key=lambda x: abs(x["strike"] - current_price))[:4]
+    top_pe_buying  = sorted(pe_buying_strikes,  key=lambda x: abs(x["strike"] - current_price))[:4]
 
     def fmt_strikes(strikes, commodity):
         """Format strike list as readable string e.g. ₹300 · ₹310 · ₹320"""
