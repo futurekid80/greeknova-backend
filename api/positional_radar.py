@@ -348,6 +348,17 @@ def get_positional_radar(min_consec: int = 0):
         return {"error": "Insufficient data", "results": []}
 
     today_fut_signals = get_today_fut_signals(supabase, today_str)
+    # Check which symbols have active UOA signals today
+    uoa_symbols: set = set()
+    try:
+        from api.uoa import get_uoa
+        uoa_data = get_uoa()
+        for sig in uoa_data.get("signals", []):
+            if sig.get("score", 0) >= 3:
+                uoa_symbols.add(sig["symbol"])
+        print(f"[Positional Radar] UOA active symbols: {len(uoa_symbols)}")
+    except Exception as e:
+        print(f"[Positional Radar] UOA check failed: {e}")
 
     results = []
 
@@ -490,6 +501,7 @@ def get_positional_radar(min_consec: int = 0):
             "date_labels":         date_labels,
             "cmp":                 cmp_series[-1],
             "series_days":         len(oi_series) - 1,
+            "has_uoa":             sym in uoa_symbols,
             # OI Walls
             **get_oi_walls(sym, supabase, cmp_series[-1]),
         })
