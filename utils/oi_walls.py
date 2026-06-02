@@ -57,23 +57,9 @@ def get_oi_walls(symbol: str, supabase, cmp: float = 0) -> dict:
         if not ce_significant: ce_significant = ce_above
         if not pe_significant: pe_significant = pe_below
 
-        # Nearest significant = smallest distance from CMP
-        ce_wall = min(ce_significant.keys())  # lowest strike above CMP
-        pe_wall = max(pe_significant.keys())  # highest strike below CMP
-
-        # CE wall = highest CE OI ABOVE CMP (resistance)
-        # PE wall = highest PE OI BELOW CMP (support)
-        ce_above = {s: v for s, v in ce_oi.items() if s > cmp} if cmp > 0 else ce_oi
-        pe_below = {s: v for s, v in pe_oi.items() if s < cmp} if cmp > 0 else pe_oi
-
-        # Fallback to all strikes if no strikes above/below CMP
-        if not ce_above:
-            ce_above = ce_oi
-        if not pe_below:
-            pe_below = pe_oi
-
-        ce_wall = max(ce_above, key=lambda s: ce_above[s])
-        pe_wall = max(pe_below, key=lambda s: pe_below[s])
+        # Nearest significant strike to CMP
+        ce_wall = min(ce_significant.keys())  # lowest above CMP
+        pe_wall = max(pe_significant.keys())  # highest below CMP
         ce_wall_oi_L = round(ce_oi[ce_wall] / 100000, 1)
         pe_wall_oi_L = round(pe_oi[pe_wall] / 100000, 1)
 
