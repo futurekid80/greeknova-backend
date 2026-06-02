@@ -138,6 +138,7 @@ def get_conviction_level(consec_days: int, vol_rising: bool, accelerating: bool)
 def get_today_fut_signals(supabase, today_str: str) -> dict:
     fut_signals = {}
     try:
+        # ── Try today's data first ────────────────────────────────────────
         ts_result = supabase.from_("oi_snapshots")\
             .select("timestamp")\
             .eq("option_type", "FUT")\
@@ -147,8 +148,36 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
             .limit(500).execute()
 
         timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
+
+        # ── Fallback to yesterday if today has no data yet ────────────────
+        # This happens before 9:15 AM or on deployment restart
+        # Prevents Ignition stocks from dropping to Conviction overnight
+        using_yesterday = False
         if len(timestamps) < 2:
-            return fut_signals
+            from datetime import datetime, timedelta
+            import pytz
+            ist = pytz.timezone('Asia/Kolkata')
+            yesterday = (datetime.now(ist).date() - timedelta(days=1)).isoformat()
+            # Walk back to find last trading day (skip weekends)
+            check = datetime.now(ist).date() - timedelta(days=1)
+            while check.weekday() >= 5:
+                check -= timedelta(days=1)
+            yesterday = check.isoformat()
+
+            ts_result = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("option_type", "FUT")\
+                .eq("symbol", "NIFTY")\
+                .gte("timestamp", f"{yesterday}T00:00:00+00:00")\
+                .lt("timestamp",  f"{yesterday}T23:59:59+00:00")\
+                .limit(500).execute()
+
+            timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
+            if len(timestamps) >= 2:
+                using_yesterday = True
+                print(f"[Positional Radar] No today FUT data yet — using yesterday ({yesterday}) as carry-forward")
+            else:
+                return fut_signals
 
         ts_open   = timestamps[0]
         ts_latest = timestamps[-1]
