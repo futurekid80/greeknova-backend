@@ -40,7 +40,19 @@ def get_oi_walls(symbol: str, supabase, cmp: float = 0) -> dict:
         if not ce_oi or not pe_oi:
             return {}
 
-        # Find walls
+       # Filter to strikes within 15% of CMP for intraday relevance
+        # This avoids far OTM strikes dominating the wall calculation
+        if cmp > 0:
+            proximity_filter = 0.15  # 15% from CMP
+            ce_oi = {s: v for s, v in ce_oi.items() 
+                     if abs(s - cmp) / cmp <= proximity_filter}
+            pe_oi = {s: v for s, v in pe_oi.items() 
+                     if abs(s - cmp) / cmp <= proximity_filter}
+
+        if not ce_oi or not pe_oi:
+            return {}
+
+        # Find walls — highest OI within proximity band
         ce_wall = max(ce_oi, key=lambda s: ce_oi[s])
         pe_wall = max(pe_oi, key=lambda s: pe_oi[s])
         ce_wall_oi_L = round(ce_oi[ce_wall] / 100000, 1)
