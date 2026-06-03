@@ -774,6 +774,19 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 row, on_conflict="commodity"
             ).execute()
 
+            # Store OI history for accumulation bars
+            try:
+                supabase.table("mcx_oi_history").insert({
+                    "commodity":        commodity,
+                    "session_date":     today_str,
+                    "scanned_at":       now_ist.isoformat(),
+                    "oi_change_pct":    oi_result["oi_change_pct"],
+                    "cumulative_oi_pct": oi_result["cumulative_oi_pct"],
+                    "current_oi":       oi_result["current_oi"],
+                }).execute()
+            except Exception as e:
+                logger.debug(f"{commodity} OI history write error: {e}")
+
             if signal["status"] == "fired":
                 supabase.table("mcx_ignition_history").insert({
                     "commodity":     commodity,
