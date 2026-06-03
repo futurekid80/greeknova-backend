@@ -1,11 +1,14 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
-from utils.db import get_supabase
-from datetime import datetime, timezone, date as date_type
-import time as time_module  # ADD THIS LINE
+import time as time_module
 
 # Persistence cache
 _signal_history: dict = {}
+
+# ── Result cache — UOA is expensive, cache for 4 mins during market ──────────
+_uoa_cache: dict = {}
+_uoa_cache_time: float = 0
+UOA_CACHE_TTL = 240  # 4 minutes
 
 STOCK_NSE_MAP = {
     "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
@@ -58,12 +61,20 @@ def is_post_market() -> bool:
     return total > MARKET_CLOSE_UTC
 
 def get_uoa(date: str = None):
+    global _uoa_cache, _uoa_cache_time
+
+    # ── Cache check — skip expensive recompute if fresh ──────────────────────
+    cache_ttl = UOA_CACHE_TTL if is_market_hours() else 600
+    if _uoa_cache and (time_module.time() - _uoa_cache_time) < cache_ttl:
+        print(f"[UOA] Returning cached result ({int(time_module.time() - _uoa_cache_time)}s old)")
+        return _uoa_cache
+
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     live = is_market_hours()
     post_market = is_post_market()
 
-    # ── Get ALL distinct timestamps via pagination ────────────────────────────
+    # ── Get ALL distinct timestamps ───────────────────────────────────────────
     all_ts_rows = []
     for offset in range(0, 50000, 1000):
         batch = supabase.from_("oi_snapshots")\
@@ -111,10 +122,10 @@ def get_uoa(date: str = None):
     is_near_close      = 0 < mins_to_close <= 30
     is_very_near_close = 0 < mins_to_close <= 15
 
-    # ── Fetch snapshots ───────────────────────────────────────────────────────
+    # ── Fetch snapshots — capped at 10000 rows (more than enough for 66 stocks)
     def fetch_snapshot(ts):
         rows = []
-        for offset in range(0, 200000, 1000):
+        for offset in range(0, 10000, 1000):
             batch = supabase.from_("oi_snapshots")\
                 .select("*")\
                 .eq("timestamp", ts)\
@@ -131,10 +142,8 @@ def get_uoa(date: str = None):
     open_data_raw  = fetch_snapshot(ts_open)
     min30_data_raw = fetch_snapshot(ts_30min)
 
-    # ── FIX: Build nearest active expiry map per symbol ───────────────────────
-    # Prevents June expiry rows mixing with May expiry for stocks
+    # ── Build nearest active expiry map per symbol ────────────────────────────
     today_str = date_type.today().isoformat()
-
     nearest_expiry_map: dict = {}
     for r in new_data_raw:
         sym = r["symbol"]
@@ -390,6 +399,7 @@ def get_uoa(date: str = None):
         })
 
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
+
     # Persistence tracking
     total_snaps = len(timestamps)
     for sig in uoa_signals:
@@ -412,7 +422,7 @@ def get_uoa(date: str = None):
         except:
             return ts[11:16]
 
-    return {
+    result = {
         "timestamp":         ts_new,
         "open_timestamp":    ts_open,
         "open_time":         to_ist(ts_open),
@@ -425,3 +435,9 @@ def get_uoa(date: str = None):
         "is_post_market":    post_market,
         "market_close_time": "15:29",
     }
+
+    # Cache the result
+    _uoa_cache = result
+    _uoa_cache_time = time_module.time()
+    print(f"[UOA] Computed fresh — {len(uoa_signals)} signals, cached for {cache_ttl}s")
+    return result
