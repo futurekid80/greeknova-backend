@@ -9,6 +9,9 @@ import uvicorn, sys, time
 # ── CommodityNova additions ────────────────────────────────────────────────
 from commoditynova.mcx_scheduler import start_mcx_scheduler
 from commoditynova.mcx_router import router as mcx_router
+from commoditynova.mcx_oi_map_router import router as mcx_oi_map_router
+app.include_router(mcx_router, prefix="/mcx")
+app.include_router(mcx_oi_map_router, prefix="/mcx")
 # ──────────────────────────────────────────────────────────────────────────
 
 INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
