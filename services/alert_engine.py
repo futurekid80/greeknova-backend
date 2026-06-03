@@ -3,12 +3,13 @@ services/alert_engine.py
 
 GreekNova Alert Engine — runs after every OI capture cycle.
 
-Two alert types only:
-1. HIGH CONV — FUT signal + Options Confirmation aligned, persistence ≥ 10 snaps
-2. Near-ATM writing — UOA put/call writing within 2% of CMP, score ≥ 4
+Three alert types:
+1. HIGH CONV — FUT signal + Options Confirmation aligned, persistence >= 10 snaps
+2. Near-ATM writing — UOA put/call writing within 2% of CMP, score >= 4
+3. Intraday signals — fires at persistence milestones: 50%, 75%, 90%
 
 Delivers: Telegram only
-Deduplicates: once per symbol per alert type per day
+Deduplicates: once per symbol per alert type per milestone per day
 """
 
 import os
@@ -20,6 +21,9 @@ from typing import Optional
 ALERT_BOT_TOKEN  = "8659302604:AAFWa38GGioCI6iEJwD1ZBS88MILPVhJys8"
 PERSONAL_CHAT_ID = "5513733966"
 TELEGRAM_URL     = f"https://api.telegram.org/bot{ALERT_BOT_TOKEN}/sendMessage"
+
+# ── Persistence milestones to alert at ───────────────────────────────────────
+PERSISTENCE_MILESTONES = [50, 75, 90]
 
 # ── Deduplication — reset daily ───────────────────────────────────────────────
 _sent_alerts: set = set()
@@ -34,6 +38,12 @@ def _reset_if_new_day():
     if today != _sent_date:
         _sent_alerts = set()
         _sent_date   = today
+
+
+def _get_milestone(persistence_pct: int) -> Optional[int]:
+    """Return the highest milestone crossed, or None if none crossed yet."""
+    crossed = [m for m in PERSISTENCE_MILESTONES if persistence_pct >= m]
+    return max(crossed) if crossed else None
 
 
 def send_telegram(text: str) -> bool:
@@ -76,7 +86,7 @@ def run_alert_check():
 def _check_high_conv_signals():
     """
     Fire when FUT signal + Options Confirmation both align,
-    persistence >= 10 snapshots. Once per symbol per day.
+    persistence >= 10 snapshots. Fires at milestones: 50%, 75%, 90%.
     """
     try:
         from api.signal_log import get_signal_log
@@ -84,24 +94,26 @@ def _check_high_conv_signals():
         signals = data.get("signals", [])
 
         for sig in signals:
-            sym         = sig["symbol"]
-            persistence = sig.get("persistence", 0)
-            confirms    = sig.get("options_confirms")
-            signal_type = sig.get("signal_type", "")
-            label       = sig.get("label", "")
-            oi_chg      = sig.get("oi_chg_pct", 0)
-            price_chg   = sig.get("price_chg_pct", 0)
-            cmp         = sig.get("cmp", 0)
-            cpr_pos     = sig.get("cpr_position", "")
-            opt_sig     = sig.get("options_signal")
+            sym             = sig["symbol"]
+            persistence     = sig.get("persistence", 0)
+            persistence_pct = sig.get("persistence_pct", 0)
+            confirms        = sig.get("options_confirms")
+            signal_type     = sig.get("signal_type", "")
+            label           = sig.get("label", "")
+            oi_chg          = sig.get("oi_chg_pct", 0)
+            price_chg       = sig.get("price_chg_pct", 0)
+            cmp             = sig.get("cmp", 0)
+            cpr_pos         = sig.get("cpr_position", "")
+            opt_sig         = sig.get("options_signal")
 
-            # Must be HIGH CONV: FUT signal + options confirms + persistence >= 10
-            if not confirms:
-                continue
-            if persistence < 10:
+            if not confirms or persistence < 10:
                 continue
 
-            alert_key = f"highconv_{sym}_{signal_type}"
+            milestone = _get_milestone(persistence_pct)
+            if not milestone:
+                continue
+
+            alert_key = f"highconv_{sym}_{signal_type}_{milestone}"
             if alert_key in _sent_alerts:
                 continue
 
@@ -110,18 +122,21 @@ def _check_high_conv_signals():
             if opt_sig:
                 opt_line = f"Options: {opt_sig.get('label','')} · {opt_sig.get('strike','')} {opt_sig.get('option_type','')} · Score {opt_sig.get('score','')}/5\n"
 
+            milestone_tag = f"🏁 {milestone}% persistence\n"
+
             text = (
                 f"🎯 *HIGH CONV Signal* {bias_icon}\n"
                 f"*{sym}* · ₹{cmp}\n"
                 f"FUT: {label} · OI {oi_chg:+.1f}% · Price {price_chg:+.2f}%\n"
                 f"{opt_line}"
                 f"CPR: {cpr_pos.replace('_',' ').title()} · Persistence: {persistence} snaps\n"
+                f"{milestone_tag}"
                 f"_GreekNova · Informational only_"
             )
 
             if send_telegram(text):
                 _sent_alerts.add(alert_key)
-                print(f"[ALERTS] HIGH CONV sent: {sym}")
+                print(f"[ALERTS] HIGH CONV sent: {sym} @ {milestone}% milestone")
 
     except Exception as e:
         print(f"[ALERTS] High conv check error: {e}")
@@ -131,7 +146,7 @@ def _check_high_conv_signals():
 def _check_near_atm_writing():
     """
     Fire when put/call writing appears within 2% of CMP, score >= 4.
-    Once per symbol per option_type per day.
+    Fires at milestones: 50%, 75%, 90% persistence.
     """
     try:
         from api.uoa import get_uoa
@@ -141,7 +156,6 @@ def _check_near_atm_writing():
         uoa_data = get_uoa(date=today)
         signals  = uoa_data.get("signals", [])
 
-        # Get CMP map
         supabase = get_supabase()
         cmp_rows = supabase.from_("cmp_prices")\
             .select("symbol, cmp")\
@@ -162,14 +176,14 @@ def _check_near_atm_writing():
             if sig.get("score", 0) < 4:
                 continue
 
-            sym      = sig["symbol"]
-            strike   = float(sig.get("strike", 0))
-            opt_type = sig.get("option_type", "")
-            score    = sig.get("score", 0)
-            ltp      = sig.get("ltp", 0)
-            oi_chg   = sig.get("oi_chg_30min", 0)
-            persist  = sig.get("persistence_pct", 0)
-            cmp      = cmp_map.get(sym, 0)
+            sym             = sig["symbol"]
+            strike          = float(sig.get("strike", 0))
+            opt_type        = sig.get("option_type", "")
+            score           = sig.get("score", 0)
+            ltp             = sig.get("ltp", 0)
+            oi_chg          = sig.get("oi_chg_30min", 0)
+            persist_pct     = sig.get("persistence_pct", 0)
+            cmp             = cmp_map.get(sym, 0)
 
             if cmp <= 0 or strike <= 0:
                 continue
@@ -178,7 +192,11 @@ def _check_near_atm_writing():
             if distance_pct > 2.0:
                 continue
 
-            alert_key = f"nearatm_{sym}_{strike}_{opt_type}"
+            milestone = _get_milestone(persist_pct)
+            if not milestone:
+                continue
+
+            alert_key = f"nearatm_{sym}_{strike}_{opt_type}_{milestone}"
             if alert_key in _sent_alerts:
                 continue
 
@@ -190,27 +208,27 @@ def _check_near_atm_writing():
                 f"📍 *Near-ATM {signal_label}* {bias_icon}\n"
                 f"*{sym}* · ₹{cmp:.1f} CMP\n"
                 f"{strike} {opt_type} · {distance_pct:.1f}% from CMP · Score {score}/5\n"
-                f"OI 30m: {oi_chg:+.1f}% · LTP: ₹{ltp} · Persist: {persist}%\n"
-                f"Writer {direction}\n"
+                f"OI 30m: {oi_chg:+.1f}% · LTP: ₹{ltp} · Persist: {persist_pct}%\n"
+                f"Writer {direction} · 🏁 {milestone}% milestone\n"
                 f"_GreekNova · Informational only_"
             )
 
             if send_telegram(text):
                 _sent_alerts.add(alert_key)
-                print(f"[ALERTS] Near-ATM {signal_label} sent: {sym} {strike} {opt_type}")
+                print(f"[ALERTS] Near-ATM {signal_label} sent: {sym} {strike} {opt_type} @ {milestone}%")
 
     except Exception as e:
         print(f"[ALERTS] Near-ATM check error: {e}")
+
 
 # ── Alert 3: Intraday Signal ──────────────────────────────────────────────────
 def _check_intraday_signals():
     """
     Fire when a new intraday FUT signal appears with:
-    - persistence >= 10 snapshots (confirmed, not noise)
-    - vol_surge = True (volume confirmation)
+    - vol_surge = True
     - OI change >= 5%
-    Once per symbol per signal_type per day.
-    Separate higher-priority alert for HIGH CONV.
+    Fires at persistence milestones: 50%, 75%, 90%
+    Each milestone fires once per symbol per signal_type per day.
     """
     try:
         from api.signal_log import get_signal_log
@@ -218,40 +236,36 @@ def _check_intraday_signals():
         signals = data.get("signals", [])
 
         for sig in signals:
-            sym         = sig["symbol"]
-            persistence = sig.get("persistence", 0)
-            signal_type = sig.get("signal_type", "")
-            label       = sig.get("label", "")
-            oi_chg      = sig.get("oi_chg_pct", 0)
-            price_chg   = sig.get("price_chg_pct", 0)
-            vol_chg     = sig.get("vol_chg_pct", 0)
-            vol_surge   = sig.get("vol_surge", False)
-            cmp         = sig.get("cmp", 0)
-            cpr_pos     = sig.get("cpr_position", "")
-            first_seen  = sig.get("first_seen", "")
-            confirms    = sig.get("options_confirms")
-            ce_wall     = sig.get("ce_wall")
-            pe_wall     = sig.get("pe_wall")
+            sym             = sig["symbol"]
+            persistence     = sig.get("persistence", 0)
+            persistence_pct = sig.get("persistence_pct", 0)
+            signal_type     = sig.get("signal_type", "")
+            label           = sig.get("label", "")
+            oi_chg          = sig.get("oi_chg_pct", 0)
+            price_chg       = sig.get("price_chg_pct", 0)
+            vol_chg         = sig.get("vol_chg_pct", 0)
+            vol_surge       = sig.get("vol_surge", False)
+            cmp             = sig.get("cmp", 0)
+            cpr_pos         = sig.get("cpr_position", "")
+            first_seen      = sig.get("first_seen", "")
+            confirms        = sig.get("options_confirms")
+            ce_wall         = sig.get("ce_wall")
+            pe_wall         = sig.get("pe_wall")
             trade_range_pct = sig.get("trade_range_pct")
-            range_label = sig.get("range_label", "")
+            range_label     = sig.get("range_label", "")
 
-            # Qualification — persistence >= 10, vol surge, OI >= 5%
-            if persistence < 10:
-                continue
-            if not vol_surge:
-                continue
-            if abs(oi_chg) < 5.0:
+            if not vol_surge or abs(oi_chg) < 5.0:
                 continue
 
-            # Skip if already sent HIGH CONV alert for same signal
-            # (HIGH CONV is handled by _check_high_conv_signals)
-            alert_key = f"intraday_{sym}_{signal_type}"
+            milestone = _get_milestone(persistence_pct)
+            if not milestone:
+                continue
+
+            alert_key = f"intraday_{sym}_{signal_type}_{milestone}"
             if alert_key in _sent_alerts:
                 continue
 
-            # Build alert
             bias_icon = "🟢" if sig.get("bias") == "BULLISH" else "🔴"
-
             signal_icons = {
                 "LONG_BUILDUP":   "🐂",
                 "SHORT_BUILDUP":  "🐻",
@@ -260,13 +274,11 @@ def _check_intraday_signals():
             }
             sig_icon = signal_icons.get(signal_type, "📊")
 
-            # CPR context
             cpr_line = ""
             if cpr_pos:
                 virgin = "🔵 Virgin · " if sig.get("cpr_is_virgin") else ""
                 cpr_line = f"CPR: {virgin}{cpr_pos}\n"
 
-            # OI Walls
             walls_line = ""
             if ce_wall and pe_wall:
                 walls_line = f"📈 CE ₹{ce_wall:,.0f} · 📉 PE ₹{pe_wall:,.0f}"
@@ -274,7 +286,6 @@ def _check_intraday_signals():
                     walls_line += f" · {trade_range_pct}% {range_label}"
                 walls_line += "\n"
 
-            # Options confirmation
             conf_line = ""
             if confirms is True:
                 conf_line = "✅ Options Confirms\n"
@@ -282,7 +293,7 @@ def _check_intraday_signals():
                 conf_line = "⚠️ Options Contradicts\n"
 
             text = (
-                f"{sig_icon} *GreekNova Intraday Signal* {bias_icon}\n"
+                f"{sig_icon} *GreekNova Signal* {bias_icon} 🏁 {milestone}%\n"
                 f"*{sym}* · ₹{cmp:,.1f}\n"
                 f"{label} · OI {oi_chg:+.1f}% · Price {price_chg:+.2f}%\n"
                 f"Vol: {vol_chg:+.0f}% ⚡ · Since: {first_seen}\n"
@@ -294,7 +305,7 @@ def _check_intraday_signals():
 
             if send_telegram(text):
                 _sent_alerts.add(alert_key)
-                print(f"[ALERTS] Intraday signal sent: {sym} {signal_type}")
+                print(f"[ALERTS] Intraday signal sent: {sym} {signal_type} @ {milestone}% milestone")
 
     except Exception as e:
         print(f"[ALERTS] Intraday signal check error: {e}")
