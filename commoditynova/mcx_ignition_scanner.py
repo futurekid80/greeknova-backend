@@ -777,15 +777,16 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             # Store OI history for accumulation bars
             try:
                 supabase.table("mcx_oi_history").insert({
-                    "commodity":        commodity,
-                    "session_date":     today_str,
-                    "scanned_at":       now_ist.isoformat(),
-                    "oi_change_pct":    oi_result["oi_change_pct"],
-                    "cumulative_oi_pct": oi_result["cumulative_oi_pct"],
-                    "current_oi":       oi_result["current_oi"],
+                    "commodity":         commodity,
+                    "session_date":      today_str,
+                    "scanned_at":        now_ist.isoformat(),
+                    "oi_change_pct":     float(oi_result["oi_change_pct"]),
+                    "cumulative_oi_pct": float(oi_result["cumulative_oi_pct"]),
+                    "current_oi":        int(oi_result["current_oi"]),
                 }).execute()
+                logger.info(f"{commodity}: OI history written")
             except Exception as e:
-                logger.debug(f"{commodity} OI history write error: {e}")
+                logger.error(f"{commodity} OI history write error: {e}")
 
             if signal["status"] == "fired":
                 supabase.table("mcx_ignition_history").insert({
