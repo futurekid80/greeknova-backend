@@ -38,8 +38,6 @@ def classify(oi_chg_pct: float, price_chg_pct: float):
     return None, None, None
 
 
-# ── Options confirmation logic ────────────────────────────────────────────────
-# Maps FUT signal type to confirming UOA signal types
 CONFIRMING_SIGNALS = {
     "LONG_BUILDUP":   ["PUT_WRITING", "LONG_BUILDUP", "SHORT_COVERING", "BUYER_DOMINATED"],
     "SHORT_BUILDUP":  ["CALL_WRITING", "SHORT_BUILDUP", "LONG_UNWINDING", "SELLER_DOMINATED"],
@@ -62,17 +60,10 @@ SIGNAL_LABELS = {
 
 
 def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
-    """
-    Given a list of UOA signals for a symbol and the FUT signal type,
-    find the best confirming or contradicting options signal.
-    Returns a dict with confirmation details.
-    """
     if not uoa_signals:
         return {"has_confirmation": False, "confirms": None, "best_signal": None}
 
     confirming = CONFIRMING_SIGNALS.get(fut_signal_type, [])
-
-    # Score each UOA signal: confirming signals scored higher
     best_confirming = None
     best_contradicting = None
 
@@ -169,7 +160,6 @@ def get_signal_log(date: str = None):
 
     # ── Step 3: Build per-symbol, per-timestamp maps ──────────────────────────
     from collections import defaultdict
-    # First find nearest expiry per symbol
     nearest_expiry: dict = {}
     for r in all_fut_rows:
         sym    = r["symbol"]
@@ -177,7 +167,6 @@ def get_signal_log(date: str = None):
         if sym not in nearest_expiry or expiry < nearest_expiry[sym]:
             nearest_expiry[sym] = expiry
 
-    # Only aggregate nearest expiry FUT data
     fut_data: dict = defaultdict(dict)
     for r in all_fut_rows:
         sym    = r["symbol"]
@@ -191,7 +180,7 @@ def get_signal_log(date: str = None):
         fut_data[sym][ts]["volume"]     += int(r["volume"] or 0)
         fut_data[sym][ts]["last_price"]  = float(r["last_price"] or 0)
 
-    # ── Step 4: Get CMP from cmp_prices ──────────────────────────────────────
+    # ── Step 4: Get CMP ───────────────────────────────────────────────────────
     cmp_result = supabase.from_("cmp_prices")\
         .select("symbol, cmp")\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
@@ -212,15 +201,15 @@ def get_signal_log(date: str = None):
     for r in (cpr_result.data or []):
         cpr_map[r["symbol"]] = r
 
-    # ── Step 6: Get UOA signals for options confirmation ─────────────────────
-    uoa_map: dict = defaultdict(list)  # symbol → list of UOA signals
+    # ── Step 6: Get UOA signals ───────────────────────────────────────────────
+    uoa_map: dict = defaultdict(list)
     uoa_fetch_ok = False
     try:
         from api.uoa import get_uoa
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(get_uoa, date=today)
-            uoa_data = future.result(timeout=8)  # 8 second max
+            uoa_data = future.result(timeout=20)  # increased from 8s
         for sig in uoa_data.get("signals", []):
             if sig.get("score", 0) >= 3:
                 uoa_map[sig["symbol"]].append(sig)
@@ -253,7 +242,6 @@ def get_signal_log(date: str = None):
         price_chg_pct = round((price_latest - price_open) / price_open * 100, 2)
         vol_chg_pct   = round((vol_latest - vol_open) / vol_open * 100, 2) if vol_open > 0 else 0
 
-        # Qualification thresholds
         if abs(oi_chg_pct) < 3.0:      continue
         if abs(price_chg_pct) < 0.3:   continue
         if vol_latest < vol_open * 1.2: continue
@@ -262,9 +250,12 @@ def get_signal_log(date: str = None):
         if not signal_type:
             continue
 
-        # Persistence
-        persistence   = 0
-        first_seen_ts = ts_latest
+        # ── Persistence — tracks current run start, resets on signal flip ────
+        persistence    = 0
+        prev_signal    = None
+        run_start_ts   = None   # when the current consecutive run started
+        first_seen_ts  = ts_latest
+
         for ts in timestamps:
             snap = ts_map.get(ts)
             if not snap:
@@ -272,10 +263,15 @@ def get_signal_log(date: str = None):
             snap_oi_chg    = (snap["oi"] - oi_open) / oi_open * 100 if oi_open > 0 else 0
             snap_price_chg = (snap["last_price"] - price_open) / price_open * 100 if price_open > 0 else 0
             s, _, _ = classify(snap_oi_chg, snap_price_chg)
+
             if s == signal_type:
                 persistence += 1
-                if ts < first_seen_ts:
-                    first_seen_ts = ts
+                if prev_signal != signal_type:
+                    # Signal just started or restarted after a flip — reset run start
+                    run_start_ts = ts
+                first_seen_ts = run_start_ts  # always reflects current run
+
+            prev_signal = s
 
         if persistence < 2:
             continue
@@ -294,9 +290,9 @@ def get_signal_log(date: str = None):
             else:
                 cpr_position = "Inside CPR"
 
-        # ── Options confirmation ──────────────────────────────────────────────
-        uoa_signals    = uoa_map.get(sym, [])
-        options_conf   = _get_uoa_confirmation(uoa_signals, signal_type)
+        # Options confirmation
+        uoa_signals  = uoa_map.get(sym, [])
+        options_conf = _get_uoa_confirmation(uoa_signals, signal_type)
 
         import math
         conviction_score = round(
@@ -306,7 +302,6 @@ def get_signal_log(date: str = None):
             2
         )
 
-        # OI Walls
         from utils.oi_walls import get_oi_walls
         walls = get_oi_walls(sym, supabase, cmp)
 
@@ -333,13 +328,11 @@ def get_signal_log(date: str = None):
             "cpr_position":    cpr_position,
             "cpr_width_emoji": cpr.get("width_emoji"),
             "cpr_is_virgin":   cpr.get("is_virgin"),
-            # Options confirmation fields
             "options_confirmation": options_conf.get("has_confirmation", False),
             "options_confirms":     options_conf.get("confirms"),
             "options_alignment":    options_conf.get("alignment"),
             "options_alignment_color": options_conf.get("alignment_color"),
             "options_signal":       options_conf.get("best_signal"),
-            # OI Walls
             "ce_wall":              walls.get("ce_wall"),
             "pe_wall":              walls.get("pe_wall"),
             "ce_wall_oi_L":         walls.get("ce_wall_oi_L"),
@@ -349,7 +342,7 @@ def get_signal_log(date: str = None):
             "range_label":          walls.get("range_label"),
         }
 
-    # ── Step 8: Sort — persistence first, then OI change ─────────────────────
+    # ── Step 8: Sort by conviction score ─────────────────────────────────────
     signals = sorted(
         signal_log.values(),
         key=lambda x: x["conviction_score"],
@@ -369,7 +362,6 @@ def get_signal_log(date: str = None):
         "long_unwinding":sum(1 for s in signals if s["signal_type"] == "LONG_UNWINDING"),
     }
 
-    # Only cache if signals found, OR UOA fetch worked AND market genuinely empty
     if len(signals) > 0 or (uoa_fetch_ok and total_snaps >= 5):
         _signal_cache = result
         _signal_cache_time = time_module.time()
