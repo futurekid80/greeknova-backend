@@ -109,6 +109,56 @@ def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
         return {"has_confirmation": False, "confirms": None, "best_signal": None}
 
 
+def _get_atm_bias(atm_snapshot: dict, cmp: float) -> dict:
+    """
+    From the latest options snapshot for a symbol, find the ATM strike
+    and compare CE vs PE OI to determine institutional bias.
+    
+    Returns:
+      atm_strike: the nearest strike to CMP
+      atm_ce_oi: CE OI at ATM
+      atm_pe_oi: PE OI at ATM
+      atm_bias: 'PE_FLOOR' | 'CE_CAP' | 'NEUTRAL'
+      atm_bias_label: human readable
+      atm_bias_color: 'EMERALD' | 'RED' | 'GRAY'
+    """
+    if not atm_snapshot or cmp <= 0:
+        return {"atm_bias": None, "atm_bias_label": None, "atm_bias_color": None,
+                "atm_strike": None, "atm_ce_oi": 0, "atm_pe_oi": 0}
+
+    # Find ATM strike — nearest to CMP
+    strikes = list(atm_snapshot.keys())
+    if not strikes:
+        return {"atm_bias": None, "atm_bias_label": None, "atm_bias_color": None,
+                "atm_strike": None, "atm_ce_oi": 0, "atm_pe_oi": 0}
+
+    atm_strike = min(strikes, key=lambda s: abs(s - cmp))
+    ce_oi = atm_snapshot[atm_strike].get("ce_oi", 0)
+    pe_oi = atm_snapshot[atm_strike].get("pe_oi", 0)
+
+    if pe_oi > ce_oi * 1.2:
+        bias = "PE_FLOOR"
+        label = "🟢 PE Floor"
+        color = "EMERALD"
+    elif ce_oi > pe_oi * 1.2:
+        bias = "CE_CAP"
+        label = "🔴 CE Cap"
+        color = "RED"
+    else:
+        bias = "NEUTRAL"
+        label = "⚪ Neutral"
+        color = "GRAY"
+
+    return {
+        "atm_bias":       bias,
+        "atm_bias_label": label,
+        "atm_bias_color": color,
+        "atm_strike":     atm_strike,
+        "atm_ce_oi":      ce_oi,
+        "atm_pe_oi":      pe_oi,
+    }
+
+
 def get_signal_log(date: str = None):
     global _signal_cache, _signal_cache_time
 
@@ -201,6 +251,30 @@ def get_signal_log(date: str = None):
     for r in (cpr_result.data or []):
         cpr_map[r["symbol"]] = r
 
+    # ── Step 5b: Fetch latest options snapshot for ATM bias ───────────────────
+    # Build strike → {ce_oi, pe_oi} map per symbol from latest snapshot
+    atm_data: dict = defaultdict(dict)  # sym → {strike: {ce_oi, pe_oi}}
+    try:
+        options_latest = supabase.from_("oi_snapshots")\
+            .select("symbol, strike, option_type, oi")\
+            .eq("timestamp", ts_latest)\
+            .in_("option_type", ["CE", "PE"])\
+            .limit(10000)\
+            .execute()
+        for r in (options_latest.data or []):
+            sym    = r["symbol"]
+            strike = float(r["strike"])
+            oi     = int(r["oi"] or 0)
+            opt    = r["option_type"]
+            if strike not in atm_data[sym]:
+                atm_data[sym][strike] = {"ce_oi": 0, "pe_oi": 0}
+            if opt == "CE":
+                atm_data[sym][strike]["ce_oi"] += oi
+            else:
+                atm_data[sym][strike]["pe_oi"] += oi
+    except Exception as e:
+        print(f"[SIGNAL_LOG] ATM bias fetch failed: {e}")
+
     # ── Step 6: Get UOA signals ───────────────────────────────────────────────
     uoa_map: dict = defaultdict(list)
     uoa_fetch_ok = False
@@ -209,7 +283,7 @@ def get_signal_log(date: str = None):
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor() as executor:
             future = executor.submit(get_uoa, date=today)
-            uoa_data = future.result(timeout=20)  # increased from 8s
+            uoa_data = future.result(timeout=20)
         for sig in uoa_data.get("signals", []):
             if sig.get("score", 0) >= 3:
                 uoa_map[sig["symbol"]].append(sig)
@@ -253,7 +327,7 @@ def get_signal_log(date: str = None):
         # ── Persistence — tracks current run start, resets on signal flip ────
         persistence    = 0
         prev_signal    = None
-        run_start_ts   = None   # when the current consecutive run started
+        run_start_ts   = None
         first_seen_ts  = ts_latest
 
         for ts in timestamps:
@@ -267,9 +341,8 @@ def get_signal_log(date: str = None):
             if s == signal_type:
                 persistence += 1
                 if prev_signal != signal_type:
-                    # Signal just started or restarted after a flip — reset run start
                     run_start_ts = ts
-                first_seen_ts = run_start_ts  # always reflects current run
+                first_seen_ts = run_start_ts
 
             prev_signal = s
 
@@ -289,6 +362,9 @@ def get_signal_log(date: str = None):
                 cpr_position = "Below CPR"
             else:
                 cpr_position = "Inside CPR"
+
+        # ── ATM OI Bias ───────────────────────────────────────────────────────
+        atm_bias_data = _get_atm_bias(atm_data.get(sym, {}), cmp)
 
         # Options confirmation
         uoa_signals  = uoa_map.get(sym, [])
@@ -340,6 +416,13 @@ def get_signal_log(date: str = None):
             "trade_range":          walls.get("trade_range"),
             "trade_range_pct":      walls.get("trade_range_pct"),
             "range_label":          walls.get("range_label"),
+            # ATM OI Bias — new fields
+            "atm_bias":        atm_bias_data.get("atm_bias"),
+            "atm_bias_label":  atm_bias_data.get("atm_bias_label"),
+            "atm_bias_color":  atm_bias_data.get("atm_bias_color"),
+            "atm_strike":      atm_bias_data.get("atm_strike"),
+            "atm_ce_oi":       atm_bias_data.get("atm_ce_oi"),
+            "atm_pe_oi":       atm_bias_data.get("atm_pe_oi"),
         }
 
     # ── Step 8: Sort by conviction score ─────────────────────────────────────
