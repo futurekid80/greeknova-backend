@@ -9,10 +9,6 @@ from commoditynova.mcx_scheduler import start_mcx_scheduler
 from commoditynova.mcx_router import router as mcx_router
 from commoditynova.mcx_oi_map_router import router as mcx_oi_map_router
 
-# ── CommodityNova routes ───────────────────────────────────────────────────
-app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
-app.include_router(mcx_oi_map_router, prefix="/mcx", tags=["MCX"])
-# ──────────────────────────────────────────────────────────────────────────
 
 INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
 TOP30 = [
@@ -618,4 +614,5 @@ def oi_walls_detail(symbol: str):
 
 # ── CommodityNova routes ───────────────────────────────────────────────────
 app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
+app.include_router(mcx_oi_map_router, prefix="/mcx", tags=["MCX"])
 # ──────────────────────────────────────────────────────────────────────────
