@@ -325,7 +325,33 @@ def get_signal_log(date: str = None):
     for r in (cpr_result.data or []):
         cpr_map[r["symbol"]] = r
 
-    # ── Step 5b: Fetch latest options snapshot for ATM bias ───────────────────
+    # ── Step 5b: Fetch historical volume for multi-day comparison ───────────────
+    # Single query: last 5 days max FUT volume per symbol
+    # vol_rank = how many of last 5 days today's volume exceeds
+    hist_vol_map: dict = {}  # sym -> [vol_day1, vol_day2, ...] sorted recent first
+    try:
+        from datetime import timedelta
+        # Get last 5 trading dates before today
+        hist_start = (datetime.now(timezone.utc) - timedelta(days=10)).strftime('%Y-%m-%d')
+        hist_rows = supabase.from_("oi_snapshots")            .select("symbol, volume, timestamp")            .eq("option_type", "FUT")            .gte("timestamp", f"{hist_start}T00:00:00+00:00")            .lt("timestamp",  f"{today}T00:00:00+00:00")            .limit(10000)            .execute()
+        # Build sym -> {date -> max_volume}
+        from collections import defaultdict
+        sym_date_vol: dict = defaultdict(lambda: defaultdict(int))
+        for r in (hist_rows.data or []):
+            sym = r["symbol"]
+            date_str = str(r["timestamp"])[:10]
+            vol = int(r["volume"] or 0)
+            if vol > sym_date_vol[sym][date_str]:
+                sym_date_vol[sym][date_str] = vol
+        # Convert to sorted list (most recent first, last 5 days)
+        for sym, date_vols in sym_date_vol.items():
+            sorted_vols = [v for _, v in sorted(date_vols.items(), reverse=True)][:5]
+            hist_vol_map[sym] = sorted_vols
+        print(f"[SIGNAL_LOG] Historical volume loaded for {len(hist_vol_map)} symbols")
+    except Exception as e:
+        print(f"[SIGNAL_LOG] Historical volume fetch failed: {e}")
+
+    # ── Step 5c: Fetch latest options snapshot for ATM bias ───────────────────
     # Build strike → {ce_oi, pe_oi} map per symbol from latest snapshot
     atm_data: dict = defaultdict(dict)  # sym → {strike: {ce_oi, pe_oi}}
     try:
@@ -440,6 +466,27 @@ def get_signal_log(date: str = None):
         # ── ATM OI Bias ───────────────────────────────────────────────────────
         atm_bias_data = _get_atm_bias(atm_data.get(sym, {}), cmp)
 
+
+        # ── Multi-day volume rank ─────────────────────────────────────────────
+        hist_vols = hist_vol_map.get(sym, [])
+        vol_rank = 0
+        for prev_vol in hist_vols:
+            if prev_vol > 0 and vol_latest > prev_vol:
+                vol_rank += 1
+            else:
+                break  # must be consecutive days
+        if vol_rank >= 5:
+            vol_rank_label = "📊 Vol > 5D"
+            vol_rank_color = "PURPLE"
+        elif vol_rank >= 3:
+            vol_rank_label = f"📊 Vol > {vol_rank}D"
+            vol_rank_color = "EMERALD"
+        elif vol_rank >= 1:
+            vol_rank_label = f"📊 Vol > {vol_rank}D"
+            vol_rank_color = "AMBER"
+        else:
+            vol_rank_label = ""
+            vol_rank_color = ""
         # Options confirmation
         uoa_signals  = uoa_map.get(sym, [])
         options_conf = _get_uoa_confirmation(uoa_signals, signal_type)
@@ -484,6 +531,9 @@ def get_signal_log(date: str = None):
             "options_alignment_color": options_conf.get("alignment_color"),
             "options_signal":       options_conf.get("best_signal"),
             "conv_stars":           options_conf.get("conv_stars", ""),
+            "vol_rank":             vol_rank,
+            "vol_rank_label":       vol_rank_label,
+            "vol_rank_color":       vol_rank_color,
             "ce_wall":              walls.get("ce_wall"),
             "pe_wall":              walls.get("pe_wall"),
             "ce_wall_oi_L":         walls.get("ce_wall_oi_L"),
