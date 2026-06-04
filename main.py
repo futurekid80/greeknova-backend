@@ -225,7 +225,7 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
     scheduler.add_job(
         lambda: __import__('api.cpr', fromlist=['compute_and_store_cpr']).compute_and_store_cpr(),
-        "cron", hour=16, minute=5, timezone="Asia/Kolkata", id="eod_cpr_compute",
+        "cron", hour=16, minute=45, timezone="Asia/Kolkata", id="eod_cpr_compute",
         misfire_grace_time=600
     )
     scheduler.add_job(keepalive_ping, "interval", minutes=10, id="keepalive")
