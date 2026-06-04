@@ -477,9 +477,9 @@ def cpr_scanner():
     return get_cpr_scanner()
 
 @app.get("/cpr-compute")
-def cpr_compute():
+def cpr_compute(trade_date: str = None):
     from api.cpr import compute_and_store_cpr
-    return compute_and_store_cpr()
+    return compute_and_store_cpr(trade_date=trade_date)
 
 @app.get("/signal-log")
 def signal_log(date: str = None, symbol: str = None):
