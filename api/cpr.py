@@ -155,9 +155,9 @@ def _get_uoa_signals_cached() -> dict:
 
 def compute_and_store_cpr(trade_date: str = None):
     """
-    EOD CPR computation — uses kite.ohlc() for official NSE closing price.
+    EOD CPR computation — uses kite.historical_data() for official NSE VWAP close.
+    Fetches last completed daily candle — same data as TradingView/GoCharting.
     Called at 4:30 PM after market fully settles.
-    kite.ohlc() returns the current day's OHLC with final close — reliable and fast.
     """
     supabase = get_supabase()
     try:
@@ -177,32 +177,58 @@ def compute_and_store_cpr(trade_date: str = None):
             next_day += timedelta(days=1)
         trade_date = next_day.isoformat()
 
-    print(f"[CPR] Fetching OHLC via kite.ohlc() for trade_date: {trade_date}")
+    print(f"[CPR] Fetching OHLC via historical_data() for trade_date: {trade_date}")
 
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
-    # ── Fetch OHLC in batches using kite.ohlc() ───────────────────────────────
-    # kite.ohlc() returns today's official OHLC including final close at 3:30 PM
-    # This is the same data source as Zerodha/TradingView/GoCharting
-    batch_size = 50
-    for i in range(0, len(all_symbols), batch_size):
-        batch = all_symbols[i:i + batch_size]
-        nse_keys = [ALL_NSE_MAP[s] for s in batch if s in ALL_NSE_MAP]
+    # ── Build instrument token map ────────────────────────────────────────────
+    # Index tokens are hardcoded, stock tokens fetched from instruments list
+    INDEX_TOKENS = {
+        "NIFTY":    256265,
+        "BANKNIFTY": 260105,
+        "FINNIFTY":  257801,
+    }
+    token_map: dict = {**INDEX_TOKENS}
+    try:
+        instruments = kite.instruments("NSE")
+        for inst in instruments:
+            if inst["tradingsymbol"] in STOCKS:
+                token_map[inst["tradingsymbol"]] = inst["instrument_token"]
+        print(f"[CPR] Got {len(token_map)} instrument tokens")
+    except Exception as e:
+        print(f"[CPR] Instruments fetch failed: {e}")
+
+    # ── Fetch OHLC via historical_data — last completed daily candle ──────────
+    # historical_data with interval="day" returns official VWAP-based close
+    # candles[-1] is always the last completed candle (today if after 3:30 PM)
+    from_date = (today - timedelta(days=10)).isoformat()
+    to_date   = today.isoformat()
+
+    for sym in all_symbols:
+        token = token_map.get(sym)
+        if not token:
+            print(f"[CPR] No token for {sym}, skipping")
+            continue
         try:
-            ohlc_data = kite.ohlc(nse_keys)
-            for sym in batch:
-                nse_key = ALL_NSE_MAP.get(sym)
-                if nse_key and nse_key in ohlc_data:
-                    d = ohlc_data[nse_key]
-                    ohlc_map[sym] = {
-                        "high":  float(d["ohlc"]["high"]),
-                        "low":   float(d["ohlc"]["low"]),
-                        "close": float(d["ohlc"]["close"]),
-                    }
+            candles = kite.historical_data(
+                instrument_token=token,
+                from_date=from_date,
+                to_date=to_date,
+                interval="day",
+                continuous=False,
+                oi=False,
+            )
+            if candles:
+                c = candles[-1]  # last completed candle = today after 3:30 PM
+                ohlc_map[sym] = {
+                    "high":  float(c["high"]),
+                    "low":   float(c["low"]),
+                    "close": float(c["close"]),
+                }
+            time.sleep(0.05)
         except Exception as e:
-            print(f"[CPR] OHLC batch {i}: {e}")
-        time.sleep(0.1)
+            print(f"[CPR] historical_data {sym}: {e}")
 
     print(f"[CPR] Got OHLC for {len(ohlc_map)} symbols")
 
