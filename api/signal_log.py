@@ -59,6 +59,38 @@ SIGNAL_LABELS = {
 }
 
 
+def _get_conv_stars(sig: dict, fut_signal_type: str) -> str:
+    """
+    Star rating for HIGH CONV based on how close the writer is to CMP.
+    PUT WRITING confirming LONG BUILDUP:
+      🌟🌟🌟 = put writing ABOVE CMP (extreme bullish conviction)
+      🌟🌟   = within 1 strike of ATM (gold standard)
+      🌟     = within 2 strikes of ATM (standard)
+      None   = beyond 2 strikes (noise, no HIGH CONV)
+    CE WRITING confirming SHORT BUILDUP: mirror logic.
+    """
+    strikes_from_atm = sig.get("strikes_from_atm", 99)
+    cmp = sig.get("cmp", 0)
+    strike = sig.get("strike", 0)
+    opt_type = sig.get("option_type", "")
+    sig_type = sig.get("signal_type", "")
+
+    # Check if writer is on the "strong" side — above CMP for PE, below CMP for CE
+    is_extreme = (
+        (opt_type == "PE" and strike > cmp and sig_type == "PUT_WRITING") or
+        (opt_type == "CE" and strike < cmp and sig_type == "CALL_WRITING")
+    )
+
+    if is_extreme:
+        return "🌟🌟🌟"
+    elif strikes_from_atm <= 1:
+        return "🌟🌟"
+    elif strikes_from_atm <= 2:
+        return "🌟"
+    else:
+        return ""  # too far — no HIGH CONV
+
+
 def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
     if not uoa_signals:
         return {"has_confirmation": False, "confirms": None, "best_signal": None}
@@ -72,30 +104,49 @@ def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
         score = sig.get("score", 0)
         strike = sig.get("strike", 0)
         opt_type = sig.get("option_type", "")
+        strikes_from_atm = sig.get("strikes_from_atm", 99)
 
         enriched = {
-            "signal_type":  sig_type,
-            "label":        SIGNAL_LABELS.get(sig_type, sig_type),
-            "strike":       strike,
-            "option_type":  opt_type,
-            "score":        score,
-            "bias":         sig.get("bias", ""),
+            "signal_type":      sig_type,
+            "label":            SIGNAL_LABELS.get(sig_type, sig_type),
+            "strike":           strike,
+            "option_type":      opt_type,
+            "score":            score,
+            "bias":             sig.get("bias", ""),
+            "strikes_from_atm": strikes_from_atm,
+            "otm_distance_pct": sig.get("otm_distance_pct", 0),
+            "cmp":              sig.get("cmp", 0),
         }
 
         if sig_type in confirming:
-            if best_confirming is None or score > best_confirming["score"]:
+            # Only near-ATM signals qualify for confirmation (within 2 strikes)
+            stars = _get_conv_stars(sig, fut_signal_type)
+            if stars == "":
+                # Too far OTM — treat as contradicting (noise)
+                if best_contradicting is None or score > best_contradicting.get("score", 0):
+                    best_contradicting = enriched
+                continue
+            enriched["conv_stars"] = stars
+            # Prefer closer strikes: sort by stars desc, then score desc
+            star_rank = {"🌟🌟🌟": 3, "🌟🌟": 2, "🌟": 1}.get(stars, 0)
+            existing_rank = {"🌟🌟🌟": 3, "🌟🌟": 2, "🌟": 1}.get(
+                best_confirming.get("conv_stars", "") if best_confirming else "", 0)
+            if best_confirming is None or star_rank > existing_rank or (
+                    star_rank == existing_rank and score > best_confirming["score"]):
                 best_confirming = enriched
         else:
-            if best_contradicting is None or score > best_contradicting["score"]:
+            if best_contradicting is None or score > best_contradicting.get("score", 0):
                 best_contradicting = enriched
 
     if best_confirming:
+        stars = best_confirming.get("conv_stars", "🌟")
         return {
             "has_confirmation": True,
             "confirms": True,
             "best_signal": best_confirming,
-            "alignment": "✅ Confirms",
+            "alignment": f"✅ Confirms",
             "alignment_color": "EMERALD",
+            "conv_stars": stars,
         }
     elif best_contradicting:
         return {
@@ -104,6 +155,7 @@ def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
             "best_signal": best_contradicting,
             "alignment": "⚠️ Contradicts",
             "alignment_color": "AMBER",
+            "conv_stars": "",
         }
     else:
         return {"has_confirmation": False, "confirms": None, "best_signal": None}
@@ -433,6 +485,7 @@ def get_signal_log(date: str = None):
             "options_alignment":    options_conf.get("alignment"),
             "options_alignment_color": options_conf.get("alignment_color"),
             "options_signal":       options_conf.get("best_signal"),
+            "conv_stars":           options_conf.get("conv_stars", ""),
             "ce_wall":              walls.get("ce_wall"),
             "pe_wall":              walls.get("pe_wall"),
             "ce_wall_oi_L":         walls.get("ce_wall_oi_L"),
