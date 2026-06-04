@@ -47,13 +47,6 @@ STOCK_NSE_MAP = {
 }
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
 
-# Instrument tokens for indices (needed for historical_data)
-INDEX_TOKENS = {
-    "NIFTY":    256265,
-    "BANKNIFTY": 260105,
-    "FINNIFTY":  257801,
-}
-
 # ── In-memory cache ───────────────────────────────────────────────────────────
 _cpr_cache: dict = {}
 _cpr_cache_time: float = 0
@@ -162,9 +155,9 @@ def _get_uoa_signals_cached() -> dict:
 
 def compute_and_store_cpr(trade_date: str = None):
     """
-    EOD CPR computation — uses kite.historical_data() for official NSE closing price.
-    This matches Zerodha/TradingView/KGS exactly since it uses the weighted avg close.
-    Called at 4:00 PM after market fully settles.
+    EOD CPR computation — uses kite.ohlc() for official NSE closing price.
+    Called at 4:30 PM after market fully settles.
+    kite.ohlc() returns the current day's OHLC with final close — reliable and fast.
     """
     supabase = get_supabase()
     try:
@@ -184,110 +177,34 @@ def compute_and_store_cpr(trade_date: str = None):
             next_day += timedelta(days=1)
         trade_date = next_day.isoformat()
 
-    # ── Find last trading day for OHLC ────────────────────────────────────────
-    # Walk back up to 7 days skipping weekends
-    # Actual holiday detection happens naturally — if OHLC is empty we go back further
-    ohlc_date = today
-    for _ in range(7):
-        if ohlc_date.weekday() < 5:
-            break
-        ohlc_date -= timedelta(days=1)
-    # If today is a weekday but holiday, the historical_data call returns empty
-    # In that case walk back one more day
-    from_date = ohlc_date.isoformat()
-    to_date   = ohlc_date.isoformat()
-    print(f"[CPR] OHLC date: {from_date} | CPR trade_date: {trade_date}")
+    print(f"[CPR] Fetching OHLC via kite.ohlc() for trade_date: {trade_date}")
 
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
-    # ── Build instrument token map for stocks ─────────────────────────────────
-    token_map: dict = {}
-    try:
-        instruments = kite.instruments("NSE")
-        for inst in instruments:
-            if inst["tradingsymbol"] in STOCKS:
-                token_map[inst["tradingsymbol"]] = inst["instrument_token"]
-        token_map.update(INDEX_TOKENS)
-        print(f"[CPR] Got {len(token_map)} instrument tokens")
-    except Exception as e:
-        print(f"[CPR] Instruments fetch failed: {e}")
-        # If no data found (holiday), try previous weekday
-    if not ohlc_map:
-        prev_date = ohlc_date - timedelta(days=1)
-        while prev_date.weekday() >= 5:
-            prev_date -= timedelta(days=1)
-        from_date = prev_date.isoformat()
-        to_date   = prev_date.isoformat()
-        print(f"[CPR] No data for {ohlc_date}, retrying with {from_date}")
-        for sym in all_symbols:
-            token = token_map.get(sym)
-            if not token:
-                continue
-            try:
-                records = kite.historical_data(
-                    instrument_token=token,
-                    from_date=from_date,
-                    to_date=to_date,
-                    interval="day",
-                    continuous=False,
-                    oi=False,
-                )
-                if records:
-                    r = records[-1]
-                    ohlc_map[sym] = {
-                        "high":  float(r["high"]),
-                        "low":   float(r["low"]),
-                        "close": float(r["close"]),
-                    }
-                time.sleep(0.05)
-            except Exception as e:
-                print(f"[CPR] Retry historical_data {sym}: {e}")
-        print(f"[CPR] Retry got OHLC for {len(ohlc_map)} symbols")
-
-    # ── Fetch OHLC via historical_data (official NSE close) ───────────────────
-    # historical_data returns official weighted avg close — matches Zerodha charts
-
-    for sym in all_symbols:
-        token = token_map.get(sym)
-        if not token:
-            print(f"[CPR] No token for {sym}, skipping")
-            continue
+    # ── Fetch OHLC in batches using kite.ohlc() ───────────────────────────────
+    # kite.ohlc() returns today's official OHLC including final close at 3:30 PM
+    # This is the same data source as Zerodha/TradingView/GoCharting
+    batch_size = 50
+    for i in range(0, len(all_symbols), batch_size):
+        batch = all_symbols[i:i + batch_size]
+        nse_keys = [ALL_NSE_MAP[s] for s in batch if s in ALL_NSE_MAP]
         try:
-            records = kite.historical_data(
-                instrument_token=token,
-                from_date=from_date,
-                to_date=to_date,
-                interval="day",
-                continuous=False,
-                oi=False,
-            )
-            if records:
-                r = records[-1]  # get today's candle
-                ohlc_map[sym] = {
-                    "high":  float(r["high"]),
-                    "low":   float(r["low"]),
-                    "close": float(r["close"]),
-                }
-            time.sleep(0.05)  # avoid rate limiting
-        except Exception as e:
-            print(f"[CPR] historical_data {sym}: {e}")
-            # Fallback to ohlc() for this symbol
-            try:
+            ohlc_data = kite.ohlc(nse_keys)
+            for sym in batch:
                 nse_key = ALL_NSE_MAP.get(sym)
-                if nse_key:
-                    ohlc_data = kite.ohlc([nse_key])
-                    if nse_key in ohlc_data:
-                        d = ohlc_data[nse_key]
-                        ohlc_map[sym] = {
-                            "high":  float(d["ohlc"]["high"]),
-                            "low":   float(d["ohlc"]["low"]),
-                            "close": float(d["ohlc"]["close"]),
-                        }
-            except Exception as e2:
-                print(f"[CPR] Fallback OHLC {sym}: {e2}")
+                if nse_key and nse_key in ohlc_data:
+                    d = ohlc_data[nse_key]
+                    ohlc_map[sym] = {
+                        "high":  float(d["ohlc"]["high"]),
+                        "low":   float(d["ohlc"]["low"]),
+                        "close": float(d["ohlc"]["close"]),
+                    }
+        except Exception as e:
+            print(f"[CPR] OHLC batch {i}: {e}")
+        time.sleep(0.1)
 
-    print(f"[CPR] Got OHLC for {len(ohlc_map)} symbols via historical_data")
+    print(f"[CPR] Got OHLC for {len(ohlc_map)} symbols")
 
     # ── Fetch previous CPR for trend calculation ──────────────────────────────
     prev_cpr_map: dict = {}
@@ -418,45 +335,31 @@ def update_cpr_status():
     _cpr_cache = {}
     _cpr_cache_time = 0
 
+
 def _get_nearest_signal(sym_signals: list, cmp: float) -> dict | None:
-    """
-    Return the UOA signal with strike nearest to CMP — within 2 strikes from ATM.
-    Strike interval is auto-detected from available signals.
-    Falls back to highest score if nothing within 2 strikes.
-    """
     if not sym_signals:
         return None
-
-    # Filter score >= 3
     qualified = [s for s in sym_signals if s.get("score", 0) >= 3]
     if not qualified:
         return None
-
-    # Auto-detect strike interval from available strikes
     strikes = sorted(set(s.get("strike", 0) for s in qualified if s.get("strike", 0) > 0))
     if len(strikes) >= 2:
         intervals = [strikes[i+1] - strikes[i] for i in range(len(strikes)-1)]
-        strike_interval = min(intervals)  # use smallest gap as the interval
+        strike_interval = min(intervals)
     else:
-        # Fallback — estimate from CMP
         if cmp > 5000:   strike_interval = 100
         elif cmp > 1000: strike_interval = 50
         elif cmp > 500:  strike_interval = 20
         elif cmp > 100:  strike_interval = 5
         else:            strike_interval = 2.5
-
-    # Add distance fields to each signal
     for s in qualified:
         strike = s.get("strike", 0)
         abs_distance = abs(strike - cmp)
-        s["otm_distance_pct"]    = round(abs_distance / cmp * 100, 2) if cmp > 0 else 99
-        s["strikes_from_atm"]    = round(abs_distance / strike_interval, 1) if strike_interval > 0 else 99
-
-    # Only return if within 2 strikes of ATM — no fallback to far OTM
+        s["otm_distance_pct"]  = round(abs_distance / cmp * 100, 2) if cmp > 0 else 99
+        s["strikes_from_atm"]  = round(abs_distance / strike_interval, 1) if strike_interval > 0 else 99
     near_money = [s for s in qualified if s["strikes_from_atm"] <= 2.0]
     if near_money:
         return min(near_money, key=lambda s: s["strikes_from_atm"])
-
     return None
 
 
@@ -473,8 +376,6 @@ def get_cpr_scanner():
     now_ist = datetime.now(ist)
     today = now_ist.date().isoformat()
 
-    # After 4:30 PM show tomorrow's pre-computed CPR
-    # Before 4:30 PM show today's CPR
     if now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
         from datetime import timedelta
         next_day = now_ist.date() + timedelta(days=1)
@@ -505,7 +406,6 @@ def get_cpr_scanner():
 
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
-        # CPR holding strength score — rewards stocks holding firmly above/below CPR
         cpr_status = row.get("cpr_status")
         holding_score = {
             "HOLDING_ABOVE": 3,
@@ -609,7 +509,6 @@ def get_cpr_scanner():
 
     _cpr_cache = result
     _cpr_cache_time = time_module.time()
-
     return result
 
 
@@ -626,7 +525,7 @@ def _get_cpr_live():
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
-    batch_size = 20
+    batch_size = 50
     for i in range(0, len(all_symbols), batch_size):
         batch = all_symbols[i:i + batch_size]
         nse_keys = [ALL_NSE_MAP[s] for s in batch if s in ALL_NSE_MAP]
@@ -644,7 +543,7 @@ def _get_cpr_live():
                     }
         except Exception as e:
             print(f"[CPR] Live OHLC batch {i}: {e}")
-        time.sleep(0.2)
+        time.sleep(0.1)
 
     cmp_rows = []
     try:
@@ -684,7 +583,6 @@ def _get_cpr_live():
         label    = get_cpr_label(cpr["width_pct"])
         position = get_cpr_position(cmp, cpr["tc"], cpr["bc"])
 
-        # CPR holding strength — in live mode derive from position
         live_status = get_cpr_status(cmp, cpr["tc"], cpr["bc"])
         holding_score = {
             "HOLDING_ABOVE": 3,
