@@ -225,24 +225,26 @@ def get_signal_log(date: str = None):
 
     # ── Step 3: Build per-symbol, per-timestamp maps ──────────────────────────
     from collections import defaultdict
-    # Pick expiry with highest total OI — avoids picking far-month low-OI contracts
-    expiry_oi: dict = {}
+    # Pick nearest valid expiry = smallest expiry date >= today
+    # This correctly identifies near-month contract for each symbol
+    from datetime import date as _date
+    _today = _date.today().isoformat()
+    nearest_expiry: dict = {}
     for r in all_fut_rows:
         sym    = r["symbol"]
         expiry = r.get("expiry", "")
         if not expiry:
             continue
-        if sym not in expiry_oi:
-            expiry_oi[sym] = {}
-        expiry_oi[sym][expiry] = expiry_oi[sym].get(expiry, 0) + int(r["oi"] or 0)
-    nearest_expiry: dict = {}
-    for sym, exp_map in expiry_oi.items():
-        nearest_expiry[sym] = max(exp_map, key=lambda e: exp_map[e])
+        expiry_str = str(expiry)  # convert date object to string for comparison
+        if expiry_str < _today:   # skip expired contracts
+            continue
+        if sym not in nearest_expiry or expiry_str < nearest_expiry[sym]:
+            nearest_expiry[sym] = expiry_str
 
     fut_data: dict = defaultdict(dict)
     for r in all_fut_rows:
         sym    = r["symbol"]
-        expiry = r.get("expiry", "")
+        expiry = str(r.get("expiry", ""))  # convert date to string
         if expiry != nearest_expiry.get(sym):
             continue
         ts = r["timestamp"]
