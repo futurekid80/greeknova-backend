@@ -214,6 +214,14 @@ def _get_atm_bias(atm_snapshot: dict, cmp: float) -> dict:
 def get_signal_log(date: str = None):
     global _signal_cache, _signal_cache_time
 
+    # ── Post-market: serve EOD snapshot indefinitely until next day ───────────
+    if not is_market_hours() and _signal_cache and _signal_cache.get("signals"):
+        today_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        cache_date = _signal_cache.get("date", "")
+        if cache_date == today_utc or not date:
+            # Return frozen EOD snapshot — no recompute needed
+            return {**_signal_cache, "is_eod_snapshot": True}
+
     cache_ttl = 60 if is_market_hours() else 300
     if _signal_cache and (time_module.time() - _signal_cache_time) < cache_ttl:
         return _signal_cache
