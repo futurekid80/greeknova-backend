@@ -220,7 +220,19 @@ def compute_and_store_cpr(trade_date: str = None):
                 oi=False,
             )
             if candles:
-                c = candles[-1]  # last completed candle = today after 3:30 PM
+                # Use the last candle whose date matches today
+                # If NSE hasn't finalized today's candle yet, fall back to previous day
+                import pytz as _pytz
+                _ist = _pytz.timezone('Asia/Kolkata')
+                _today_str = datetime.now(_ist).date().isoformat()
+                c = candles[-1]
+                # Check if candle date matches today
+                candle_date = str(c["date"])[:10] if c.get("date") else ""
+                if candle_date != _today_str and len(candles) >= 2:
+                    # Today's candle not settled yet, use previous day
+                    c = candles[-2]
+                elif candle_date != _today_str:
+                    c = candles[-1]
                 ohlc_map[sym] = {
                     "high":  float(c["high"]),
                     "low":   float(c["low"]),
