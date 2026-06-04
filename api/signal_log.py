@@ -245,21 +245,11 @@ def get_signal_log(date: str = None):
         return {"signals": [], "total": 0, "date": today, "snapshots": 0,
                 "message": "Need at least 2 snapshots — check back after 9:20 AM"}
 
-    # ── Skip first snapshot if it has near-zero OI (exchange not populated yet) ─
-    # At 9:15-9:18 AM, exchange OI feeds are often incomplete
-    # Use the first snapshot where NIFTY FUT OI > 100,000 as the open baseline
-    ts_open = timestamps[0]
-    for ts in timestamps[:5]:  # check first 5 snapshots only
-        check = supabase.from_("oi_snapshots")\
-            .select("oi")\
-            .eq("option_type", "FUT")\
-            .eq("symbol", "NIFTY")\
-            .eq("timestamp", ts)\
-            .limit(1).execute()
-        if check.data and int(check.data[0].get("oi", 0)) > 100000:
-            ts_open = ts
-            break
-
+    # ── Use second snapshot as open baseline ──────────────────────────────────────
+    # First snapshot (9:18 AM) has near-zero volume — exchange feeds not fully
+    # populated yet. Second snapshot (9:23 AM) gives stable OI + volume baseline.
+    # This prevents artificial 10,000%+ volume surge numbers.
+    ts_open     = timestamps[1] if len(timestamps) >= 2 else timestamps[0]
     ts_latest   = timestamps[-1]
     total_snaps = len(timestamps)
 
