@@ -21,10 +21,18 @@ def get_price_context(cmp, day_high, day_low):
     pct_from_high = round((day_high - cmp) / day_high * 100, 2)
     pct_from_low  = round((cmp - day_low) / day_low * 100, 2)
     range_pos = (cmp - day_low) / day_range * 100
+
+    # At extremes
     if pct_from_high <= 0.3:
         return {"label": "At Day High", "color": "EMERALD"}
     elif pct_from_low <= 0.3:
         return {"label": "At Day Low", "color": "RED"}
+    # If fallen more than 1.5% from high — fading momentum is the dominant story
+    elif pct_from_high > 1.5:
+        return {"label": f"Off High -{pct_from_high}%", "color": "AMBER"}
+    # If recovered more than 1.5% from low — recovery is the dominant story
+    elif pct_from_low > 1.5 and range_pos <= 40:
+        return {"label": f"Off Low +{pct_from_low}%", "color": "CYAN"}
     elif range_pos >= 60:
         return {"label": f"Off High -{pct_from_high}%", "color": "AMBER"}
     elif range_pos <= 40:
