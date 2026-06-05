@@ -486,6 +486,11 @@ def signal_log(date: str = None, symbol: str = None):
     from api.signal_log import get_signal_log
     return get_signal_log(date)
 
+@app.get("/vol-oi-breakout")
+async def vol_oi_breakout_endpoint():
+    from api.vol_oi_breakout import get_vol_oi_breakout
+    return get_vol_oi_breakout(supabase)
+
 @app.get("/oi-heatmap/{symbol}")
 def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
     from api.oi_heatmap import get_oi_heatmap
