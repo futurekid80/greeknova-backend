@@ -59,7 +59,7 @@ SIGNAL_LABELS = {
 }
 
 
-def _get_conv_stars(sig: dict, fut_signal_type: str) -> str:
+def _get_conv_stars(sig: dict, fut_signal_type: str, cmp: float = 0) -> str:
     """
     Star rating for HIGH CONV based on how close the writer is to CMP.
     PUT WRITING confirming LONG BUILDUP:
@@ -68,12 +68,34 @@ def _get_conv_stars(sig: dict, fut_signal_type: str) -> str:
       🌟     = within 2 strikes of ATM (standard)
       None   = beyond 2 strikes (noise, no HIGH CONV)
     CE WRITING confirming SHORT BUILDUP: mirror logic.
+
+    cmp is passed explicitly from FUT data — never rely on sig["cmp"] which may be 0.
+    strikes_from_atm is recomputed here using strike interval detection.
     """
-    strikes_from_atm = sig.get("strikes_from_atm", 99)
-    cmp = sig.get("cmp", 0)
-    strike = sig.get("strike", 0)
+    strike   = sig.get("strike", 0)
     opt_type = sig.get("option_type", "")
     sig_type = sig.get("signal_type", "")
+
+    # Use passed CMP — fallback to sig["cmp"] only if not provided
+    if not cmp:
+        cmp = sig.get("cmp", 0)
+    if not cmp or not strike:
+        return ""  # can't compute without CMP
+
+    # Detect strike interval from symbol name (NIFTY=50, BANKNIFTY=100, stocks=5)
+    sym = sig.get("symbol", "")
+    if "NIFTY" in sym and "BANK" in sym:
+        interval = 100
+    elif "NIFTY" in sym:
+        interval = 50
+    elif "FINNIFTY" in sym:
+        interval = 50
+    else:
+        interval = 5  # most F&O stocks use 5pt intervals
+
+    # Recompute strikes_from_atm using actual CMP and strike
+    atm = round(cmp / interval) * interval  # snap CMP to nearest strike
+    strikes_from_atm = abs(strike - atm) / interval
 
     # Check if writer is on the "strong" side — above CMP for PE, below CMP for CE
     is_extreme = (
@@ -91,7 +113,7 @@ def _get_conv_stars(sig: dict, fut_signal_type: str) -> str:
         return ""  # too far — no HIGH CONV
 
 
-def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
+def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str, cmp_override: float = 0) -> dict:
     if not uoa_signals:
         return {"has_confirmation": False, "confirms": None, "best_signal": None}
 
@@ -120,7 +142,9 @@ def _get_uoa_confirmation(uoa_signals: list, fut_signal_type: str) -> dict:
 
         if sig_type in confirming:
             # Only near-ATM signals qualify for confirmation (within 2 strikes)
-            stars = _get_conv_stars(sig, fut_signal_type)
+            # Pass cmp explicitly — UOA signals may not carry cmp field
+            _cmp = sig.get("cmp", 0) or cmp_override
+            stars = _get_conv_stars(sig, fut_signal_type, cmp=_cmp)
             if stars == "":
                 # Too far OTM — treat as contradicting (noise)
                 if best_contradicting is None or score > best_contradicting.get("score", 0):
@@ -489,7 +513,7 @@ def get_signal_log(date: str = None):
             vol_rank_color = ""
         # Options confirmation
         uoa_signals  = uoa_map.get(sym, [])
-        options_conf = _get_uoa_confirmation(uoa_signals, signal_type)
+        options_conf = _get_uoa_confirmation(uoa_signals, signal_type, cmp_override=cmp)
 
         import math
         conviction_score = round(
