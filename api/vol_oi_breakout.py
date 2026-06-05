@@ -1,64 +1,52 @@
 """
-vol_oi_breakout.py — Volume + OI Breakout scanner
-Finds stocks where:
-  1. Today's volume > 1.5x of 5-day average volume
-  2. FUT OI change > 2% from open
-Returns price context (at high/low/off high/off low) for conviction assessment.
+vol_oi_breakout.py - Volume + OI Breakout scanner
 """
-
 import time as time_module
 from datetime import datetime, timezone, timedelta
-from collections import defaultdict
 
-_breakout_cache: dict = {}
-_breakout_cache_time: float = 0
+_breakout_cache = {}
+_breakout_cache_time = 0.0
 
-def is_market_hours() -> bool:
-    from datetime import datetime
+def is_market_hours():
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
-    h, m = now.hour, now.minute
-    mins = h * 60 + m
-    return 555 <= mins <= 930  # 9:15 AM to 3:30 PM
+    mins = now.hour * 60 + now.minute
+    return 555 <= mins <= 930
 
-def get_price_context(cmp: float, day_high: float, day_low: float) -> dict:
-    """Determine where price is relative to day range."""
-    if day_high <= day_low:
-        return {"label": "➡️ Mid Range", "color": "GRAY", "pct": 0}
-    
+def get_price_context(cmp, day_high, day_low):
+    if day_high <= day_low or day_high == 0:
+        return {"label": "Mid Range", "color": "GRAY"}
     day_range = day_high - day_low
     pct_from_high = round((day_high - cmp) / day_high * 100, 2)
     pct_from_low  = round((cmp - day_low) / day_low * 100, 2)
-    range_position = (cmp - day_low) / day_range * 100  # 0=low, 100=high
-
+    range_pos = (cmp - day_low) / day_range * 100
     if pct_from_high <= 0.3:
-        return {"label": "🔝 At Day High", "color": "EMERALD", "pct": pct_from_high}
+        return {"label": "At Day High", "color": "EMERALD"}
     elif pct_from_low <= 0.3:
-        return {"label": "🔻 At Day Low", "color": "RED", "pct": pct_from_low}
-    elif range_position >= 60:
-        return {"label": f"📉 Off High -{pct_from_high}%", "color": "AMBER", "pct": pct_from_high}
-    elif range_position <= 40:
-        return {"label": f"📈 Off Low +{pct_from_low}%", "color": "CYAN", "pct": pct_from_low}
+        return {"label": "At Day Low", "color": "RED"}
+    elif range_pos >= 60:
+        return {"label": f"Off High -{pct_from_high}%", "color": "AMBER"}
+    elif range_pos <= 40:
+        return {"label": f"Off Low +{pct_from_low}%", "color": "CYAN"}
     else:
-        return {"label": "➡️ Mid Range", "color": "GRAY", "pct": 0}
+        return {"label": "Mid Range", "color": "GRAY"}
 
-
-def get_vol_oi_breakout(supabase) -> dict:
+def get_vol_oi_breakout(supabase):
     global _breakout_cache, _breakout_cache_time
 
-    # Cache: 5 min during market, hold EOD snapshot after close
+    # Post-market: serve EOD snapshot
     if not is_market_hours() and _breakout_cache.get("signals"):
-        return {**_breakout_cache, "is_eod_snapshot": True}
+        return dict(_breakout_cache, is_eod_snapshot=True)
 
-    cache_ttl = 300  # 5 minutes
-    if _breakout_cache and (time_module.time() - _breakout_cache_time) < cache_ttl:
+    # Cache 5 minutes
+    if _breakout_cache and (time_module.time() - _breakout_cache_time) < 300:
         return _breakout_cache
 
     try:
         today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-        # ── Step 1: Get today's FUT snapshots ────────────────────────────────
+        # Step 1: Today's FUT snapshots
         today_rows = supabase.from_("oi_snapshots")\
             .select("symbol, timestamp, oi, volume, last_price, expiry")\
             .eq("option_type", "FUT")\
@@ -68,27 +56,42 @@ def get_vol_oi_breakout(supabase) -> dict:
             .execute()
 
         if not today_rows.data:
-            return {"signals": [], "total": 0, "error": "No data"}
+            return {"signals": [], "total": 0}
 
-        # ── Step 2: Build per-symbol data ─────────────────────────────────────
-        sym_data: dict = defaultdict(lambda: {
-            "timestamps": [], "oi": [], "volume": [],
-            "prices": [], "expiry": None
-        })
-
+        # Step 2: Build per-symbol data using plain dicts
+        sym_data = {}
         for r in today_rows.data:
             sym    = r["symbol"]
-            expiry = str(r.get("expiry", ""))
-            # Use nearest expiry only
-            if sym_data[sym]["expiry"] and expiry > sym_data[sym]["expiry"]:
-                continue
-            sym_data[sym]["expiry"] = expiry
-            sym_data[sym]["timestamps"].append(r["timestamp"])
-            sym_data[sym]["oi"].append(int(r["oi"] or 0))
-            sym_data[sym]["volume"].append(int(r["volume"] or 0))
-            sym_data[sym]["prices"].append(float(r["last_price"] or 0))
+            expiry = str(r.get("expiry") or "")
+            oi     = int(r.get("oi") or 0)
+            vol    = int(r.get("volume") or 0)
+            price  = float(r.get("last_price") or 0)
+            ts     = r.get("timestamp", "")
 
-        # ── Step 3: Get 5-day historical volume ───────────────────────────────
+            if sym not in sym_data:
+                sym_data[sym] = {
+                    "expiry": expiry,
+                    "oi": [], "volume": [], "prices": [], "timestamps": []
+                }
+
+            # Keep only nearest expiry
+            cur_expiry = sym_data[sym]["expiry"]
+            if cur_expiry and expiry and expiry > cur_expiry:
+                continue
+            if expiry and expiry != cur_expiry:
+                # Found closer expiry — reset
+                sym_data[sym]["expiry"] = expiry
+                sym_data[sym]["oi"] = []
+                sym_data[sym]["volume"] = []
+                sym_data[sym]["prices"] = []
+                sym_data[sym]["timestamps"] = []
+
+            sym_data[sym]["oi"].append(oi)
+            sym_data[sym]["volume"].append(vol)
+            sym_data[sym]["prices"].append(price)
+            sym_data[sym]["timestamps"].append(ts)
+
+        # Step 3: 5-day historical volume
         hist_start = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%d')
         hist_rows = supabase.from_("oi_snapshots")\
             .select("symbol, volume, timestamp")\
@@ -99,141 +102,130 @@ def get_vol_oi_breakout(supabase) -> dict:
             .limit(5000)\
             .execute()
 
-        # Build 5-day avg volume per symbol
-        sym_date_vol: dict = defaultdict(lambda: defaultdict(int))
+        # Max volume per symbol per day
+        sym_date_vol = {}
         for r in (hist_rows.data or []):
             sym      = r["symbol"]
             date_str = str(r["timestamp"])[:10]
-            vol      = int(r["volume"] or 0)
-            if vol > sym_date_vol[sym][date_str]:
+            vol      = int(r.get("volume") or 0)
+            if sym not in sym_date_vol:
+                sym_date_vol[sym] = {}
+            if vol > sym_date_vol[sym].get(date_str, 0):
                 sym_date_vol[sym][date_str] = vol
 
-        hist_avg_vol: dict = {}
+        hist_avg_vol = {}
         for sym, date_vols in sym_date_vol.items():
             sorted_vols = sorted(date_vols.values(), reverse=True)[:5]
             if sorted_vols:
                 hist_avg_vol[sym] = sum(sorted_vols) / len(sorted_vols)
 
-        # ── Step 4: Get CPR positions ──────────────────────────────────────────
+        # Step 4: CPR levels
         cpr_rows = supabase.from_("cpr_levels")\
             .select("symbol, tc, bc, width_label, width_emoji")\
             .eq("trade_date", today)\
             .execute()
         cpr_map = {r["symbol"]: r for r in (cpr_rows.data or [])}
 
-        # ── Step 5: Compute signals ────────────────────────────────────────────
+        # Step 5: Compute signals
         signals = []
         for sym, d in sym_data.items():
-            if len(d["timestamps"]) < 3:
-                continue
-
-            oi_list  = d["oi"]
-            vol_list = d["volume"]
+            oi_list    = d["oi"]
+            vol_list   = d["volume"]
             price_list = d["prices"]
 
-            # Use second snapshot as open baseline
-            oi_open   = oi_list[1] if len(oi_list) >= 2 else oi_list[0]
-            vol_open  = vol_list[1] if len(vol_list) >= 2 else vol_list[0]
-            oi_latest = oi_list[-1]
-            vol_latest = vol_list[-1]
-            cmp       = price_list[-1]
+            if len(oi_list) < 3:
+                continue
 
-            # Day high/low from all prices today
-            day_high = max(p for p in price_list if p > 0)
-            day_low  = min(p for p in price_list if p > 0)
+            # Use second snapshot as baseline
+            oi_open  = oi_list[1]
+            vol_open = vol_list[1]
+            oi_now   = oi_list[-1]
+            vol_now  = vol_list[-1]
+            cmp      = price_list[-1]
 
             if not oi_open or not vol_open or not cmp:
                 continue
 
-            oi_chg_pct  = round((oi_latest - oi_open) / oi_open * 100, 2)
-            vol_chg_pct = round((vol_latest - vol_open) / vol_open * 100, 2) if vol_open else 0
+            oi_chg_pct  = round((oi_now - oi_open) / oi_open * 100, 2)
+            avg_vol_5d  = hist_avg_vol.get(sym, 0)
+            vol_ratio   = round(vol_now / avg_vol_5d, 2) if avg_vol_5d > 0 else 0
 
-            # 5-day avg volume check
-            avg_vol_5d = hist_avg_vol.get(sym, 0)
-            vol_ratio  = round(vol_latest / avg_vol_5d, 2) if avg_vol_5d > 0 else 0
-
-            # ── Qualification filters ──────────────────────────────────────────
-            # 1. Volume must be > 1.5x 5-day average
+            # Filters
             if vol_ratio < 1.5:
                 continue
-            # 2. OI must be changing meaningfully
             if abs(oi_chg_pct) < 2.0:
                 continue
 
+            # Price change
+            price_open  = price_list[1] if len(price_list) >= 2 else price_list[0]
+            price_chg   = round((cmp - price_open) / price_open * 100, 2) if price_open else 0
+
             # Signal type
-            price_open = price_list[1] if len(price_list) >= 2 else price_list[0]
-            price_chg  = round((cmp - price_open) / price_open * 100, 2) if price_open else 0
-
             if oi_chg_pct > 0 and price_chg >= 0:
-                signal_type = "LONG_BUILDUP"
-                signal_label = "Long Buildup"
-                bias = "BULLISH"
+                sig_type, sig_label, bias = "LONG_BUILDUP", "Long Buildup", "BULLISH"
             elif oi_chg_pct > 0 and price_chg < 0:
-                signal_type = "SHORT_BUILDUP"
-                signal_label = "Short Buildup"
-                bias = "BEARISH"
+                sig_type, sig_label, bias = "SHORT_BUILDUP", "Short Buildup", "BEARISH"
             elif oi_chg_pct < 0 and price_chg >= 0:
-                signal_type = "SHORT_COVERING"
-                signal_label = "Short Covering"
-                bias = "BULLISH"
+                sig_type, sig_label, bias = "SHORT_COVERING", "Short Covering", "BULLISH"
             else:
-                signal_type = "LONG_UNWINDING"
-                signal_label = "Long Unwinding"
-                bias = "BEARISH"
+                sig_type, sig_label, bias = "LONG_UNWINDING", "Long Unwinding", "BEARISH"
 
-            # Price context
+            # Day high/low
+            valid_prices = [p for p in price_list if p > 0]
+            day_high = max(valid_prices) if valid_prices else cmp
+            day_low  = min(valid_prices) if valid_prices else cmp
+
             price_ctx = get_price_context(cmp, day_high, day_low)
 
-            # CPR
+            # CPR position
             cpr = cpr_map.get(sym, {})
+            cpr_position = None
             if cpr:
-                tc = float(cpr.get("tc", 0) or 0)
-                bc = float(cpr.get("bc", 0) or 0)
-                if cmp > tc:
-                    cpr_position = "Above CPR"
-                elif cmp < bc:
-                    cpr_position = "Below CPR"
-                else:
-                    cpr_position = "Inside CPR"
-            else:
-                cpr_position = None
+                tc = float(cpr.get("tc") or 0)
+                bc = float(cpr.get("bc") or 0)
+                if tc and bc:
+                    if cmp > tc:
+                        cpr_position = "Above CPR"
+                    elif cmp < bc:
+                        cpr_position = "Below CPR"
+                    else:
+                        cpr_position = "Inside CPR"
 
             signals.append({
-                "symbol":         sym,
-                "cmp":            cmp,
-                "day_high":       day_high,
-                "day_low":        day_low,
-                "oi_chg_pct":     oi_chg_pct,
-                "price_chg_pct":  price_chg,
-                "vol_latest":     vol_latest,
-                "vol_avg_5d":     round(avg_vol_5d),
-                "vol_ratio":      vol_ratio,
-                "vol_ratio_label": f"{vol_ratio}x avg",
-                "signal_type":    signal_type,
-                "signal_label":   signal_label,
-                "bias":           bias,
-                "price_context":  price_ctx["label"],
+                "symbol":          sym,
+                "cmp":             cmp,
+                "day_high":        day_high,
+                "day_low":         day_low,
+                "oi_chg_pct":      oi_chg_pct,
+                "price_chg_pct":   price_chg,
+                "vol_latest":      vol_now,
+                "vol_avg_5d":      round(avg_vol_5d),
+                "vol_ratio":       vol_ratio,
+                "signal_type":     sig_type,
+                "signal_label":    sig_label,
+                "bias":            bias,
+                "price_context":   price_ctx["label"],
                 "price_ctx_color": price_ctx["color"],
-                "cpr_position":   cpr_position,
+                "cpr_position":    cpr_position,
                 "cpr_width_label": cpr.get("width_label"),
                 "cpr_width_emoji": cpr.get("width_emoji"),
             })
 
-        # Sort: vol_ratio desc, then oi_chg_pct desc
         signals.sort(key=lambda x: (x["vol_ratio"], abs(x["oi_chg_pct"])), reverse=True)
 
         result = {
-            "signals":   signals[:10],  # top 10, frontend shows 5
-            "total":     len(signals),
-            "date":      today,
+            "signals":         signals[:10],
+            "total":           len(signals),
+            "date":            today,
             "is_eod_snapshot": False,
         }
-
         _breakout_cache.update(result)
         _breakout_cache_time = time_module.time()
         print(f"[VOL_OI_BREAKOUT] {len(signals)} signals computed")
         return result
 
     except Exception as e:
+        import traceback
         print(f"[VOL_OI_BREAKOUT] Error: {e}")
+        traceback.print_exc()
         return {"signals": [], "total": 0, "error": str(e)}
