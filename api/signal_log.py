@@ -355,11 +355,11 @@ def get_signal_log(date: str = None):
     hist_vol_map: dict = {}  # sym -> [vol_day1, vol_day2, ...] sorted recent first
     try:
         from datetime import timedelta
-        # Get last 5 trading dates before today
-        hist_start = (datetime.now(timezone.utc) - timedelta(days=10)).strftime('%Y-%m-%d')
-        hist_rows = supabase.from_("oi_snapshots")            .select("symbol, volume, timestamp")            .eq("option_type", "FUT")            .gte("timestamp", f"{hist_start}T00:00:00+00:00")            .lt("timestamp",  f"{today}T00:00:00+00:00")            .limit(10000)            .execute()
-        # Build sym -> {date -> max_volume}
         from collections import defaultdict
+        # Get last 5 trading dates before today — limit to 5000 rows max
+        hist_start = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%d')
+        # Only fetch last snapshot per day per symbol (max volume proxy)
+        hist_rows = supabase.from_("oi_snapshots")            .select("symbol, volume, timestamp")            .eq("option_type", "FUT")            .gte("timestamp", f"{hist_start}T09:00:00+00:00")            .lt("timestamp",  f"{today}T00:00:00+00:00")            .gte("volume", 1000)            .order("timestamp", desc=False)            .limit(5000)            .execute()
         sym_date_vol: dict = defaultdict(lambda: defaultdict(int))
         for r in (hist_rows.data or []):
             sym = r["symbol"]
@@ -367,13 +367,13 @@ def get_signal_log(date: str = None):
             vol = int(r["volume"] or 0)
             if vol > sym_date_vol[sym][date_str]:
                 sym_date_vol[sym][date_str] = vol
-        # Convert to sorted list (most recent first, last 5 days)
         for sym, date_vols in sym_date_vol.items():
             sorted_vols = [v for _, v in sorted(date_vols.items(), reverse=True)][:5]
             hist_vol_map[sym] = sorted_vols
         print(f"[SIGNAL_LOG] Historical volume loaded for {len(hist_vol_map)} symbols")
     except Exception as e:
-        print(f"[SIGNAL_LOG] Historical volume fetch failed: {e}")
+        hist_vol_map = {}
+        print(f"[SIGNAL_LOG] Historical volume fetch failed (non-fatal): {e}")
 
     # ── Step 5c: Fetch latest options snapshot for ATM bias ───────────────────
     # Build strike → {ce_oi, pe_oi} map per symbol from latest snapshot
