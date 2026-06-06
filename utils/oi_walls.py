@@ -22,14 +22,22 @@ def get_all_oi_walls(supabase, cmp_map: dict) -> dict:
         return _walls_cache
 
     ist = pytz.timezone('Asia/Kolkata')
-    today = datetime.now(ist).date().isoformat()
+    today = datetime.now(ist).date()
+    # Use last trading day (skip weekends)
+    from datetime import timedelta
+    check = today
+    for _ in range(5):
+        if check.weekday() < 5:
+            break
+        check -= timedelta(days=1)
+    today_str = check.isoformat()
 
     try:
         # ONE query for all symbols
         rows = supabase.from_("oi_snapshots")\
             .select("symbol, strike, option_type, oi, timestamp")\
             .in_("option_type", ["CE", "PE"])\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .gte("timestamp", f"{today_str}T00:00:00+00:00")\
             .order("timestamp", desc=True)\
             .limit(10000).execute()
 
@@ -113,24 +121,32 @@ def _compute_walls(symbol: str, rows: list, cmp: float) -> dict:
 def get_oi_walls(symbol: str, supabase, cmp: float = 0) -> dict:
     """
     Single-symbol fallback — used by other endpoints.
+    Falls back to last trading day if no today data (weekends/holidays).
     """
+    from datetime import timedelta
     ist = pytz.timezone('Asia/Kolkata')
-    today = datetime.now(ist).date().isoformat()
-    try:
-        rows = supabase.from_("oi_snapshots")\
-            .select("strike, option_type, oi, timestamp")\
-            .eq("symbol", symbol)\
-            .in_("option_type", ["CE", "PE"])\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(2000).execute()
+    today = datetime.now(ist).date()
 
-        if not rows.data:
-            return {}
+    # Walk back up to 5 days to find last trading day with data
+    for days_back in range(0, 5):
+        check = today - timedelta(days=days_back)
+        if check.weekday() >= 5:
+            continue  # skip weekends
+        check_str = check.isoformat()
+        try:
+            rows = supabase.from_("oi_snapshots")\
+                .select("strike, option_type, oi, timestamp")\
+                .eq("symbol", symbol)\
+                .in_("option_type", ["CE", "PE"])\
+                .gte("timestamp", f"{check_str}T00:00:00+00:00")\
+                .lt("timestamp",  f"{check_str}T23:59:59+00:00")\
+                .order("timestamp", desc=True)\
+                .limit(2000).execute()
 
-        latest_ts = rows.data[0].get("timestamp")
-        latest = [r for r in rows.data if r.get("timestamp") == latest_ts]
-        return _compute_walls(symbol, latest, cmp)
-    except Exception as e:
-        print(f"[OI_WALLS] {symbol}: {e}")
-        return {}
+            if rows.data:
+                latest_ts = rows.data[0].get("timestamp")
+                latest = [r for r in rows.data if r.get("timestamp") == latest_ts]
+                return _compute_walls(symbol, latest, cmp)
+        except Exception as e:
+            print(f"[OI_WALLS] {symbol}: {e}")
+    return {}
