@@ -265,7 +265,7 @@ def get_positional_radar(min_consec: int = 0):
         oi_by_date[d][sym]    = int(r["total_oi"] or 0)
         ce_oi_by_date[d][sym] = int(r["ce_oi"] or 0)
         pe_oi_by_date[d][sym] = int(r["pe_oi"] or 0)
-        vol_by_date[d][sym]   = int(r["total_vol"] or 0)
+        vol_by_date[d][sym]   = int(r["fut_vol"] or 0)  # FUT volume — cleaner institutional signal than options vol
 
     trading_dates = sorted(oi_by_date.keys())
     if len(trading_dates) < 3:
