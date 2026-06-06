@@ -488,9 +488,13 @@ def signal_log(date: str = None, symbol: str = None):
 
 @app.get("/vol-oi-breakout")
 async def vol_oi_breakout_endpoint():
-    from api.vol_oi_breakout import get_vol_oi_breakout
     from utils.db import get_supabase
-    return get_vol_oi_breakout(get_supabase())
+    sb = get_supabase()
+    try:
+        result = sb.from_("vol_oi_breakout_cache").select("id, total, trade_date").eq("id", 1).limit(1).execute()
+        return {"debug": True, "supabase_data": result.data}
+    except Exception as e:
+        return {"debug": True, "error": str(e)}
 
 @app.get("/oi-heatmap/{symbol}")
 def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
