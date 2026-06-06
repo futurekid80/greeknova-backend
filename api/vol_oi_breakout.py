@@ -12,6 +12,8 @@ def is_market_hours():
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
+    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+        return False
     mins = now.hour * 60 + now.minute
     return 555 <= mins <= 930
 
