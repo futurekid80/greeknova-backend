@@ -219,86 +219,53 @@ def get_positional_radar(min_consec: int = 0):
 
     series_start = get_series_start(current_expiry)
 
-    # ── BULK QUERY 1: All CE/PE OI for entire series in ONE query ─────────────
-    print(f"[Positional Radar] Fetching bulk OI data from {series_start}...")
-    all_oi_rows = []
-    for offset in range(0, 500000, 5000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("symbol, oi, volume, option_type, timestamp")\
-            .in_("option_type", ["CE", "PE"])\
-            .eq("expiry", current_expiry)\
-            .gte("timestamp", f"{series_start}T00:00:00+00:00")\
-            .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
-            .range(offset, offset + 4999).execute()
-        if not batch.data:
-            break
-        all_oi_rows.extend(batch.data)
-        if len(batch.data) < 5000:
-            break
-    print(f"[Positional Radar] Loaded {len(all_oi_rows)} OI rows in {time_module.time()-t0:.1f}s")
+    # ── SERVER-SIDE AGGREGATION via RPC ──────────────────────────────────────
+    # PostgreSQL aggregates EOD OI per symbol per day — avoids fetching 1M+ rows
+    print(f"[Positional Radar] Fetching EOD OI via RPC from {series_start}...")
+    rpc_result = supabase.rpc("get_positional_radar_eod", {
+        "p_expiry":       current_expiry,
+        "p_series_start": series_start,
+        "p_series_end":   today_str,
+    }).execute()
+    all_oi_rows = rpc_result.data or []
+    print(f"[Positional Radar] RPC returned {len(all_oi_rows)} rows in {time_module.time()-t0:.1f}s")
 
-    # ── BULK QUERY 2: All CMP data for entire series in ONE query ─────────────
-    all_cmp_rows = supabase.from_("cmp_prices")\
-        .select("symbol, cmp, timestamp")\
-        .gte("timestamp", f"{series_start}T00:00:00+00:00")\
-        .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
-        .order("timestamp", desc=False)\
-        .limit(10000).execute().data or []
+    # ── CMP data ──────────────────────────────────────────────────────────────
+    all_cmp_rows = supabase.from_("cmp_prices")        .select("symbol, cmp, timestamp")        .gte("timestamp", f"{series_start}T00:00:00+00:00")        .lt("timestamp",  f"{today_str}T23:59:59+00:00")        .order("timestamp", desc=False)        .limit(10000).execute().data or []
     print(f"[Positional Radar] Loaded {len(all_cmp_rows)} CMP rows in {time_module.time()-t0:.1f}s")
 
-    # ── Process: group by date, find EOD snapshot per day ─────────────────────
-    # Find all unique dates with data
-    date_ts_map = {}  # date -> set of timestamps
-    for r in all_oi_rows:
-        date_str = str(r["timestamp"])[:10]
-        if date_str not in date_ts_map:
-            date_ts_map[date_str] = set()
-        date_ts_map[date_str].add(r["timestamp"])
-
-    trading_dates = sorted(date_ts_map.keys())
-    if len(trading_dates) < 3:
-        return {"error": "Not enough trading days", "series_start": series_start, "expiry": current_expiry, "results": []}
-
-    # For each date, find the EOD timestamp (latest of the day)
-    date_eod_ts = {d: max(ts_set) for d, ts_set in date_ts_map.items()}
-
-    # Build OI maps: date -> sym -> {ce_oi, pe_oi, vol}
+    # ── Build OI maps from RPC result ─────────────────────────────────────────
+    # RPC returns: trade_date, symbol, ce_oi, pe_oi, total_oi, total_vol
     oi_by_date    = {}
     ce_oi_by_date = {}
     pe_oi_by_date = {}
     vol_by_date   = {}
 
     for r in all_oi_rows:
-        date_str = str(r["timestamp"])[:10]
-        eod_ts   = date_eod_ts.get(date_str)
-        if r["timestamp"] != eod_ts:
-            continue  # only use EOD snapshot
+        d   = str(r["trade_date"])
         sym = r["symbol"]
-        oi  = int(r["oi"] or 0)
-        vol = int(r["volume"] or 0)
-        opt = r["option_type"]
+        if d not in oi_by_date:
+            oi_by_date[d]    = {}
+            ce_oi_by_date[d] = {}
+            pe_oi_by_date[d] = {}
+            vol_by_date[d]   = {}
+        oi_by_date[d][sym]    = int(r["total_oi"] or 0)
+        ce_oi_by_date[d][sym] = int(r["ce_oi"] or 0)
+        pe_oi_by_date[d][sym] = int(r["pe_oi"] or 0)
+        vol_by_date[d][sym]   = int(r["total_vol"] or 0)
 
-        if date_str not in oi_by_date:
-            oi_by_date[date_str]    = {}
-            ce_oi_by_date[date_str] = {}
-            pe_oi_by_date[date_str] = {}
-            vol_by_date[date_str]   = {}
+    trading_dates = sorted(oi_by_date.keys())
+    if len(trading_dates) < 3:
+        return {"error": "Not enough trading days", "series_start": series_start, "expiry": current_expiry, "results": []}
 
-        oi_by_date[date_str][sym]  = oi_by_date[date_str].get(sym, 0) + oi
-        vol_by_date[date_str][sym] = vol_by_date[date_str].get(sym, 0) + vol
-        if opt == "CE":
-            ce_oi_by_date[date_str][sym] = ce_oi_by_date[date_str].get(sym, 0) + oi
-        elif opt == "PE":
-            pe_oi_by_date[date_str][sym] = pe_oi_by_date[date_str].get(sym, 0) + oi
-
-    # Build CMP map: date -> sym -> latest cmp
+    # ── Build CMP map: date -> sym -> latest cmp ──────────────────────────────
     cmp_by_date = {}
     for r in all_cmp_rows:
         date_str = str(r["timestamp"])[:10]
         sym = r["symbol"]
         if date_str not in cmp_by_date:
             cmp_by_date[date_str] = {}
-        cmp_by_date[date_str][sym] = float(r["cmp"])  # last seen = latest (sorted asc)
+        cmp_by_date[date_str][sym] = float(r["cmp"])
 
     available_dates = [d for d in trading_dates if d in oi_by_date and d in cmp_by_date]
     total_trading_days = len(available_dates)
@@ -307,6 +274,7 @@ def get_positional_radar(min_consec: int = 0):
         return {"error": "Insufficient data", "results": []}
 
     print(f"[Positional Radar] {total_trading_days} trading days, processing symbols...")
+
 
     # ── Today's FUT signals (2 queries instead of N) ──────────────────────────
     today_fut_signals = get_today_fut_signals(supabase, today_str)
