@@ -1,88 +1,136 @@
-def get_oi_walls(symbol: str, supabase, cmp: float = 0) -> dict:
+"""
+oi_walls.py - OI wall computation
+Optimized: bulk fetch all symbols in one query, compute walls in Python.
+"""
+from datetime import datetime
+import pytz
+
+_walls_cache = {}
+_walls_cache_time = 0.0
+_WALLS_TTL = 300  # 5 minutes
+
+def get_all_oi_walls(supabase, cmp_map: dict) -> dict:
     """
-    Get CE wall (highest CE OI strike) and PE wall (highest PE OI strike)
-    for a given symbol from today's latest snapshot.
-    Returns ce_wall, pe_wall, ce_wall_oi_L, pe_wall_oi_L, trade_range, trade_range_pct
+    Fetch OI walls for ALL symbols in one query.
+    cmp_map: {symbol -> cmp}
+    Returns: {symbol -> wall_dict}
     """
-    from datetime import datetime, timezone, timedelta
-    import pytz
+    import time as time_module
+    global _walls_cache, _walls_cache_time
+
+    if _walls_cache and (time_module.time() - _walls_cache_time) < _WALLS_TTL:
+        return _walls_cache
+
     ist = pytz.timezone('Asia/Kolkata')
     today = datetime.now(ist).date().isoformat()
 
     try:
+        # ONE query for all symbols
         rows = supabase.from_("oi_snapshots")\
-            .select("strike, option_type, oi")\
-            .eq("symbol", symbol)\
+            .select("symbol, strike, option_type, oi, timestamp")\
             .in_("option_type", ["CE", "PE"])\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
             .order("timestamp", desc=True)\
-            .limit(2000)\
-            .execute()
+            .limit(10000).execute()
 
         if not rows.data:
             return {}
 
-        # Get latest timestamp only
-        latest_ts = rows.data[0].get("timestamp") if rows.data else None
-        latest_rows = [r for r in rows.data if r.get("timestamp") == latest_ts]
+        # Group by symbol, find latest timestamp per symbol
+        sym_rows: dict = {}
+        sym_latest_ts: dict = {}
+        for r in rows.data:
+            sym = r["symbol"]
+            ts  = r["timestamp"]
+            if sym not in sym_latest_ts or ts > sym_latest_ts[sym]:
+                sym_latest_ts[sym] = ts
+            if sym not in sym_rows:
+                sym_rows[sym] = []
+            sym_rows[sym].append(r)
 
-        # Aggregate OI per strike per option_type
-        ce_oi: dict = {}
-        pe_oi: dict = {}
-        for r in latest_rows:
-            strike = float(r["strike"])
-            oi = int(r["oi"] or 0)
-            if r["option_type"] == "CE":
-                ce_oi[strike] = ce_oi.get(strike, 0) + oi
-            elif r["option_type"] == "PE":
-                pe_oi[strike] = pe_oi.get(strike, 0) + oi
+        result = {}
+        for sym, sym_data in sym_rows.items():
+            latest_ts = sym_latest_ts[sym]
+            latest = [r for r in sym_data if r["timestamp"] == latest_ts]
+            cmp = cmp_map.get(sym, 0)
+            wall = _compute_walls(sym, latest, cmp)
+            if wall:
+                result[sym] = wall
 
-        if not ce_oi or not pe_oi:
+        _walls_cache = result
+        _walls_cache_time = time_module.time()
+        print(f"[OI_WALLS] Bulk computed {len(result)} symbols")
+        return result
+
+    except Exception as e:
+        print(f"[OI_WALLS] Bulk fetch failed: {e}")
+        return {}
+
+
+def _compute_walls(symbol: str, rows: list, cmp: float) -> dict:
+    ce_oi: dict = {}
+    pe_oi: dict = {}
+    for r in rows:
+        strike = float(r["strike"])
+        oi = int(r["oi"] or 0)
+        if r["option_type"] == "CE":
+            ce_oi[strike] = ce_oi.get(strike, 0) + oi
+        elif r["option_type"] == "PE":
+            pe_oi[strike] = pe_oi.get(strike, 0) + oi
+
+    if not ce_oi or not pe_oi:
+        return {}
+
+    ce_above = {s: v for s, v in ce_oi.items() if s > cmp} if cmp > 0 else ce_oi
+    pe_below = {s: v for s, v in pe_oi.items() if s < cmp} if cmp > 0 else pe_oi
+    if not ce_above: ce_above = ce_oi
+    if not pe_below: pe_below = pe_oi
+
+    max_ce = max(ce_above.values(), default=1)
+    max_pe = max(pe_below.values(), default=1)
+    ce_sig = {s: v for s, v in ce_above.items() if v >= max_ce * 0.10} or ce_above
+    pe_sig = {s: v for s, v in pe_below.items() if v >= max_pe * 0.10} or pe_below
+
+    ce_wall = min(ce_sig.keys())
+    pe_wall = max(pe_sig.keys())
+    ce_wall_oi_L = round(ce_oi[ce_wall] / 100000, 1)
+    pe_wall_oi_L = round(pe_oi[pe_wall] / 100000, 1)
+    trade_range = round(abs(ce_wall - pe_wall), 1)
+    trade_range_pct = round(trade_range / cmp * 100, 1) if cmp > 0 else 0
+    range_label = "Tight" if trade_range_pct < 2 else "Moderate" if trade_range_pct < 5 else "Wide"
+
+    return {
+        "ce_wall":         ce_wall,
+        "pe_wall":         pe_wall,
+        "ce_wall_oi_L":    ce_wall_oi_L,
+        "pe_wall_oi_L":    pe_wall_oi_L,
+        "trade_range":     trade_range,
+        "trade_range_pct": trade_range_pct,
+        "range_label":     range_label,
+    }
+
+
+def get_oi_walls(symbol: str, supabase, cmp: float = 0) -> dict:
+    """
+    Single-symbol fallback — used by other endpoints.
+    """
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.now(ist).date().isoformat()
+    try:
+        rows = supabase.from_("oi_snapshots")\
+            .select("strike, option_type, oi, timestamp")\
+            .eq("symbol", symbol)\
+            .in_("option_type", ["CE", "PE"])\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(2000).execute()
+
+        if not rows.data:
             return {}
 
-        # CE wall = nearest significant CE OI above CMP (intraday resistance)
-        # PE wall = nearest significant PE OI below CMP (intraday support)
-        ce_above = {s: v for s, v in ce_oi.items() if s > cmp} if cmp > 0 else ce_oi
-        pe_below = {s: v for s, v in pe_oi.items() if s < cmp} if cmp > 0 else pe_oi
-
-        if not ce_above: ce_above = ce_oi
-        if not pe_below: pe_below = pe_oi
-
-        # Significant threshold = 10% of max OI in that direction
-        max_ce = max(ce_above.values(), default=1)
-        max_pe = max(pe_below.values(), default=1)
-        ce_significant = {s: v for s, v in ce_above.items() if v >= max_ce * 0.10}
-        pe_significant = {s: v for s, v in pe_below.items() if v >= max_pe * 0.10}
-
-        if not ce_significant: ce_significant = ce_above
-        if not pe_significant: pe_significant = pe_below
-
-        # Nearest significant strike to CMP
-        ce_wall = min(ce_significant.keys())  # lowest above CMP
-        pe_wall = max(pe_significant.keys())  # highest below CMP
-        ce_wall_oi_L = round(ce_oi[ce_wall] / 100000, 1)
-        pe_wall_oi_L = round(pe_oi[pe_wall] / 100000, 1)
-
-        trade_range = round(abs(ce_wall - pe_wall), 1)
-        trade_range_pct = round(trade_range / cmp * 100, 1) if cmp > 0 else 0
-
-        # Range quality label
-        if trade_range_pct < 2:
-            range_label = "Tight"
-        elif trade_range_pct < 5:
-            range_label = "Moderate"
-        else:
-            range_label = "Wide"
-
-        return {
-            "ce_wall":        ce_wall,
-            "pe_wall":        pe_wall,
-            "ce_wall_oi_L":   ce_wall_oi_L,
-            "pe_wall_oi_L":   pe_wall_oi_L,
-            "trade_range":    trade_range,
-            "trade_range_pct": trade_range_pct,
-            "range_label":    range_label,
-        }
+        latest_ts = rows.data[0].get("timestamp")
+        latest = [r for r in rows.data if r.get("timestamp") == latest_ts]
+        return _compute_walls(symbol, latest, cmp)
     except Exception as e:
         print(f"[OI_WALLS] {symbol}: {e}")
         return {}
