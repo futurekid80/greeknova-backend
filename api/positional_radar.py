@@ -193,7 +193,7 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
     return fut_signals
 
 
-from utils.oi_walls import get_oi_walls
+from utils.oi_walls import get_oi_walls, get_all_oi_walls
 
 
 def get_positional_radar(min_consec: int = 0):
@@ -275,6 +275,10 @@ def get_positional_radar(min_consec: int = 0):
     available_dates = [d for d in trading_dates if d in oi_by_date and d in cmp_by_date]
     total_trading_days = len(available_dates)
 
+    print(f"[Positional Radar] trading_dates={trading_dates}")
+    print(f"[Positional Radar] oi_by_date keys={sorted(oi_by_date.keys())}")
+    print(f"[Positional Radar] cmp_by_date keys={sorted(cmp_by_date.keys())}")
+    print(f"[Positional Radar] available_dates={available_dates}")
 
     if total_trading_days < 3:
         return {"error": "Insufficient data", "results": [], "debug": {
@@ -312,6 +316,11 @@ def get_positional_radar(min_consec: int = 0):
     has_today_data = bool(latest_ts_result.data)
 
     results = []
+
+    # ── OI Walls — bulk fetch all symbols in ONE query ─────────────────────────
+    cmp_latest = {sym: cmp_by_date.get(available_dates[-1], {}).get(sym, 0) for sym in SYMBOLS}
+    all_walls = get_all_oi_walls(supabase, cmp_latest)
+    print(f"[Positional Radar] OI walls fetched for {len(all_walls)} symbols")
 
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
@@ -460,7 +469,7 @@ def get_positional_radar(min_consec: int = 0):
             "cmp":                 cmp_series[-1],
             "series_days":         len(oi_series) - 1,
             "has_uoa":             sym in uoa_symbols,
-            **get_oi_walls(sym, supabase, cmp_series[-1]),
+            **all_walls.get(sym, {}),
         })
 
     results.sort(key=lambda x: (
