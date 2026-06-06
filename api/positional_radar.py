@@ -167,13 +167,16 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
         for sym, rows in sym_rows.items():
             if len(rows) < 2:
                 continue
-            # Filter to nearest expiry only (avoid multi-expiry contamination)
-            expiries = sorted(set(r.get("expiry") or "" for r in rows if r.get("expiry")))
-            if expiries:
+            # Filter to nearest expiry only to avoid multi-expiry contamination
+            # But only if expiry field is populated
+            expiries = sorted(set(str(r.get("expiry")) for r in rows if r.get("expiry")))
+            if len(expiries) > 1:
+                # Multiple expiries — filter to nearest only
                 nearest = expiries[0]
-                rows = [r for r in rows if r.get("expiry") == nearest]
-            if len(rows) < 2:
-                continue
+                filtered = [r for r in rows if str(r.get("expiry") or "") == nearest]
+                if len(filtered) >= 2:
+                    rows = filtered
+            # If expiry not populated or single expiry, use all rows as-is
             open_row   = rows[0]
             latest_row = rows[-1]
             oi_open    = open_row["oi"] or 0
