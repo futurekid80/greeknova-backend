@@ -47,21 +47,30 @@ def _load_from_supabase(supabase):
     """Load last saved EOD snapshot from Supabase."""
     try:
         result = supabase.from_("vol_oi_breakout_cache")\
-            .select("signals, total, trade_date, computed_at")\
+            .select("*")\
             .eq("id", 1)\
             .limit(1)\
             .execute()
+        print(f"[VOL_OI_BREAKOUT] Supabase load: {len(result.data) if result.data else 0} rows")
         if result.data:
             row = result.data[0]
+            signals = row.get("signals", [])
+            # Handle string JSON (not auto-parsed)
+            if isinstance(signals, str):
+                import json
+                signals = json.loads(signals)
+            total = row.get("total", len(signals))
+            print(f"[VOL_OI_BREAKOUT] Loaded {len(signals)} signals for {row.get('trade_date')}")
             return {
-                "signals":         row["signals"],
-                "total":           row["total"],
-                "date":            str(row["trade_date"]),
-                "computed_at":     str(row["computed_at"]),
+                "signals":         signals,
+                "total":           total,
+                "date":            str(row.get("trade_date", "")),
                 "is_eod_snapshot": True,
             }
     except Exception as e:
+        import traceback
         print(f"[VOL_OI_BREAKOUT] Supabase load failed: {e}")
+        traceback.print_exc()
     return None
 
 def _save_to_supabase(supabase, signals, total, trade_date):
