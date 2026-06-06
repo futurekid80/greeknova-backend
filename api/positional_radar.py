@@ -270,8 +270,17 @@ def get_positional_radar(min_consec: int = 0):
     available_dates = [d for d in trading_dates if d in oi_by_date and d in cmp_by_date]
     total_trading_days = len(available_dates)
 
+    print(f"[Positional Radar] trading_dates={trading_dates}")
+    print(f"[Positional Radar] oi_by_date keys={sorted(oi_by_date.keys())}")
+    print(f"[Positional Radar] cmp_by_date keys={sorted(cmp_by_date.keys())}")
+    print(f"[Positional Radar] available_dates={available_dates}")
+
     if total_trading_days < 3:
-        return {"error": "Insufficient data", "results": []}
+        return {"error": "Insufficient data", "results": [], "debug": {
+            "trading_dates": trading_dates,
+            "oi_dates": sorted(oi_by_date.keys()),
+            "cmp_dates": sorted(cmp_by_date.keys()),
+        }}
 
     print(f"[Positional Radar] {total_trading_days} trading days, processing symbols...")
 
