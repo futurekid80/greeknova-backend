@@ -332,9 +332,14 @@ def get_positional_radar(min_consec: int = 0):
     print(f"[Positional Radar] OI walls fetched for {len(all_walls)} symbols")
 
     # ── CPR data — for ignition quality score ─────────────────────────────────
-    cpr_rows = supabase.from_("cpr_levels")        .select("symbol, tc, bc, cpr_trend, cpr_position, is_virgin")        .eq("trade_date", today_str)        .limit(200).execute()
-    cpr_map = {r["symbol"]: r for r in (cpr_rows.data or [])}
-    print(f"[Positional Radar] CPR data fetched for {len(cpr_map)} symbols")
+    # Use latest available CPR (handles weekends — Mon CPR computed Sunday night)
+    try:
+        cpr_rows = supabase.from_("cpr_levels")            .select("symbol, tc, bc, cpr_trend, is_virgin, trade_date")            .order("trade_date", desc=True)            .limit(200).execute()
+        cpr_map = {r["symbol"]: r for r in (cpr_rows.data or [])}
+        print(f"[Positional Radar] CPR data fetched for {len(cpr_map)} symbols")
+    except Exception as e:
+        print(f"[Positional Radar] CPR fetch failed: {e}")
+        cpr_map = {}
 
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
@@ -456,11 +461,18 @@ def get_positional_radar(min_consec: int = 0):
             s3 = bias_confirmed
             ignition_score += 1 if s3 else 0
 
-            # 4. CPR position AND trend confirms bias
-            if bias == "BEARISH":
-                s4 = cpr_position in ("BELOW_CPR",) or cpr_trend in ("DESCENDING",)
+            # 4. CPR position (computed from CMP vs TC/BC) AND trend confirms bias
+            cpr_tc = float(cpr.get("tc") or 0)
+            cpr_bc = float(cpr.get("bc") or 0)
+            cmp_now = cmp_series[-1]
+            if cpr_tc and cpr_bc and cmp_now:
+                cpr_pos = "ABOVE_CPR" if cmp_now > cpr_tc else "BELOW_CPR" if cmp_now < cpr_bc else "INSIDE_CPR"
             else:
-                s4 = cpr_position in ("ABOVE_CPR",) or cpr_trend in ("ASCENDING",)
+                cpr_pos = ""
+            if bias == "BEARISH":
+                s4 = cpr_pos == "BELOW_CPR" or cpr_trend == "DESCENDING"
+            else:
+                s4 = cpr_pos == "ABOVE_CPR" or cpr_trend == "ASCENDING"
             ignition_score += 1 if s4 else 0
 
             # 5. Volume building for 2+ consecutive days (accumulation not spike)
@@ -468,11 +480,11 @@ def get_positional_radar(min_consec: int = 0):
             ignition_score += 1 if s5 else 0
 
             ignition_score_breakdown = {
-                "consec_3plus":    s1,
+                "consec_3plus":     s1,
                 "high_consistency": s2,
-                "bias_confirmed":  s3,
-                "cpr_confirms":    s4,
-                "vol_building":    s5,
+                "bias_confirmed":   s3,
+                "cpr_confirms":     s4,  # CPR position + trend confirms bias
+                "vol_building":     s5,  # vol rising 2+ consecutive days
             }
 
         results.append({
