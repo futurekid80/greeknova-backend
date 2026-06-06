@@ -230,9 +230,13 @@ def get_positional_radar(min_consec: int = 0):
     all_oi_rows = rpc_result.data or []
     print(f"[Positional Radar] RPC returned {len(all_oi_rows)} rows in {time_module.time()-t0:.1f}s")
 
-    # ── CMP data ──────────────────────────────────────────────────────────────
-    all_cmp_rows = supabase.from_("cmp_prices")        .select("symbol, cmp, timestamp")        .gte("timestamp", f"{series_start}T00:00:00+00:00")        .lt("timestamp",  f"{today_str}T23:59:59+00:00")        .order("timestamp", desc=False)        .limit(10000).execute().data or []
-    print(f"[Positional Radar] Loaded {len(all_cmp_rows)} CMP rows in {time_module.time()-t0:.1f}s")
+    # ── CMP data — EOD CMP per symbol per day via RPC ────────────────────────
+    cmp_rpc = supabase.rpc("get_eod_cmp", {
+        "p_series_start": series_start,
+        "p_series_end":   today_str,
+    }).execute()
+    all_cmp_rows = cmp_rpc.data or []
+    print(f"[Positional Radar] Loaded {len(all_cmp_rows)} CMP rows via RPC in {time_module.time()-t0:.1f}s")
 
     # ── Build OI maps from RPC result ─────────────────────────────────────────
     # RPC returns: trade_date, symbol, ce_oi, pe_oi, total_oi, total_vol
@@ -258,10 +262,11 @@ def get_positional_radar(min_consec: int = 0):
     if len(trading_dates) < 3:
         return {"error": "Not enough trading days", "series_start": series_start, "expiry": current_expiry, "results": []}
 
-    # ── Build CMP map: date -> sym -> latest cmp ──────────────────────────────
+    # ── Build CMP map: date -> sym -> eod cmp ────────────────────────────────
+    # RPC returns trade_date (already a date string), symbol, cmp
     cmp_by_date = {}
     for r in all_cmp_rows:
-        date_str = str(r["timestamp"])[:10]
+        date_str = str(r["trade_date"])
         sym = r["symbol"]
         if date_str not in cmp_by_date:
             cmp_by_date[date_str] = {}
