@@ -129,9 +129,9 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
     """Fetch today's FUT signals in 2 queries instead of N queries."""
     fut_signals = {}
     try:
-        # Get all today's FUT snapshots in one query
+        # Get all today's FUT snapshots in one query (include expiry for nearest-expiry filter)
         result = supabase.from_("oi_snapshots")\
-            .select("symbol, oi, volume, last_price, timestamp")\
+            .select("symbol, oi, volume, last_price, timestamp, expiry")\
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{today_str}T00:00:00+00:00")\
             .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
@@ -147,7 +147,7 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
                 check -= timedelta(days=1)
             yesterday = check.isoformat()
             result = supabase.from_("oi_snapshots")\
-                .select("symbol, oi, volume, last_price, timestamp")\
+                .select("symbol, oi, volume, last_price, timestamp, expiry")\
                 .eq("option_type", "FUT")\
                 .gte("timestamp", f"{yesterday}T00:00:00+00:00")\
                 .lt("timestamp",  f"{yesterday}T23:59:59+00:00")\
@@ -165,6 +165,13 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
             sym_rows[sym].append(r)
 
         for sym, rows in sym_rows.items():
+            if len(rows) < 2:
+                continue
+            # Filter to nearest expiry only (avoid multi-expiry contamination)
+            expiries = sorted(set(r.get("expiry") or "" for r in rows if r.get("expiry")))
+            if expiries:
+                nearest = expiries[0]
+                rows = [r for r in rows if r.get("expiry") == nearest]
             if len(rows) < 2:
                 continue
             open_row   = rows[0]
