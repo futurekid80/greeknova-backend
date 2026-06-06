@@ -331,6 +331,11 @@ def get_positional_radar(min_consec: int = 0):
     all_walls = get_all_oi_walls(supabase, cmp_latest)
     print(f"[Positional Radar] OI walls fetched for {len(all_walls)} symbols")
 
+    # ── CPR data — for ignition quality score ─────────────────────────────────
+    cpr_rows = supabase.from_("cpr_levels")        .select("symbol, tc, bc, cpr_trend, cpr_position, is_virgin")        .eq("trade_date", today_str)        .limit(200).execute()
+    cpr_map = {r["symbol"]: r for r in (cpr_rows.data or [])}
+    print(f"[Positional Radar] CPR data fetched for {len(cpr_map)} symbols")
+
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     ist_today = datetime.now(ist).date()
@@ -431,6 +436,45 @@ def get_positional_radar(min_consec: int = 0):
 
         triple_confirm = conviction["level"] == "CONVICTION"
 
+        # ── Ignition Quality Score (only computed for Ignition stocks) ─────────
+        ignition_score = 0
+        ignition_score_breakdown = {}
+        if ignition:
+            cpr = cpr_map.get(sym, {})
+            cpr_position = cpr.get("cpr_position", "")
+            cpr_trend    = cpr.get("cpr_trend", "")
+
+            # 1. Sustained direction (consec_days >= 3) — baseline for ignition
+            s1 = consec_days >= 3
+            ignition_score += 1 if s1 else 0
+
+            # 2. High consistency (>= 70% of series days match signal)
+            s2 = consistency_label == "HIGH"
+            ignition_score += 1 if s2 else 0
+
+            # 3. Bias confirmed by CE/PE composition
+            s3 = bias_confirmed
+            ignition_score += 1 if s3 else 0
+
+            # 4. CPR position AND trend confirms bias
+            if bias == "BEARISH":
+                s4 = cpr_position in ("BELOW_CPR",) or cpr_trend in ("DESCENDING",)
+            else:
+                s4 = cpr_position in ("ABOVE_CPR",) or cpr_trend in ("ASCENDING",)
+            ignition_score += 1 if s4 else 0
+
+            # 5. Volume building for 2+ consecutive days (accumulation not spike)
+            s5 = vol_consec >= 2
+            ignition_score += 1 if s5 else 0
+
+            ignition_score_breakdown = {
+                "consec_3plus":    s1,
+                "high_consistency": s2,
+                "bias_confirmed":  s3,
+                "cpr_confirms":    s4,
+                "vol_building":    s5,
+            }
+
         results.append({
             "symbol":              sym,
             "is_index":            sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
@@ -478,6 +522,8 @@ def get_positional_radar(min_consec: int = 0):
             "cmp":                 cmp_series[-1],
             "series_days":         len(oi_series) - 1,
             "has_uoa":             sym in uoa_symbols,
+            "ignition_score":      ignition_score,
+            "ignition_score_breakdown": ignition_score_breakdown,
             **all_walls.get(sym, {}),
         })
 
