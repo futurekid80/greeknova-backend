@@ -136,7 +136,7 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
             .gte("timestamp", f"{today_str}T00:00:00+00:00")\
             .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
             .order("timestamp", desc=False)\
-            .limit(5000).execute()
+            .limit(15000).execute()
 
         if not result.data:
             # Fallback to yesterday
@@ -152,7 +152,7 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
                 .gte("timestamp", f"{yesterday}T00:00:00+00:00")\
                 .lt("timestamp",  f"{yesterday}T23:59:59+00:00")\
                 .order("timestamp", desc=False)\
-                .limit(5000).execute()
+                .limit(15000).execute()
             if not result.data:
                 return fut_signals
 
