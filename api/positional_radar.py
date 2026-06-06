@@ -1,6 +1,12 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta
 import calendar
+import time as time_module
+
+# ── Cache — positional radar changes at most once per day ─────────────────────
+_radar_cache = {}
+_radar_cache_time = 0.0
+_CACHE_TTL = 300  # 5 minutes during market hours, longer post-market
 
 SYMBOLS = [
     "NIFTY", "BANKNIFTY", "FINNIFTY",
@@ -19,7 +25,7 @@ SYMBOLS = [
 def get_monthly_expiry(year: int, month: int) -> str:
     last_day = calendar.monthrange(year, month)[1]
     d = datetime(year, month, last_day)
-    while d.weekday() != 1:  # 1 = Tuesday
+    while d.weekday() != 1:
         d -= timedelta(days=1)
     return d.strftime('%Y-%m-%d')
 
@@ -84,45 +90,29 @@ def check_acceleration(oi_series, dates):
 def get_oi_composition(ce_oi_start, ce_oi_end, pe_oi_start, pe_oi_end) -> dict:
     ce_chg_pct = round((ce_oi_end - ce_oi_start) / ce_oi_start * 100, 1) if ce_oi_start > 0 else 0
     pe_chg_pct = round((pe_oi_end - pe_oi_start) / pe_oi_start * 100, 1) if pe_oi_start > 0 else 0
-
     total_oi = ce_oi_end + pe_oi_end
     pe_pct_of_total = round(pe_oi_end / total_oi * 100) if total_oi > 0 else 50
     ce_pct_of_total = 100 - pe_pct_of_total
-
     pcr_series = round(pe_oi_end / ce_oi_end, 2) if ce_oi_end > 0 else 0
     pcr_start  = round(pe_oi_start / ce_oi_start, 2) if ce_oi_start > 0 else 0
-
     if pe_chg_pct > ce_chg_pct * 1.3:
-        dominant     = "PE"
-        composition  = "PUT_DOMINATED"
-        interp       = "Put writers adding — bullish institutional positioning"
-        interp_short = "PE dominated"
-        bias_confirm = "BULLISH"
+        dominant, composition = "PE", "PUT_DOMINATED"
+        interp = "Put writers adding — bullish institutional positioning"
+        interp_short, bias_confirm = "PE dominated", "BULLISH"
     elif ce_chg_pct > pe_chg_pct * 1.3:
-        dominant     = "CE"
-        composition  = "CALL_DOMINATED"
-        interp       = "Call writers adding — bearish institutional positioning"
-        interp_short = "CE dominated"
-        bias_confirm = "BEARISH"
+        dominant, composition = "CE", "CALL_DOMINATED"
+        interp = "Call writers adding — bearish institutional positioning"
+        interp_short, bias_confirm = "CE dominated", "BEARISH"
     else:
-        dominant     = "MIXED"
-        composition  = "BALANCED"
-        interp       = "Both CE and PE growing equally — mixed positioning"
-        interp_short = "Balanced"
-        bias_confirm = "NEUTRAL"
-
+        dominant, composition = "MIXED", "BALANCED"
+        interp = "Both CE and PE growing equally — mixed positioning"
+        interp_short, bias_confirm = "Balanced", "NEUTRAL"
     return {
-        "ce_oi_chg_pct":    ce_chg_pct,
-        "pe_oi_chg_pct":    pe_chg_pct,
-        "ce_pct_of_total":  ce_pct_of_total,
-        "pe_pct_of_total":  pe_pct_of_total,
-        "pcr_series":       pcr_series,
-        "pcr_start":        pcr_start,
-        "dominant":         dominant,
-        "composition":      composition,
-        "interp":           interp,
-        "interp_short":     interp_short,
-        "bias_confirm":     bias_confirm,
+        "ce_oi_chg_pct": ce_chg_pct, "pe_oi_chg_pct": pe_chg_pct,
+        "ce_pct_of_total": ce_pct_of_total, "pe_pct_of_total": pe_pct_of_total,
+        "pcr_series": pcr_series, "pcr_start": pcr_start,
+        "dominant": dominant, "composition": composition,
+        "interp": interp, "interp_short": interp_short, "bias_confirm": bias_confirm,
     }
 
 
@@ -136,84 +126,59 @@ def get_conviction_level(consec_days: int, vol_rising: bool, accelerating: bool)
 
 
 def get_today_fut_signals(supabase, today_str: str) -> dict:
+    """Fetch today's FUT signals in 2 queries instead of N queries."""
     fut_signals = {}
     try:
-        # ── Try today's data first ────────────────────────────────────────
-        ts_result = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
+        # Get all today's FUT snapshots in one query
+        result = supabase.from_("oi_snapshots")\
+            .select("symbol, oi, volume, last_price, timestamp")\
             .eq("option_type", "FUT")\
-            .eq("symbol", "NIFTY")\
             .gte("timestamp", f"{today_str}T00:00:00+00:00")\
             .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
-            .limit(500).execute()
+            .order("timestamp", desc=False)\
+            .limit(5000).execute()
 
-        timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
-
-        # ── Fallback to yesterday if today has no data yet ────────────────
-        # This happens before 9:15 AM or on deployment restart
-        # Prevents Ignition stocks from dropping to Conviction overnight
-        using_yesterday = False
-        if len(timestamps) < 2:
-            from datetime import datetime, timedelta
+        if not result.data:
+            # Fallback to yesterday
             import pytz
             ist = pytz.timezone('Asia/Kolkata')
-            yesterday = (datetime.now(ist).date() - timedelta(days=1)).isoformat()
-            # Walk back to find last trading day (skip weekends)
             check = datetime.now(ist).date() - timedelta(days=1)
             while check.weekday() >= 5:
                 check -= timedelta(days=1)
             yesterday = check.isoformat()
-
-            ts_result = supabase.from_("oi_snapshots")\
-                .select("timestamp")\
+            result = supabase.from_("oi_snapshots")\
+                .select("symbol, oi, volume, last_price, timestamp")\
                 .eq("option_type", "FUT")\
-                .eq("symbol", "NIFTY")\
                 .gte("timestamp", f"{yesterday}T00:00:00+00:00")\
                 .lt("timestamp",  f"{yesterday}T23:59:59+00:00")\
-                .limit(500).execute()
-
-            timestamps = sorted(set(r["timestamp"] for r in (ts_result.data or [])))
-            if len(timestamps) >= 2:
-                using_yesterday = True
-                print(f"[Positional Radar] No today FUT data yet — using yesterday ({yesterday}) as carry-forward")
-            else:
+                .order("timestamp", desc=False)\
+                .limit(5000).execute()
+            if not result.data:
                 return fut_signals
 
-        ts_open   = timestamps[0]
-        ts_latest = timestamps[-1]
+        # Group by symbol, find open and latest
+        sym_rows = {}
+        for r in (result.data or []):
+            sym = r["symbol"]
+            if sym not in sym_rows:
+                sym_rows[sym] = []
+            sym_rows[sym].append(r)
 
-        def fetch_fut_oi(ts):
-            result = supabase.from_("oi_snapshots")\
-                .select("symbol, oi, volume, last_price")\
-                .eq("timestamp", ts)\
-                .eq("option_type", "FUT")\
-                .limit(500).execute()
-            oi_map = {}
-            for r in (result.data or []):
-                sym = r["symbol"]
-                oi_map[sym] = {"oi": r["oi"] or 0, "vol": r["volume"] or 0, "price": r["last_price"] or 0}
-            return oi_map
-
-        open_fut   = fetch_fut_oi(ts_open)
-        latest_fut = fetch_fut_oi(ts_latest)
-
-        for sym in latest_fut:
-            if sym not in open_fut:
+        for sym, rows in sym_rows.items():
+            if len(rows) < 2:
                 continue
-            oi_open   = open_fut[sym]["oi"]
-            oi_latest = latest_fut[sym]["oi"]
-            pr_open   = open_fut[sym]["price"]
-            pr_latest = latest_fut[sym]["price"]
-
+            open_row   = rows[0]
+            latest_row = rows[-1]
+            oi_open    = open_row["oi"] or 0
+            oi_latest  = latest_row["oi"] or 0
+            pr_open    = open_row["last_price"] or 0
+            pr_latest  = latest_row["last_price"] or 0
             if oi_open <= 0 or pr_open <= 0:
                 continue
-
             oi_chg_pct    = (oi_latest - oi_open) / oi_open * 100
             price_chg_pct = (pr_latest - pr_open) / pr_open * 100
-
             if abs(oi_chg_pct) < 2.0 or abs(price_chg_pct) < 0.2:
                 continue
-
             if oi_chg_pct > 0 and price_chg_pct > 0:
                 fut_signals[sym] = "LONG_BUILDUP"
             elif oi_chg_pct > 0 and price_chg_pct < 0:
@@ -225,12 +190,22 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
 
     except Exception as e:
         print(f"[Positional Radar] FUT signal fetch failed: {e}")
-
     return fut_signals
+
 
 from utils.oi_walls import get_oi_walls
 
+
 def get_positional_radar(min_consec: int = 0):
+    global _radar_cache, _radar_cache_time
+
+    # Serve cache if fresh
+    cache_key = str(min_consec)
+    if _radar_cache.get(cache_key) and (time_module.time() - _radar_cache_time) < _CACHE_TTL:
+        print(f"[Positional Radar] Serving cached result")
+        return _radar_cache[cache_key]
+
+    t0 = time_module.time()
     supabase = get_supabase()
     today = datetime.now(timezone.utc).date()
     today_str = today.isoformat()
@@ -244,111 +219,99 @@ def get_positional_radar(min_consec: int = 0):
 
     series_start = get_series_start(current_expiry)
 
-    import pytz
-    ist = pytz.timezone('Asia/Kolkata')
-    ist_today = datetime.now(ist).date()
-    cutoff = ist_today if ist_today.isoformat() < current_expiry else (ist_today - timedelta(days=1))
+    # ── BULK QUERY 1: All CE/PE OI for entire series in ONE query ─────────────
+    print(f"[Positional Radar] Fetching bulk OI data from {series_start}...")
+    all_oi_rows = []
+    for offset in range(0, 500000, 5000):
+        batch = supabase.from_("oi_snapshots")\
+            .select("symbol, oi, volume, option_type, timestamp")\
+            .in_("option_type", ["CE", "PE"])\
+            .eq("expiry", current_expiry)\
+            .gte("timestamp", f"{series_start}T00:00:00+00:00")\
+            .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
+            .range(offset, offset + 4999).execute()
+        if not batch.data:
+            break
+        all_oi_rows.extend(batch.data)
+        if len(batch.data) < 5000:
+            break
+    print(f"[Positional Radar] Loaded {len(all_oi_rows)} OI rows in {time_module.time()-t0:.1f}s")
 
-    trading_dates = []
-    check_date = datetime.strptime(series_start, '%Y-%m-%d').date()
-    while check_date <= cutoff:
-        d = check_date.isoformat()
-        check = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{d}T00:00:00+00:00")\
-            .lt("timestamp",  f"{d}T23:59:59+00:00")\
-            .limit(1).execute()
-        if check.data:
-            trading_dates.append(d)
-        check_date += timedelta(days=1)
+    # ── BULK QUERY 2: All CMP data for entire series in ONE query ─────────────
+    all_cmp_rows = supabase.from_("cmp_prices")\
+        .select("symbol, cmp, timestamp")\
+        .gte("timestamp", f"{series_start}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today_str}T23:59:59+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(10000).execute().data or []
+    print(f"[Positional Radar] Loaded {len(all_cmp_rows)} CMP rows in {time_module.time()-t0:.1f}s")
 
+    # ── Process: group by date, find EOD snapshot per day ─────────────────────
+    # Find all unique dates with data
+    date_ts_map = {}  # date -> set of timestamps
+    for r in all_oi_rows:
+        date_str = str(r["timestamp"])[:10]
+        if date_str not in date_ts_map:
+            date_ts_map[date_str] = set()
+        date_ts_map[date_str].add(r["timestamp"])
+
+    trading_dates = sorted(date_ts_map.keys())
     if len(trading_dates) < 3:
         return {"error": "Not enough trading days", "series_start": series_start, "expiry": current_expiry, "results": []}
 
-    oi_by_date:    dict = {}
-    ce_oi_by_date: dict = {}
-    pe_oi_by_date: dict = {}
-    vol_by_date:   dict = {}
-    cmp_by_date:   dict = {}
+    # For each date, find the EOD timestamp (latest of the day)
+    date_eod_ts = {d: max(ts_set) for d, ts_set in date_ts_map.items()}
 
-    for d in trading_dates:
-        # ── Get EOD timestamp — fetch all and take the latest ─────────────────
-        ts_q = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{d}T00:00:00+00:00")\
-            .lt("timestamp",  f"{d}T23:59:59+00:00")\
-            .limit(500).execute()
+    # Build OI maps: date -> sym -> {ce_oi, pe_oi, vol}
+    oi_by_date    = {}
+    ce_oi_by_date = {}
+    pe_oi_by_date = {}
+    vol_by_date   = {}
 
-        if not ts_q.data:
-            continue
+    for r in all_oi_rows:
+        date_str = str(r["timestamp"])[:10]
+        eod_ts   = date_eod_ts.get(date_str)
+        if r["timestamp"] != eod_ts:
+            continue  # only use EOD snapshot
+        sym = r["symbol"]
+        oi  = int(r["oi"] or 0)
+        vol = int(r["volume"] or 0)
+        opt = r["option_type"]
 
-        # Sort in Python — no .order() needed
-        all_ts = sorted(set(r["timestamp"] for r in ts_q.data))
-        eod_ts = all_ts[-1]  # latest timestamp of the day
+        if date_str not in oi_by_date:
+            oi_by_date[date_str]    = {}
+            ce_oi_by_date[date_str] = {}
+            pe_oi_by_date[date_str] = {}
+            vol_by_date[date_str]   = {}
 
-        raw = []
-        for offset in range(0, 200000, 1000):
-            batch = supabase.from_("oi_snapshots")\
-                .select("symbol, oi, volume, option_type")\
-                .eq("timestamp", eod_ts)\
-                .in_("option_type", ["CE", "PE"])\
-                .eq("expiry", current_expiry)\
-                .range(offset, offset + 999).execute()
-            if not batch.data:
-                break
-            raw.extend(batch.data)
-            if len(batch.data) < 1000:
-                break
+        oi_by_date[date_str][sym]  = oi_by_date[date_str].get(sym, 0) + oi
+        vol_by_date[date_str][sym] = vol_by_date[date_str].get(sym, 0) + vol
+        if opt == "CE":
+            ce_oi_by_date[date_str][sym] = ce_oi_by_date[date_str].get(sym, 0) + oi
+        elif opt == "PE":
+            pe_oi_by_date[date_str][sym] = pe_oi_by_date[date_str].get(sym, 0) + oi
 
-        sym_oi:    dict = {}
-        sym_ce_oi: dict = {}
-        sym_pe_oi: dict = {}
-        sym_vol:   dict = {}
+    # Build CMP map: date -> sym -> latest cmp
+    cmp_by_date = {}
+    for r in all_cmp_rows:
+        date_str = str(r["timestamp"])[:10]
+        sym = r["symbol"]
+        if date_str not in cmp_by_date:
+            cmp_by_date[date_str] = {}
+        cmp_by_date[date_str][sym] = float(r["cmp"])  # last seen = latest (sorted asc)
 
-        for r in raw:
-            sym = r["symbol"]
-            oi  = r["oi"] or 0
-            vol = r["volume"] or 0
-            opt = r["option_type"]
-
-            sym_oi[sym]  = sym_oi.get(sym, 0) + oi
-            sym_vol[sym] = sym_vol.get(sym, 0) + vol
-
-            if opt == "CE":
-                sym_ce_oi[sym] = sym_ce_oi.get(sym, 0) + oi
-            elif opt == "PE":
-                sym_pe_oi[sym] = sym_pe_oi.get(sym, 0) + oi
-
-        oi_by_date[d]    = sym_oi
-        ce_oi_by_date[d] = sym_ce_oi
-        pe_oi_by_date[d] = sym_pe_oi
-        vol_by_date[d]   = sym_vol
-
-        # ── CMP — fetch all and dedupe in Python ──────────────────────────────
-        cmp_q = supabase.from_("cmp_prices")\
-            .select("symbol, cmp, timestamp")\
-            .gte("timestamp", f"{d}T00:00:00+00:00")\
-            .lt("timestamp",  f"{d}T23:59:59+00:00")\
-            .limit(500).execute().data or []
-
-        # Sort by timestamp desc in Python, take latest CMP per symbol
-        cmp_q_sorted = sorted(cmp_q, key=lambda r: r["timestamp"], reverse=True)
-        day_cmp: dict = {}
-        for r in cmp_q_sorted:
-            if r["symbol"] not in day_cmp:
-                day_cmp[r["symbol"]] = float(r["cmp"])
-        cmp_by_date[d] = day_cmp
-
-    available_dates = [d for d in trading_dates if d in oi_by_date]
+    available_dates = [d for d in trading_dates if d in oi_by_date and d in cmp_by_date]
     total_trading_days = len(available_dates)
 
     if total_trading_days < 3:
         return {"error": "Insufficient data", "results": []}
 
+    print(f"[Positional Radar] {total_trading_days} trading days, processing symbols...")
+
+    # ── Today's FUT signals (2 queries instead of N) ──────────────────────────
     today_fut_signals = get_today_fut_signals(supabase, today_str)
-    # Check which symbols have active UOA signals today
+
+    # ── UOA symbols ───────────────────────────────────────────────────────────
     uoa_symbols: set = set()
     try:
         from api.uoa import get_uoa
@@ -356,21 +319,38 @@ def get_positional_radar(min_consec: int = 0):
         for sig in uoa_data.get("signals", []):
             if sig.get("score", 0) >= 3:
                 uoa_symbols.add(sig["symbol"])
-        print(f"[Positional Radar] UOA active symbols: {len(uoa_symbols)}")
     except Exception as e:
         print(f"[Positional Radar] UOA check failed: {e}")
 
+    # ── OI walls — fetch once for all symbols ─────────────────────────────────
+    # Get latest timestamp for walls
+    latest_ts_result = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("option_type", "FUT")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{today_str}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
+    has_today_data = bool(latest_ts_result.data)
+
     results = []
 
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    ist_today = datetime.now(ist).date()
+    cutoff = ist_today if ist_today.isoformat() < current_expiry else (ist_today - timedelta(days=1))
+
     for sym in SYMBOLS:
-        oi_series:    list = []
-        ce_oi_series: list = []
-        pe_oi_series: list = []
-        vol_series:   list = []
-        cmp_series:   list = []
-        date_labels:  list = []
+        oi_series    = []
+        ce_oi_series = []
+        pe_oi_series = []
+        vol_series   = []
+        cmp_series   = []
+        date_labels  = []
 
         for d in available_dates:
+            if d > cutoff.isoformat():
+                continue
             oi_val  = oi_by_date.get(d, {}).get(sym, 0)
             ce_val  = ce_oi_by_date.get(d, {}).get(sym, 0)
             pe_val  = pe_oi_by_date.get(d, {}).get(sym, 0)
@@ -390,10 +370,10 @@ def get_positional_radar(min_consec: int = 0):
         oi_chg_pct  = round((oi_series[-1]  - oi_series[0])  / oi_series[0]  * 100, 2) if oi_series[0]  > 0 else 0
         cmp_chg_pct = round((cmp_series[-1] - cmp_series[0]) / cmp_series[0] * 100, 2) if cmp_series[0] > 0 else 0
 
-        vol_window   = vol_series[-7:] if len(vol_series) >= 7 else vol_series[:-1]
-        vol_avg_7d   = sum(vol_window) / len(vol_window) if vol_window else 0
-        vol_today    = vol_series[-1]
-        vol_chg_pct  = round((vol_today - vol_avg_7d) / vol_avg_7d * 100, 2) if vol_avg_7d > 0 else 0
+        vol_window  = vol_series[-7:] if len(vol_series) >= 7 else vol_series[:-1]
+        vol_avg_7d  = sum(vol_window) / len(vol_window) if vol_window else 0
+        vol_today   = vol_series[-1]
+        vol_chg_pct = round((vol_today - vol_avg_7d) / vol_avg_7d * 100, 2) if vol_avg_7d > 0 else 0
         vol_series_chg = round((vol_series[-1] - vol_series[0]) / vol_series[0] * 100, 2) if vol_series[0] > 0 else 0
 
         oi_rising    = oi_chg_pct  >  3.0
@@ -418,7 +398,7 @@ def get_positional_radar(min_consec: int = 0):
             continue
 
         match_days, total_intervals = count_consistent_days(oi_series, cmp_series, vol_series, signal)
-        consistency_pct = round(match_days / total_intervals * 100) if total_intervals > 0 else 0
+        consistency_pct   = round(match_days / total_intervals * 100) if total_intervals > 0 else 0
         consistency_label = "HIGH" if consistency_pct >= 70 else "MEDIUM" if consistency_pct >= 50 else "LOW"
 
         accelerating, first_half_chg, second_half_chg = check_acceleration(oi_series, date_labels)
@@ -429,8 +409,8 @@ def get_positional_radar(min_consec: int = 0):
             else: break
 
         composition = get_oi_composition(
-            ce_oi_series[0],  ce_oi_series[-1],
-            pe_oi_series[0],  pe_oi_series[-1],
+            ce_oi_series[0], ce_oi_series[-1],
+            pe_oi_series[0], pe_oi_series[-1],
         )
 
         bias_confirmed = (
@@ -502,7 +482,6 @@ def get_positional_radar(min_consec: int = 0):
             "cmp":                 cmp_series[-1],
             "series_days":         len(oi_series) - 1,
             "has_uoa":             sym in uoa_symbols,
-            # OI Walls
             **get_oi_walls(sym, supabase, cmp_series[-1]),
         })
 
@@ -530,7 +509,7 @@ def get_positional_radar(min_consec: int = 0):
         "ce_dominated":     sum(1 for r in results if r["dominant"] == "CE"),
     }
 
-    return {
+    result = {
         "expiry":             current_expiry,
         "series_start":       series_start,
         "total_trading_days": total_trading_days,
@@ -539,3 +518,9 @@ def get_positional_radar(min_consec: int = 0):
         "summary":            summary,
         "results":            results,
     }
+
+    # Cache result
+    _radar_cache[cache_key] = result
+    _radar_cache_time = time_module.time()
+    print(f"[Positional Radar] Done in {time_module.time()-t0:.1f}s — {len(results)} signals")
+    return result
