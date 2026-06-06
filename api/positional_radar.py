@@ -156,29 +156,28 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
             if not result.data:
                 return fut_signals
 
-        # Group by symbol, find open and latest
-        sym_rows = {}
+        # Group by (symbol, expiry) to avoid mixing current/next month FUT
+        sym_expiry_rows = {}
         for r in (result.data or []):
-            sym = r["symbol"]
-            if sym not in sym_rows:
-                sym_rows[sym] = []
-            sym_rows[sym].append(r)
+            sym    = r["symbol"]
+            expiry = str(r.get("expiry") or "UNKNOWN")
+            key    = (sym, expiry)
+            if key not in sym_expiry_rows:
+                sym_expiry_rows[key] = []
+            sym_expiry_rows[key].append(r)
 
-        for sym, rows in sym_rows.items():
-            if len(rows) < 2:
+        # For each symbol pick nearest expiry rows only
+        sym_nearest = {}
+        for (sym, expiry), exp_rows in sym_expiry_rows.items():
+            if sym not in sym_nearest or (expiry != "UNKNOWN" and expiry < sym_nearest[sym][0]):
+                sym_nearest[sym] = (expiry, exp_rows)
+
+        for sym, (expiry, sym_exp_rows) in sym_nearest.items():
+            rows_sorted = sorted(sym_exp_rows, key=lambda r: r["timestamp"])
+            if len(rows_sorted) < 2:
                 continue
-            # Filter to nearest expiry only to avoid multi-expiry contamination
-            # But only if expiry field is populated
-            expiries = sorted(set(str(r.get("expiry")) for r in rows if r.get("expiry")))
-            if len(expiries) > 1:
-                # Multiple expiries — filter to nearest only
-                nearest = expiries[0]
-                filtered = [r for r in rows if str(r.get("expiry") or "") == nearest]
-                if len(filtered) >= 2:
-                    rows = filtered
-            # If expiry not populated or single expiry, use all rows as-is
-            open_row   = rows[0]
-            latest_row = rows[-1]
+            open_row   = rows_sorted[0]
+            latest_row = rows_sorted[-1]
             oi_open    = open_row["oi"] or 0
             oi_latest  = latest_row["oi"] or 0
             pr_open    = open_row["last_price"] or 0
