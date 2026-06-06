@@ -521,17 +521,6 @@ def oi_walls_detail(symbol: str):
     today = datetime.now(ist).date().isoformat()
     supabase = get_supabase()
 
-    @app.get("/vol-oi-breakout-debug")
-async def vol_oi_breakout_debug():
-    from utils.db import get_supabase
-    sb = get_supabase()
-    result = sb.from_("vol_oi_breakout_cache")\
-        .select("id, total, trade_date, computed_at")\
-        .eq("id", 1)\
-        .limit(1)\
-        .execute()
-    return {"supabase_result": result.data}
-
     # Latest snapshot timestamp
     latest = supabase.from_("oi_snapshots")\
         .select("timestamp")\
