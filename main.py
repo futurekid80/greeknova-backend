@@ -515,10 +515,15 @@ def keepalive_ping():
 @app.get("/oi-walls/{symbol}")
 def oi_walls_detail(symbol: str):
     from utils.db import get_supabase
-    from datetime import datetime
+    from datetime import datetime, timedelta
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
-    today = datetime.now(ist).date().isoformat()
+    check = datetime.now(ist).date()
+    for _ in range(5):
+        if check.weekday() < 5:
+            break
+        check -= timedelta(days=1)
+    today = check.isoformat()
     supabase = get_supabase()
 
     # Latest snapshot timestamp
