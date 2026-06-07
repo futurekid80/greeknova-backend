@@ -31,7 +31,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
 
         # ── Fetch CMP separately (small query) ────────────────────────────
         cmp_res = supabase.from_("cmp_prices") \
-            .select("symbol,cmp,price_chg_pct") \
+            .select("symbol,cmp") \
             .gte("timestamp", f"{trade_date}T00:00:00+00:00") \
             .lte("timestamp", f"{trade_date}T23:59:59+00:00") \
             .order("timestamp", desc=True) \
@@ -44,7 +44,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if sym not in seen:
                 cmp_map[sym] = {
                     "cmp": row.get("cmp"),
-                    "price_chg_pct": row.get("price_chg_pct")
+                    "price_chg_pct": None
                 }
                 seen.add(sym)
 
