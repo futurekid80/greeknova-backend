@@ -7,6 +7,36 @@ _signal_cache: dict = {}
 _signal_cache_time: float = 0
 SIGNAL_CACHE_TTL = 60  # seconds
 
+def _save_eod_to_supabase(supabase, result: dict):
+    """Save EOD snapshot to Supabase for persistence across restarts."""
+    try:
+        summary = {k: v for k, v in result.items() if k != "signals"}
+        supabase.table("intraday_signal_cache").upsert({
+            "id":         1,
+            "signals":    result["signals"],
+            "summary":    summary,
+            "trade_date": result["date"],
+        }, on_conflict="id").execute()
+        print(f"[SIGNAL_LOG] EOD snapshot saved to Supabase — {len(result['signals'])} signals")
+    except Exception as e:
+        print(f"[SIGNAL_LOG] Failed to save EOD snapshot: {e}")
+
+
+def _load_eod_from_supabase(supabase) -> dict | None:
+    """Load last EOD snapshot from Supabase."""
+    try:
+        res = supabase.from_("intraday_signal_cache")\
+            .select("*").eq("id", 1).limit(1).execute()
+        if not res.data:
+            return None
+        row = res.data[0]
+        result = {**row["summary"], "signals": row["signals"]}
+        print(f"[SIGNAL_LOG] Loaded EOD snapshot from Supabase — {len(row['signals'])} signals for {row['trade_date']}")
+        return result
+    except Exception as e:
+        print(f"[SIGNAL_LOG] Failed to load EOD snapshot: {e}")
+        return None
+
 
 def to_ist(ts: str) -> str:
     try:
@@ -238,19 +268,28 @@ def _get_atm_bias(atm_snapshot: dict, cmp: float) -> dict:
 def get_signal_log(date: str = None):
     global _signal_cache, _signal_cache_time
 
-    # ── Post-market: serve EOD snapshot indefinitely until next day ───────────
-    if not is_market_hours() and _signal_cache and _signal_cache.get("signals"):
-        today_utc = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        cache_date = _signal_cache.get("date", "")
-        if cache_date == today_utc or not date:
-            # Return frozen EOD snapshot — no recompute needed
-            return {**_signal_cache, "is_eod_snapshot": True}
+    supabase = get_supabase()
 
-    cache_ttl = 60 if is_market_hours() else 300
+    # ── Post-market / weekend: serve EOD snapshot ─────────────────────────────
+    if not is_market_hours():
+        # Try in-memory cache first
+        if _signal_cache and _signal_cache.get("signals"):
+            return {**_signal_cache, "is_eod_snapshot": True}
+        # Fall back to Supabase persisted snapshot
+        saved = _load_eod_from_supabase(supabase)
+        if saved and saved.get("signals"):
+            _signal_cache = saved
+            _signal_cache_time = time_module.time()
+            return {**saved, "is_eod_snapshot": True}
+        # No snapshot available yet
+        return {"signals": [], "total": 0, "snapshots": 0,
+                "message": "No EOD snapshot yet — will be available after first market session",
+                "is_eod_snapshot": True}
+
+    # ── Market hours: use in-memory cache ─────────────────────────────────────
+    cache_ttl = 60
     if _signal_cache and (time_module.time() - _signal_cache_time) < cache_ttl:
         return _signal_cache
-
-    supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
     # ── Step 1: Get all timestamps for today ─────────────────────────────────
@@ -597,6 +636,10 @@ def get_signal_log(date: str = None):
     if len(signals) > 0 or (uoa_fetch_ok and total_snaps >= 5):
         _signal_cache = result
         _signal_cache_time = time_module.time()
+        # Save to Supabase after 3:25 PM IST (10:55 UTC) — near market close
+        now_utc = datetime.now(timezone.utc)
+        if now_utc.hour > 10 or (now_utc.hour == 10 and now_utc.minute >= 55):
+            _save_eod_to_supabase(supabase, result)
     else:
         print(f"[SIGNAL_LOG] Not caching — {len(signals)} signals, uoa_ok={uoa_fetch_ok}, snaps={total_snaps}")
     return result
