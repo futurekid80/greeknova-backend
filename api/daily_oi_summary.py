@@ -51,17 +51,17 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         # ── Build upsert rows ─────────────────────────────────────────────
         rows = []
         for r in rpc_res.data:
-            sym = r["symbol"]
+            sym = r["r_symbol"]
             cmp_data = cmp_map.get(sym, {})
             rows.append({
                 "trade_date":    trade_date,
                 "symbol":        sym,
-                "total_oi":      r["total_oi"],
-                "oi_chg_abs":    r["oi_chg_abs"],
-                "oi_chg_pct":    r["oi_chg_pct"],
-                "total_volume":  r["total_volume"],
-                "vol_chg_abs":   r["vol_chg_abs"],
-                "vol_chg_pct":   r["vol_chg_pct"],
+                "total_oi":      r["r_total_oi"],
+                "oi_chg_abs":    r["r_oi_chg_abs"],
+                "oi_chg_pct":    r["r_oi_chg_pct"],
+                "total_volume":  r["r_total_volume"],
+                "vol_chg_abs":   r["r_vol_chg_abs"],
+                "vol_chg_pct":   r["r_vol_chg_pct"],
                 "close_price":   cmp_data.get("cmp"),
                 "price_chg_pct": cmp_data.get("price_chg_pct"),
             })
