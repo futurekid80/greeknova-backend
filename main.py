@@ -520,6 +520,46 @@ def oi_heatmap(symbol: str, date: str = None, expiry: str = None):
     from api.oi_heatmap import get_oi_heatmap
     return get_oi_heatmap(symbol=symbol, date=date, expiry=expiry)
 
+@app.get("/debug-cpr-candle/{symbol}")
+def debug_cpr_candle(symbol: str):
+    from services.kite_auth import get_kite_client
+    from datetime import datetime, timedelta
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.now(ist).date()
+    from_date = (today - timedelta(days=5)).isoformat()
+    to_date = today.isoformat()
+    kite = get_kite_client()
+    instruments = kite.instruments("NSE")
+    token = None
+    for inst in instruments:
+        if inst["tradingsymbol"] == symbol.upper():
+            token = inst["instrument_token"]
+            break
+    if not token:
+        return {"error": "token not found"}
+    candles = kite.historical_data(
+        instrument_token=token,
+        from_date=from_date,
+        to_date=to_date,
+        interval="day",
+        continuous=False,
+        oi=False,
+    )
+    return {
+        "today_ist": today.isoformat(),
+        "candles": [
+            {
+                "date": str(c["date"]),
+                "date_type": type(c["date"]).__name__,
+                "high": c["high"],
+                "low": c["low"],
+                "close": c["close"],
+            }
+            for c in candles
+        ]
+    }
+
 def keepalive_ping():
     try:
         import requests
