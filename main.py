@@ -230,6 +230,11 @@ async def lifespan(app: FastAPI):
         "cron", hour=16, minute=45, timezone="Asia/Kolkata", id="eod_cpr_compute",
         misfire_grace_time=600
     )
+    scheduler.add_job(
+        lambda: __import__('api.cpr', fromlist=['compute_and_store_weekly_monthly_cpr']).compute_and_store_weekly_monthly_cpr(),
+        "cron", hour=16, minute=50, timezone="Asia/Kolkata", id="weekly_monthly_cpr_compute",
+        misfire_grace_time=600
+    )
     scheduler.add_job(keepalive_ping, "interval", minutes=10, id="keepalive")
     scheduler.add_job(
         archive_old_snapshots,
@@ -486,7 +491,17 @@ def vacuum_scanner(max_distance_pct: float = 10.0):
 def cpr_scanner():
     from api.cpr import get_cpr_scanner
     return get_cpr_scanner()
+    
+@app.get("/cpr-scanner-timeframe")
+def cpr_scanner_timeframe(timeframe: str = "daily"):
+    from api.cpr import get_cpr_scanner_timeframe
+    return get_cpr_scanner_timeframe(timeframe)
 
+@app.get("/cpr-compute-weekly")
+def cpr_compute_weekly(trade_date: str = None):
+    from api.cpr import compute_and_store_weekly_monthly_cpr
+    return compute_and_store_weekly_monthly_cpr(trade_date=trade_date)
+    
 @app.get("/cpr-compute")
 def cpr_compute(trade_date: str = None):
     from api.cpr import compute_and_store_cpr
