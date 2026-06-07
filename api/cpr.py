@@ -182,7 +182,8 @@ def compute_and_store_cpr(trade_date: str = None):
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
-    def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
+
+def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
     """
     Computes Weekly and Monthly CPR levels.
     Weekly = previous complete week's H/L/C (Mon-Fri candle)
