@@ -499,11 +499,10 @@ def signal_log(date: str = None, symbol: str = None):
 
 @app.get("/signal-log/seed-eod")
 def seed_signal_log_eod():
-    """Manually trigger EOD snapshot save — use after market hours to seed."""
-    from api.signal_log import get_signal_log, _save_eod_to_supabase
+    """Manually force-compute and save EOD snapshot from last trading day."""
+    from api.signal_log import _save_eod_to_supabase
     from utils.db import get_supabase
     import datetime, pytz
-    # Force compute for last Friday
     ist = pytz.timezone("Asia/Kolkata")
     today = datetime.datetime.now(ist).date()
     for i in range(1, 6):
@@ -511,7 +510,23 @@ def seed_signal_log_eod():
         if d.weekday() < 5:
             last_trading_day = d.isoformat()
             break
-    result = get_signal_log(date=last_trading_day)
+
+    supabase = get_supabase()
+
+    # Force compute by monkey-patching market hours check
+    import api.signal_log as sl
+    original = sl.is_market_hours
+    sl.is_market_hours = lambda: True
+    try:
+        result = sl.get_signal_log(date=last_trading_day)
+    finally:
+        sl.is_market_hours = original
+
+    if result.get("signals"):
+        _save_eod_to_supabase(supabase, result)
+        return {"status": "saved", "date": last_trading_day, "signals": len(result["signals"])}
+    return {"status": "no signals found", "date": last_trading_day, "snapshots": result.get("snapshots", 0)}
+    
     if result.get("signals"):
         _save_eod_to_supabase(get_supabase(), result)
         return {"status": "saved", "date": last_trading_day, "signals": len(result["signals"])}
