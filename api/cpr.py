@@ -403,8 +403,13 @@ def get_cpr_scanner():
     now_ist = datetime.now(ist)
     today = now_ist.date().isoformat()
 
-    if now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
-        from datetime import timedelta
+    # On weekends, always query next Monday's CPR (already computed)
+    if now_ist.weekday() >= 5:
+        next_day = now_ist.date() + timedelta(days=1)
+        while next_day.weekday() >= 5:
+            next_day += timedelta(days=1)
+        query_date = next_day.isoformat()
+    elif now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
         next_day = now_ist.date() + timedelta(days=1)
         while next_day.weekday() >= 5:
             next_day += timedelta(days=1)
