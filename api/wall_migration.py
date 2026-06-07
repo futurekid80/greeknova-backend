@@ -30,9 +30,25 @@ def get_wall_migration(supabase) -> dict:
         ts_res = supabase.from_("oi_snapshots") \
             .select("timestamp") \
             .gte("timestamp", f"{today}T03:00:00+00:00") \
-            .lte("timestamp", f"{today}T11:00:00+00:00") \
+            .lte("timestamp", f"{today}T12:00:00+00:00") \
             .order("timestamp", desc=True) \
             .limit(20).execute()
+
+        # If fewer than 2 snapshots today, look back to last trading day
+        if len(ts_res.data or []) < 2:
+            for i in range(1, 6):
+                prev_day = (check - timedelta(days=i))
+                if prev_day.weekday() >= 5:
+                    continue
+                prev_date = prev_day.isoformat()
+                ts_res = supabase.from_("oi_snapshots") \
+                    .select("timestamp") \
+                    .gte("timestamp", f"{prev_date}T03:00:00+00:00") \
+                    .lte("timestamp", f"{prev_date}T12:00:00+00:00") \
+                    .order("timestamp", desc=True) \
+                    .limit(20).execute()
+                if len(ts_res.data or []) >= 2:
+                    break
 
         timestamps = [r["timestamp"] for r in (ts_res.data or [])]
         if len(timestamps) < 2:
