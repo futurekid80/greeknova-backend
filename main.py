@@ -502,6 +502,12 @@ def trigger_daily_oi_summary(date: str = None):
     from utils.db import get_supabase
     result = compute_daily_summary(get_supabase(), trade_date=date)
     return result
+
+@app.get("/wall-migration")
+def wall_migration():
+    from api.wall_migration import get_wall_migration
+    from utils.db import get_supabase
+    return get_wall_migration(get_supabase())
     
 @app.get("/vol-oi-breakout")
 async def vol_oi_breakout_endpoint():
