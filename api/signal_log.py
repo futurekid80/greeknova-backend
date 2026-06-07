@@ -422,7 +422,7 @@ def get_signal_log(date: str = None):
             .select("symbol, strike, option_type, oi")\
             .eq("timestamp", ts_latest)\
             .in_("option_type", ["CE", "PE"])\
-            .limit(10000)\
+            .limit(15000)\
             .execute()
         for r in (options_latest.data or []):
             sym    = r["symbol"]
