@@ -496,6 +496,26 @@ def cpr_compute(trade_date: str = None):
 def signal_log(date: str = None, symbol: str = None):
     from api.signal_log import get_signal_log
     return get_signal_log(date)
+
+@app.get("/signal-log/seed-eod")
+def seed_signal_log_eod():
+    """Manually trigger EOD snapshot save — use after market hours to seed."""
+    from api.signal_log import get_signal_log, _save_eod_to_supabase
+    from utils.db import get_supabase
+    import datetime, pytz
+    # Force compute for last Friday
+    ist = pytz.timezone("Asia/Kolkata")
+    today = datetime.datetime.now(ist).date()
+    for i in range(1, 6):
+        d = today - datetime.timedelta(days=i)
+        if d.weekday() < 5:
+            last_trading_day = d.isoformat()
+            break
+    result = get_signal_log(date=last_trading_day)
+    if result.get("signals"):
+        _save_eod_to_supabase(get_supabase(), result)
+        return {"status": "saved", "date": last_trading_day, "signals": len(result["signals"])}
+    return {"status": "no signals found", "date": last_trading_day}
     
 @app.get("/daily-oi-summary/compute")
 def trigger_daily_oi_summary(date: str = None):
