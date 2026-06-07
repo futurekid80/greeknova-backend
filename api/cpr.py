@@ -247,8 +247,18 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
             )
             # Use second to last candle = last COMPLETE week
             # Last candle may be current incomplete week
-            if len(weekly) >= 2:
-                w = weekly[-2]
+            if len(weekly) >= 1:
+                import pytz as _pytz
+                _ist = _pytz.timezone('Asia/Kolkata')
+                _now = datetime.now(_ist)
+                # On weekends, candles[-1] = last complete week
+                # During weekdays, candles[-1] = current incomplete week, use candles[-2]
+                if _now.weekday() >= 5:
+                    w = weekly[-1]
+                elif len(weekly) >= 2:
+                    w = weekly[-2]
+                else:
+                    w = weekly[-1]
                 weekly_ohlc[sym] = {
                     "high":  float(w["high"]),
                     "low":   float(w["low"]),
@@ -265,8 +275,17 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
                 oi=False,
             )
             # Use second to last = last COMPLETE month
-            if len(monthly) >= 2:
-                m = monthly[-2]
+            if len(monthly) >= 1:
+                _ist2 = _pytz.timezone('Asia/Kolkata')
+                _now2 = datetime.now(_ist2)
+                # June is current incomplete month, use May (candles[-2] on weekdays)
+                # But on first few days of month candles[-1] may still be last month
+                if _now2.day <= 5:
+                    m = monthly[-1]
+                elif len(monthly) >= 2:
+                    m = monthly[-2]
+                else:
+                    m = monthly[-1]
                 monthly_ohlc[sym] = {
                     "high":  float(m["high"]),
                     "low":   float(m["low"]),
