@@ -7,7 +7,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
 from commoditynova.mcx_scheduler import start_mcx_scheduler
 from commoditynova.mcx_router import router as mcx_router
+from utils.db import get_supabase
 from commoditynova.mcx_oi_map_router import router as mcx_oi_map_router
+from api.daily_oi_summary import compute_daily_summary
 
 
 INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
@@ -236,6 +238,15 @@ async def lifespan(app: FastAPI):
         timezone="Asia/Kolkata",
         id="weekly_archive",
         misfire_grace_time=3600,
+        replace_existing=True
+    )
+    scheduler.add_job(
+        lambda: compute_daily_summary(get_supabase()),
+        "cron",
+        hour=16, minute=45,
+        timezone="Asia/Kolkata",
+        id="daily_oi_summary",
+        misfire_grace_time=600,
         replace_existing=True
     )
     scheduler.start()
@@ -485,7 +496,13 @@ def cpr_compute(trade_date: str = None):
 def signal_log(date: str = None, symbol: str = None):
     from api.signal_log import get_signal_log
     return get_signal_log(date)
-
+    
+@app.get("/daily-oi-summary/compute")
+def trigger_daily_oi_summary(date: str = None):
+    from utils.db import get_supabase
+    result = compute_daily_summary(get_supabase(), trade_date=date)
+    return result
+    
 @app.get("/vol-oi-breakout")
 async def vol_oi_breakout_endpoint():
     from api.vol_oi_breakout import get_vol_oi_breakout
