@@ -220,19 +220,26 @@ def compute_and_store_cpr(trade_date: str = None):
                 oi=False,
             )
             if candles:
-                # Use the last candle whose date matches today
-                # If NSE hasn't finalized today's candle yet, fall back to previous day
+                # Kite returns date as datetime object — convert to IST date string
                 import pytz as _pytz
                 _ist = _pytz.timezone('Asia/Kolkata')
                 _today_str = datetime.now(_ist).date().isoformat()
-                c = candles[-1]
-                # Check if candle date matches today
-                candle_date = str(c["date"])[:10] if c.get("date") else ""
-                if candle_date != _today_str and len(candles) >= 2:
-                    # Today's candle not settled yet, use previous day
-                    c = candles[-2]
-                elif candle_date != _today_str:
-                    c = candles[-1]
+
+                # Find the candle matching today in IST
+                today_candle = None
+                for _c in reversed(candles):
+                    _cd = _c["date"]
+                    # Convert to IST date if it's a datetime object
+                    if hasattr(_cd, 'astimezone'):
+                        _cd_str = _cd.astimezone(_ist).strftime("%Y-%m-%d")
+                    else:
+                        _cd_str = str(_cd)[:10]
+                    if _cd_str == _today_str:
+                        today_candle = _c
+                        break
+
+                # Use today's candle if found, else use last candle
+                c = today_candle if today_candle else candles[-1]
                 ohlc_map[sym] = {
                     "high":  float(c["high"]),
                     "low":   float(c["low"]),
