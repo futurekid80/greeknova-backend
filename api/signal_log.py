@@ -481,7 +481,9 @@ def get_signal_log(date: str = None):
 
         if abs(oi_chg_pct) < 3.0:      continue
         if abs(price_chg_pct) < 0.3:   continue
-        if vol_latest < vol_open * 1.2: continue
+        # Volume filter — only apply if open volume is meaningful (>500 lots)
+        # Early morning vol_open can be near zero causing false exclusions
+        if vol_open > 5000 and vol_latest < vol_open * 1.2: continue
 
         signal_type, label, bias = classify(oi_chg_pct, price_chg_pct)
         if not signal_type:
