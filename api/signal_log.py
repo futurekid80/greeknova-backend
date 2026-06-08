@@ -646,7 +646,7 @@ def get_signal_log(date: str = None):
         _signal_cache_time = time_module.time()
         # Save to Supabase after 3:25 PM IST (10:55 UTC) — near market close
         now_utc = datetime.now(timezone.utc)
-        if now_utc.hour > 10 or (now_utc.hour == 10 and now_utc.minute >= 55):
+        if now_utc.hour > 10 or (now_utc.hour == 10 and now_utc.minute >= 50):
             _save_eod_to_supabase(supabase, result)
     else:
         print(f"[SIGNAL_LOG] Not caching — {len(signals)} signals, uoa_ok={uoa_fetch_ok}, snaps={total_snaps}")
