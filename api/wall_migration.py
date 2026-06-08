@@ -60,7 +60,9 @@ def get_wall_migration(supabase) -> dict:
             }
 
         ts_latest = timestamps[0]
-        ts_prev   = timestamps[4] if len(timestamps) >= 5 else timestamps[-1]
+        # Compare against earliest snapshot of the day (market open)
+        # This gives maximum wall shift visibility across the full session
+        ts_prev = timestamps[-1]
 
         # ── Fetch latest CMP for all symbols ─────────────────────────────
         cmp_res = supabase.from_("cmp_prices") \
@@ -234,7 +236,7 @@ def get_wall_migration(supabase) -> dict:
                 })
 
             # 8. Price inside very narrow range
-            if latest_walls["range_pct"] < 1.0 and cmp > pe_now and cmp < ce_now:
+            if latest_walls["range_pct"] < 0.75 and cmp > pe_now and cmp < ce_now:
                 alerts.append({
                     "type": "NARROW_RANGE_COILING",
                     "label": "Coiling — Narrow Range",
