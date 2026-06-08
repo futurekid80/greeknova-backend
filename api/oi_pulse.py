@@ -262,6 +262,7 @@ def get_oi_pulse():
             print(f"[OI Pulse] Live price fetch failed: {e}")
 
     if not prices:
+        # Get today's latest CMP
         cmp_result = supabase.from_("cmp_prices")\
             .select("symbol, cmp, timestamp")\
             .gte("timestamp", f"{active_date}T00:00:00+00:00")\
@@ -269,17 +270,36 @@ def get_oi_pulse():
             .order("timestamp", desc=False)\
             .limit(5000)\
             .execute()
-        first_cmp: dict = {}
         last_cmp: dict = {}
         for r in (cmp_result.data or []):
-            sym = r["symbol"]
-            if sym not in first_cmp:
-                first_cmp[sym] = float(r["cmp"])
-            last_cmp[sym] = float(r["cmp"])
+            last_cmp[r["symbol"]] = float(r["cmp"])
+
+        # Get previous day's EOD CMP as prev_close
+        prev_date = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
+        # Walk back to find last trading day
+        for days_back in range(1, 6):
+            check = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=days_back))
+            if check.weekday() < 5:  # skip weekends
+                prev_date = check.strftime('%Y-%m-%d')
+                break
+        prev_cmp_result = supabase.from_("cmp_prices")\
+            .select("symbol, cmp")\
+            .gte("timestamp", f"{prev_date}T00:00:00+00:00")\
+            .lt("timestamp", f"{prev_date}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(500)\
+            .execute()
+        prev_close_map: dict = {}
+        seen_prev = set()
+        for r in (prev_cmp_result.data or []):
+            if r["symbol"] not in seen_prev:
+                prev_close_map[r["symbol"]] = float(r["cmp"])
+                seen_prev.add(r["symbol"])
+
         for sym in last_cmp:
             prices[sym] = {
                 "ltp": last_cmp[sym],
-                "prev_close": first_cmp.get(sym, last_cmp[sym])
+                "prev_close": prev_close_map.get(sym, last_cmp[sym])
             }
 
     # Step 5: Build items
