@@ -130,21 +130,11 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     # Must be within all_strikes (filtered range) to show correctly
     # Wall = strike with maximum OI (strongest writer concentration)
     # Use full ce_oi/pe_oi dicts (all expiry strikes), then clamp to all_strikes for display
-    ce_wall_raw = max(ce_oi, key=ce_oi.get) if ce_oi else None
-    pe_wall_raw = max(pe_oi, key=pe_oi.get) if pe_oi else None
-
-    # If wall strike is outside the display range, find closest strike in range
-    if ce_wall_raw and ce_wall_raw not in all_strikes:
-        candidates = [s for s in all_strikes if ce_oi.get(s, 0) > 0]
-        ce_wall = max(candidates, key=lambda s: ce_oi.get(s, 0)) if candidates else ce_wall_raw
-    else:
-        ce_wall = ce_wall_raw
-
-    if pe_wall_raw and pe_wall_raw not in all_strikes:
-        candidates = [s for s in all_strikes if pe_oi.get(s, 0) > 0]
-        pe_wall = max(candidates, key=lambda s: pe_oi.get(s, 0)) if candidates else pe_wall_raw
-    else:
-        pe_wall = pe_wall_raw
+    # Walls computed from filtered strikes only — ensures they always display correctly
+    # CE wall = strike with max CE OI within displayed range
+    # PE wall = strike with max PE OI within displayed range
+    ce_wall = max(all_strikes, key=lambda s: ce_oi.get(s, 0)) if all_strikes else None
+    pe_wall = max(all_strikes, key=lambda s: pe_oi.get(s, 0)) if all_strikes else None
 
     # PCR using ATM ±10 strikes only (standardized)
     strike_interval = 100 if symbol == "BANKNIFTY" else 50
