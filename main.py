@@ -222,6 +222,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Startup capture failed: {e}")
 
+    # ── Warm up Positional Radar cache ─────────────────────────────────────
+    try:
+        from api.positional_radar import get_positional_radar
+        threading.Thread(target=get_positional_radar, args=(0,), daemon=True).start()
+        print("📊 Positional Radar cache warm-up triggered")
+    except Exception as e:
+        print(f"⚠️ Positional Radar warm-up failed: {e}")
+
     # ── GreekNova jobs (unchanged) ─────────────────────────────────────────
     scheduler.add_job(run_full_capture, "interval", minutes=5, id="full_capture")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
