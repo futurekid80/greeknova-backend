@@ -115,8 +115,10 @@ def get_wall_migration(supabase) -> dict:
             sig_pe = {s: v for s, v in pe_below.items() if v >= threshold_pe}
             if not sig_ce or not sig_pe:
                 return None
-            ce_wall = min(sig_ce, key=lambda s: s)   # nearest significant CE above
-            pe_wall = max(sig_pe, key=lambda s: s)   # nearest significant PE below
+            # Wall = strike with MAXIMUM OI, not just nearest
+            # Nearest strike is noise — real wall is where writers have concentrated
+            ce_wall = max(sig_ce, key=lambda s: sig_ce[s])
+            pe_wall = max(sig_pe, key=lambda s: sig_pe[s])
             return {
                 "ce_wall": ce_wall,
                 "pe_wall": pe_wall,
