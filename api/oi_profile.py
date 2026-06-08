@@ -327,6 +327,49 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
                 })
         wall_migration.reverse()
 
+    # ── Yesterday's EOD OI per strike (for delta overlay) ────────────────────
+    prev_oi_map: dict = {}
+    try:
+        for i in range(1, 6):
+            prev_check = (today - timedelta(days=i))
+            if prev_check.weekday() >= 5:
+                continue
+            prev_date_str = prev_check.isoformat()
+            prev_ts_q = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", symbol)\
+                .gte("timestamp", f"{prev_date_str}T00:00:00+00:00")\
+                .lt("timestamp",  f"{prev_date_str}T23:59:59+00:00")\
+                .order("timestamp", desc=True)\
+                .limit(1).execute()
+            if prev_ts_q.data:
+                prev_ts = prev_ts_q.data[0]["timestamp"]
+                prev_rows = supabase.from_("oi_snapshots")\
+                    .select("strike, option_type, oi")\
+                    .eq("symbol", symbol)\
+                    .eq("timestamp", prev_ts)\
+                    .eq("expiry", active_expiry)\
+                    .in_("option_type", ["CE", "PE"])\
+                    .limit(2000).execute()
+                for r in (prev_rows.data or []):
+                    s = float(r["strike"])
+                    oi = int(r["oi"] or 0)
+                    key = f"{s}_{r['option_type']}"
+                    prev_oi_map[key] = oi
+                break
+    except Exception as e:
+        print(f"[OI Profile] Prev OI fetch failed: {e}")
+
+    # Add delta to each profile row
+    for row in profile:
+        s = row["strike"]
+        prev_ce = prev_oi_map.get(f"{s}_CE", 0)
+        prev_pe = prev_oi_map.get(f"{s}_PE", 0)
+        row["prev_ce_oi"] = prev_ce
+        row["prev_pe_oi"] = prev_pe
+        row["ce_oi_delta"] = row["ce_oi"] - prev_ce
+        row["pe_oi_delta"] = row["pe_oi"] - prev_pe
+        
     return {
         "symbol":          symbol,
         "date":            date,
@@ -345,4 +388,5 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         "profile":         profile,
         "wall_migration":  wall_migration,
         "vacuum_count":    sum(1 for p in profile if p["is_vacuum"]),
+        "has_prev_oi":     len(prev_oi_map) > 0,
     }
