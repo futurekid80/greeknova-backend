@@ -245,7 +245,7 @@ def get_wall_migration(supabase) -> dict:
                 })
 
             # 8. Price inside very narrow range
-            if latest_walls["range_pct"] < 1.0 and cmp > pe_now and cmp < ce_now:
+            if latest_walls["range_pct"] < 0.5 and cmp > pe_now and cmp < ce_now:
                 alerts.append({
                     "type": "NARROW_RANGE_COILING",
                     "label": "Coiling — Narrow Range",
