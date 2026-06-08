@@ -626,17 +626,21 @@ def get_signal_log(date: str = None):
         reverse=True
     )
 
+    is_expiry_week = False
+    try:
+        from datetime import date
+        d = date.today()
+        # Tuesday = weekday 1
+        days_to_tuesday = (1 - d.weekday()) % 7
+        is_expiry_week = days_to_tuesday <= 2
+    except:
+        pass
+
     result = {
         "date":          today,
         "signals":       signals,
-        "total":         len(signals),
-        "snapshots":     total_snaps,
-        "open_time":     to_ist(ts_open),
-        "latest_time":   to_ist(ts_latest),
-        "long_buildup":  sum(1 for s in signals if s["signal_type"] == "LONG_BUILDUP"),
-        "short_buildup": sum(1 for s in signals if s["signal_type"] == "SHORT_BUILDUP"),
-        "short_covering":sum(1 for s in signals if s["signal_type"] == "SHORT_COVERING"),
-        "long_unwinding":sum(1 for s in signals if s["signal_type"] == "LONG_UNWINDING"),
+        "message":       "Expiry week — low OI buildup expected. Positions rolling over." if (len(signals) == 0 and is_expiry_week) else None,
+        ...
     }
 
     if len(signals) > 0 or (uoa_fetch_ok and total_snaps >= 5):
