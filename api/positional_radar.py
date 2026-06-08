@@ -314,15 +314,6 @@ def get_positional_radar(min_consec: int = 0):
         print(f"[Positional Radar] UOA check failed: {e}")
 
     # ── OI walls — fetch once for all symbols ─────────────────────────────────
-    # Get latest timestamp for walls
-    latest_ts_result = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("option_type", "FUT")\
-        .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{today_str}T00:00:00+00:00")\
-        .order("timestamp", desc=True)\
-        .limit(1).execute()
-    has_today_data = bool(latest_ts_result.data)
 
     results = []
 
