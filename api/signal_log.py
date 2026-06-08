@@ -272,15 +272,20 @@ def get_signal_log(date: str = None):
 
     # ── Post-market / weekend: serve EOD snapshot ─────────────────────────────
     if not is_market_hours():
-        # Try in-memory cache first
-        if _signal_cache and _signal_cache.get("signals"):
+        today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+        if _signal_cache and _signal_cache.get("signals") and _signal_cache.get("date") == today_str:
             return {**_signal_cache, "is_eod_snapshot": True}
-        # Fall back to Supabase persisted snapshot
         saved = _load_eod_from_supabase(supabase)
-        if saved and saved.get("signals"):
+        # Only serve saved snapshot if it's from today
+        if saved and saved.get("signals") and saved.get("date") == today_str:
             _signal_cache = saved
             _signal_cache_time = time_module.time()
             return {**saved, "is_eod_snapshot": True}
+        # No valid today snapshot — return empty with message
+        return {"signals": [], "total": 0, "snapshots": 0,
+                "date": today_str,
+                "message": "No signals captured today — market was low activity",
+                "is_eod_snapshot": True}
         # No snapshot available yet
         return {"signals": [], "total": 0, "snapshots": 0,
                 "message": "No EOD snapshot yet — will be available after first market session",
@@ -636,7 +641,7 @@ def get_signal_log(date: str = None):
         "message":        "No significant OI buildup detected — market may be in consolidation or low activity phase." if len(signals) == 0 else None,
     }
 
-    if len(signals) > 0 or (uoa_fetch_ok and total_snaps >= 5):
+    if uoa_fetch_ok and total_snaps >= 5:
         _signal_cache = result
         _signal_cache_time = time_module.time()
         # Save to Supabase after 3:25 PM IST (10:55 UTC) — near market close
