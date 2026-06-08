@@ -60,9 +60,7 @@ def get_wall_migration(supabase) -> dict:
             }
 
         ts_latest = timestamps[0]
-        # Compare against earliest snapshot of the day (market open)
-        # This gives maximum wall shift visibility across the full session
-        ts_prev = timestamps[-1]
+        ts_prev   = timestamps[4] if len(timestamps) >= 5 else timestamps[-1]
 
         # ── Fetch latest CMP for all symbols ─────────────────────────────
         cmp_res = supabase.from_("cmp_prices") \
@@ -103,29 +101,38 @@ def get_wall_migration(supabase) -> dict:
         def get_walls(strike_map: dict, cmp: float) -> dict | None:
             if not strike_map or cmp <= 0:
                 return None
-            ce_above = {s: v["ce_oi"] for s, v in strike_map.items() if s > cmp and v["ce_oi"] > 0}
-            pe_below = {s: v["pe_oi"] for s, v in strike_map.items() if s < cmp and v["pe_oi"] > 0}
+
+            ce_oi: dict = {}
+            pe_oi: dict = {}
+            for strike, v in strike_map.items():
+                ce_oi[strike] = v.get("ce_oi", 0)
+                pe_oi[strike] = v.get("pe_oi", 0)
+
+            ce_above = {s: v for s, v in ce_oi.items() if s > cmp and v > 0}
+            pe_below = {s: v for s, v in pe_oi.items() if s < cmp and v > 0}
+            if not ce_above: ce_above = {s: v for s, v in ce_oi.items() if v > 0}
+            if not pe_below: pe_below = {s: v for s, v in pe_oi.items() if v > 0}
             if not ce_above or not pe_below:
                 return None
-            max_ce_oi = max(ce_above.values())
-            max_pe_oi = max(pe_below.values())
-            threshold_ce = max_ce_oi * 0.10
-            threshold_pe = max_pe_oi * 0.10
-            sig_ce = {s: v for s, v in ce_above.items() if v >= threshold_ce}
-            sig_pe = {s: v for s, v in pe_below.items() if v >= threshold_pe}
-            if not sig_ce or not sig_pe:
-                return None
-            # Wall = strike with MAXIMUM OI, not just nearest
-            # Nearest strike is noise — real wall is where writers have concentrated
-            ce_wall = max(sig_ce, key=lambda s: sig_ce[s])
-            pe_wall = max(sig_pe, key=lambda s: sig_pe[s])
+
+            max_ce = max(ce_above.values(), default=1)
+            max_pe = max(pe_below.values(), default=1)
+            ce_sig = {s: v for s, v in ce_above.items() if v >= max_ce * 0.10} or ce_above
+            pe_sig = {s: v for s, v in pe_below.items() if v >= max_pe * 0.10} or pe_below
+
+            ce_wall = min(ce_sig.keys())
+            pe_wall = max(pe_sig.keys())
+
+            trade_range = round(abs(ce_wall - pe_wall), 1)
+            trade_range_pct = round(trade_range / cmp * 100, 2) if cmp > 0 else 0
+
             return {
-                "ce_wall": ce_wall,
-                "pe_wall": pe_wall,
-                "ce_wall_oi": sig_ce[ce_wall],
-                "pe_wall_oi": sig_pe[pe_wall],
-                "range": round(ce_wall - pe_wall, 1),
-                "range_pct": round((ce_wall - pe_wall) / cmp * 100, 2) if cmp > 0 else 0,
+                "ce_wall":     ce_wall,
+                "pe_wall":     pe_wall,
+                "ce_wall_oi":  ce_sig[ce_wall],
+                "pe_wall_oi":  pe_sig[pe_wall],
+                "range":       trade_range,
+                "range_pct":   trade_range_pct,
             }
 
         # ── Analyze each symbol ───────────────────────────────────────────
@@ -238,7 +245,7 @@ def get_wall_migration(supabase) -> dict:
                 })
 
             # 8. Price inside very narrow range
-            if latest_walls["range_pct"] < 0.75 and cmp > pe_now and cmp < ce_now:
+            if latest_walls["range_pct"] < 1.0 and cmp > pe_now and cmp < ce_now:
                 alerts.append({
                     "type": "NARROW_RANGE_COILING",
                     "label": "Coiling — Narrow Range",
