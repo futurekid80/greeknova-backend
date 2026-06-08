@@ -125,8 +125,25 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     total_pe = sum(pe_oi.values())
     total_oi = total_ce + total_pe
     poc_strike = max(all_strikes, key=lambda s: (ce_oi.get(s, 0) + pe_oi.get(s, 0)))
-    ce_wall = max(ce_oi, key=ce_oi.get) if ce_oi else None
-    pe_wall = max(pe_oi, key=pe_oi.get) if pe_oi else None
+    # CE wall = nearest significant CE above CMP within profile range
+    # PE wall = nearest significant PE below CMP within profile range
+    # Must be within all_strikes (filtered range) to show correctly
+    ce_above = {s: ce_oi[s] for s in all_strikes if s > (cmp or 0) and ce_oi.get(s, 0) > 0}
+    pe_below = {s: pe_oi[s] for s in all_strikes if s < (cmp or 0) and pe_oi.get(s, 0) > 0}
+
+    if ce_above:
+        max_ce_oi = max(ce_above.values())
+        ce_sig = {s: v for s, v in ce_above.items() if v >= max_ce_oi * 0.10}
+        ce_wall = min(ce_sig.keys()) if ce_sig else min(ce_above.keys())
+    else:
+        ce_wall = max(all_strikes, key=lambda s: ce_oi.get(s, 0)) if all_strikes else None
+
+    if pe_below:
+        max_pe_oi = max(pe_below.values())
+        pe_sig = {s: v for s, v in pe_below.items() if v >= max_pe_oi * 0.10}
+        pe_wall = max(pe_sig.keys()) if pe_sig else max(pe_below.keys())
+    else:
+        pe_wall = max(all_strikes, key=lambda s: pe_oi.get(s, 0)) if all_strikes else None
 
     # PCR using ATM ±10 strikes only (standardized)
     strike_interval = 100 if symbol == "BANKNIFTY" else 50
