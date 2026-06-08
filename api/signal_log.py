@@ -312,7 +312,10 @@ def get_signal_log(date: str = None):
     # First snapshot (9:18 AM) has near-zero volume — exchange feeds not fully
     # populated yet. Second snapshot (9:23 AM) gives stable OI + volume baseline.
     # This prevents artificial 10,000%+ volume surge numbers.
-    ts_open     = timestamps[1] if len(timestamps) >= 2 else timestamps[0]
+    # Use 5th snapshot (~9:35 AM) as open baseline — prices fully populated by then
+    # Fall back to earlier if fewer snapshots available
+    open_idx = min(4, len(timestamps) - 2)
+    ts_open  = timestamps[open_idx]
     ts_latest   = timestamps[-1]
     total_snaps = len(timestamps)
 
@@ -472,8 +475,9 @@ def get_signal_log(date: str = None):
         price_open   = open_snap["last_price"]
         price_latest = latest_snap["last_price"]
 
-        if oi_open == 0 or vol_open == 0 or price_open == 0:
+        if oi_open == 0 or price_open == 0:
             continue
+        # vol_open can be 0 early morning — handled by volume filter below
 
         oi_chg_pct    = round((oi_latest - oi_open) / oi_open * 100, 2)
         price_chg_pct = round((price_latest - price_open) / price_open * 100, 2)
