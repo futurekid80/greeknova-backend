@@ -148,6 +148,11 @@ def get_uoa(date: str = None):
     for r in new_data_raw:
         sym = r["symbol"]
         exp = r.get("expiry")
+        opt = r.get("option_type", "")
+        # Only use CE/PE rows to find nearest options expiry
+        # FUT expiry is monthly and would override weekly options expiry
+        if opt not in ("CE", "PE"):
+            continue
         if not exp or exp < today_str:
             continue
         if sym not in nearest_expiry_map or exp < nearest_expiry_map[sym]:
