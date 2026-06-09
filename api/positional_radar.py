@@ -231,13 +231,37 @@ def get_positional_radar(min_consec: int = 0):
     # ── SERVER-SIDE AGGREGATION via RPC ──────────────────────────────────────
     # PostgreSQL aggregates EOD OI per symbol per day — avoids fetching 1M+ rows
     print(f"[Positional Radar] Fetching EOD OI via RPC from {series_start}...")
-    rpc_result = supabase.rpc("get_positional_radar_eod", {
-        "p_expiry":       current_expiry,
-        "p_series_start": series_start,
-        "p_series_end":   today_str,
-    }).execute()
-    all_oi_rows = rpc_result.data or []
+    try:
+        rpc_result = supabase.rpc("get_positional_radar_eod", {
+            "p_expiry":       current_expiry,
+            "p_series_start": series_start,
+            "p_series_end":   today_str,
+        }).execute()
+        all_oi_rows = rpc_result.data or []
+    except Exception as e:
+        print(f"[Positional Radar] OI RPC failed: {e}")
+        all_oi_rows = []
     print(f"[Positional Radar] RPC returned {len(all_oi_rows)} rows in {time_module.time()-t0:.1f}s")
+
+    # ── CMP data — EOD CMP per symbol per day via RPC ────────────────────────
+    try:
+        cmp_rpc = supabase.rpc("get_eod_cmp", {
+            "p_series_start": series_start,
+            "p_series_end":   today_str,
+        }).execute()
+        all_cmp_rows = cmp_rpc.data or []
+    except Exception as e:
+        print(f"[Positional Radar] CMP RPC failed: {e}")
+        all_cmp_rows = []
+    print(f"[Positional Radar] Loaded {len(all_cmp_rows)} CMP rows via RPC in {time_module.time()-t0:.1f}s")
+
+    # Serve stale cache if both RPCs failed
+    if not all_oi_rows or not all_cmp_rows:
+        if _radar_cache.get(cache_key):
+            print("[Positional Radar] RPC failed — serving stale cache")
+            return _radar_cache[cache_key]
+        return {"error": "Data fetch failed", "results": [], "total": 0,
+                "expiry": current_expiry, "series_start": series_start}
 
     # ── CMP data — EOD CMP per symbol per day via RPC ────────────────────────
     cmp_rpc = supabase.rpc("get_eod_cmp", {
