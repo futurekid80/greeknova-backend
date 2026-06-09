@@ -238,12 +238,24 @@ def get_positional_radar(min_consec: int = 0):
     # PostgreSQL aggregates EOD OI per symbol per day — avoids fetching 1M+ rows
     print(f"[Positional Radar] Fetching EOD OI via RPC from {series_start}...")
     try:
+        # Set longer timeout for this heavy query before calling
+        try:
+            supabase.rpc("set_config", {
+                "parameter": "statement_timeout",
+                "value": "25000",
+                "is_local": True
+            }).execute()
+        except:
+            pass
         rpc_result = supabase.rpc("get_positional_radar_eod", {
             "p_expiry":       current_expiry,
             "p_series_start": series_start,
             "p_series_end":   today_str,
         }).execute()
         all_oi_rows = rpc_result.data or []
+    except Exception as e:
+        print(f"[Positional Radar] OI RPC failed: {e}")
+        all_oi_rows = []
     except Exception as e:
         print(f"[Positional Radar] OI RPC failed: {e}")
         all_oi_rows = []
