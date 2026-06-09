@@ -270,6 +270,12 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=600,
         replace_existing=True
     )
+
+    scheduler.add_job(
+        watchdog_cpr,
+        "cron", hour=17, minute=15, timezone="Asia/Kolkata", id="cpr_watchdog",
+        misfire_grace_time=600
+    )
     scheduler.start()
 
     # ── CommodityNova scheduler ────────────────────────────────────────────
@@ -393,6 +399,47 @@ def archive_old_snapshots():
         print(f"[ARCHIVE] Weekly archive complete ✅")
     except Exception as e:
         print(f"[ARCHIVE] Error: {e}")
+
+def watchdog_cpr():
+    """
+    Watchdog job — runs at 5:15 PM IST.
+    Checks if next trading day's CPR was computed by the 4:45 PM job.
+    If missing (e.g. due to Railway restart), re-runs CPR compute automatically.
+    """
+    import pytz
+    from datetime import datetime, timedelta
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+    if now.weekday() >= 5:
+        return  # Skip weekends
+
+    # Compute what trade_date should exist
+    next_day = now.date() + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    expected_date = next_day.isoformat()
+
+    # Check if CPR exists for that date
+    try:
+        from utils.db import get_supabase
+        supabase = get_supabase()
+        result = supabase.from_("cpr_levels")\
+            .select("symbol")\
+            .eq("trade_date", expected_date)\
+            .limit(1).execute()
+
+        if result.data:
+            print(f"[CPR Watchdog] ✅ CPR for {expected_date} exists — no action needed")
+            return
+
+        # CPR missing — re-run
+        print(f"[CPR Watchdog] ⚠️ CPR for {expected_date} missing — re-running compute...")
+        from api.cpr import compute_and_store_cpr
+        result = compute_and_store_cpr()
+        print(f"[CPR Watchdog] ✅ Re-computed: {result}")
+
+    except Exception as e:
+        print(f"[CPR Watchdog] ❌ Error: {e}")
 
 def auto_refresh_token():
     from datetime import datetime
