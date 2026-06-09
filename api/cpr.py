@@ -437,12 +437,29 @@ def get_cpr_scanner_timeframe(timeframe: str = "daily"):
                 oi=False,
             )
             if candles:
-                # Always use last candle — Kite never returns incomplete daily candles
-                c = candles[-1]
+                # Find prev_trading_day candle explicitly — never use candles[-1]
+                # candles[-1] at 4:45 PM = today's candle (wrong for next-day CPR)
+                # We need yesterday's candle as the "previous" day's OHLC
+                prev_trading_day = (today - timedelta(days=1))
+                while prev_trading_day.weekday() >= 5:
+                    prev_trading_day -= timedelta(days=1)
+                prev_str = prev_trading_day.isoformat()
+
+                matched = None
+                for c in reversed(candles):
+                    c_date = str(c["date"])[:10]
+                    if c_date == prev_str:
+                        matched = c
+                        break
+
+                if not matched:
+                    matched = candles[-1]
+                    print(f"[CPR] {sym}: no match for {prev_str}, fallback to {str(candles[-1]['date'])[:10]}")
+
                 ohlc_map[sym] = {
-                    "high":  float(c["high"]),
-                    "low":   float(c["low"]),
-                    "close": float(c["close"]),
+                    "high":  float(matched["high"]),
+                    "low":   float(matched["low"]),
+                    "close": float(matched["close"]),
                 }
             time.sleep(0.05)
         except Exception as e:
