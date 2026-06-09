@@ -263,13 +263,6 @@ def get_positional_radar(min_consec: int = 0):
         return {"error": "Data fetch failed", "results": [], "total": 0,
                 "expiry": current_expiry, "series_start": series_start}
 
-    # ── CMP data — EOD CMP per symbol per day via RPC ────────────────────────
-    cmp_rpc = supabase.rpc("get_eod_cmp", {
-        "p_series_start": series_start,
-        "p_series_end":   today_str,
-    }).execute()
-    all_cmp_rows = cmp_rpc.data or []
-    print(f"[Positional Radar] Loaded {len(all_cmp_rows)} CMP rows via RPC in {time_module.time()-t0:.1f}s")
 
     # ── Build OI maps from RPC result ─────────────────────────────────────────
     # RPC returns: trade_date, symbol, ce_oi, pe_oi, total_oi, total_vol
