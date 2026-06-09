@@ -203,6 +203,12 @@ def get_today_fut_signals(supabase, today_str: str) -> dict:
 
 
 from utils.oi_walls import get_oi_walls, get_all_oi_walls
+def clear_radar_cache():
+    global _radar_cache, _radar_cache_time
+    _radar_cache = {}
+    _radar_cache_time = 0.0
+    print("[Positional Radar] Cache cleared manually")
+    return {"status": "cache cleared"}
 
 
 def get_positional_radar(min_consec: int = 0):
