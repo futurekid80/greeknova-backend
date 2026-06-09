@@ -226,14 +226,14 @@ async def lifespan(app: FastAPI):
     try:
         from api.positional_radar import get_positional_radar
         def _warmup():
-        try:
-            import time
-            time.sleep(5)
-            get_positional_radar(0)
-            print("📊 Positional Radar warm-up complete")
-        except Exception as e:
-            print(f"📊 Positional Radar warm-up failed (non-fatal): {e}")
-    threading.Thread(target=_warmup, daemon=True).start()
+            try:
+                import time
+                time.sleep(5)
+                get_positional_radar(0)
+                print("📊 Positional Radar warm-up complete")
+            except Exception as e:
+                print(f"📊 Positional Radar warm-up failed (non-fatal): {e}")
+        threading.Thread(target=_warmup, daemon=True).start()
         print("📊 Positional Radar cache warm-up triggered")
     except Exception as e:
         print(f"⚠️ Positional Radar warm-up failed: {e}")
