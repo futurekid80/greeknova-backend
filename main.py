@@ -535,6 +535,11 @@ def ask_context_default():
     from api.ask_context import get_ask_context
     return get_ask_context("NIFTY")
 
+@app.get("/radar-cache-clear")
+def radar_cache_clear():
+    from api.positional_radar import clear_radar_cache
+    return clear_radar_cache()
+
 @app.get("/positional-radar")
 def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
