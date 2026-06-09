@@ -182,36 +182,9 @@ def compute_and_store_cpr(trade_date: str = None):
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
-
-def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
-    """
-    Computes Weekly and Monthly CPR levels.
-    Weekly = previous complete week's H/L/C (Mon-Fri candle)
-    Monthly = previous complete month's H/L/C
-    Called alongside daily CPR at 4:45 PM IST.
-    """
-    supabase = get_supabase()
-    try:
-        from services.kite_auth import get_kite_client
-        kite = get_kite_client()
-    except Exception as e:
-        print(f"[CPR_WM] Kite auth failed: {e}")
-        return {"error": str(e)}
-
-    import pytz
-    ist = pytz.timezone('Asia/Kolkata')
-    today = datetime.now(ist).date()
-
-    if not trade_date:
-        next_day = today + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        trade_date = next_day.isoformat()
-
-    print(f"[CPR_WM] Computing weekly/monthly CPR for trade_date: {trade_date}")
-
+    # ── Build instrument token map ────────────────────────────────────────────
     INDEX_TOKENS = {
-        "NIFTY":    256265,
+        "NIFTY":     256265,
         "BANKNIFTY": 260105,
         "FINNIFTY":  257801,
     }
@@ -221,144 +194,109 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
         for inst in instruments:
             if inst["tradingsymbol"] in STOCKS:
                 token_map[inst["tradingsymbol"]] = inst["instrument_token"]
+        print(f"[CPR] Got {len(token_map)} instrument tokens")
     except Exception as e:
-        print(f"[CPR_WM] Instruments fetch failed: {e}")
+        print(f"[CPR] Instruments fetch failed: {e}")
 
-    from_date = (today - timedelta(days=90)).isoformat()
+    # ── Fetch OHLC via historical_data — last completed daily candle ──────────
+    from_date = (today - timedelta(days=10)).isoformat()
     to_date   = today.isoformat()
-
-    all_symbols = INDICES + STOCKS
-    weekly_ohlc: dict = {}
-    monthly_ohlc: dict = {}
-
-    # Determine correct candle index ONCE before the loop
-    import pytz as _pytz
-    _ist = _pytz.timezone('Asia/Kolkata')
-    _now = datetime.now(_ist)
-    use_last_weekly  = _now.weekday() >= 5  # True on weekends
-    use_last_monthly = _now.day <= 5         # True in first 5 days of month
 
     for sym in all_symbols:
         token = token_map.get(sym)
         if not token:
+            print(f"[CPR] No token for {sym}, skipping")
             continue
         try:
-            # ── Weekly candles ────────────────────────────────────────────
-            weekly = kite.historical_data(
+            candles = kite.historical_data(
                 instrument_token=token,
                 from_date=from_date,
                 to_date=to_date,
-                interval="week",
+                interval="day",
                 continuous=False,
                 oi=False,
             )
-            if len(weekly) >= 1:
-                if use_last_weekly:
-                    w = weekly[-1]
-                elif len(weekly) >= 2:
-                    w = weekly[-2]
-                else:
-                    w = weekly[-1]
-                weekly_ohlc[sym] = {
-                    "high":  float(w["high"]),
-                    "low":   float(w["low"]),
-                    "close": float(w["close"]),
+            if candles:
+                c = candles[-1]
+                ohlc_map[sym] = {
+                    "high":  float(c["high"]),
+                    "low":   float(c["low"]),
+                    "close": float(c["close"]),
                 }
-
-            # ── Monthly candles ───────────────────────────────────────────
-            monthly = kite.historical_data(
-                instrument_token=token,
-                from_date=from_date,
-                to_date=to_date,
-                interval="month",
-                continuous=False,
-                oi=False,
-            )
-            # Use second to last = last COMPLETE month
-            if len(monthly) >= 1:
-                if use_last_monthly:
-                    m = monthly[-1]
-                elif len(monthly) >= 2:
-                    m = monthly[-2]
-                else:
-                    m = monthly[-1]
-                monthly_ohlc[sym] = {
-                    "high":  float(m["high"]),
-                    "low":   float(m["low"]),
-                    "close": float(m["close"]),
-                }
-
             time.sleep(0.05)
         except Exception as e:
-            print(f"[CPR_WM] {sym}: {e}")
+            print(f"[CPR] historical_data {sym}: {e}")
 
-    print(f"[CPR_WM] Weekly OHLC: {len(weekly_ohlc)}, Monthly OHLC: {len(monthly_ohlc)}")
+    print(f"[CPR] Got OHLC for {len(ohlc_map)} symbols")
 
-    # ── Fetch previous weekly/monthly CPR for trend ───────────────────────
-    prev_weekly_map: dict = {}
-    prev_monthly_map: dict = {}
+    # ── Fetch previous CPR for trend calculation ──────────────────────────────
+    prev_cpr_map: dict = {}
     try:
-        prev_rows = supabase.from_("cpr_levels_weekly")\
-            .select("symbol, tc, bc, timeframe")\
-            .limit(len(all_symbols) * 4).execute()
+        prev_rows = supabase.from_("cpr_levels")\
+            .select("symbol, tc, bc")\
+            .lt("trade_date", trade_date)\
+            .order("trade_date", desc=True)\
+            .limit(len(all_symbols) * 2)\
+            .execute()
+        seen_prev = set()
         for r in (prev_rows.data or []):
-            sym = r["symbol"]
-            tf  = r["timeframe"]
-            if tf == "weekly" and sym not in prev_weekly_map:
-                prev_weekly_map[sym] = {"tc": float(r["tc"]), "bc": float(r["bc"])}
-            elif tf == "monthly" and sym not in prev_monthly_map:
-                prev_monthly_map[sym] = {"tc": float(r["tc"]), "bc": float(r["bc"])}
+            if r["symbol"] not in seen_prev:
+                prev_cpr_map[r["symbol"]] = {"tc": float(r["tc"]), "bc": float(r["bc"])}
+                seen_prev.add(r["symbol"])
     except Exception as e:
-        print(f"[CPR_WM] Prev CPR fetch: {e}")
+        print(f"[CPR] Prev CPR fetch: {e}")
 
-    # ── Build records ─────────────────────────────────────────────────────
+    # ── Compute and store CPR records ─────────────────────────────────────────
     records = []
-    for timeframe, ohlc_map, prev_map in [
-        ("weekly",  weekly_ohlc,  prev_weekly_map),
-        ("monthly", monthly_ohlc, prev_monthly_map),
-    ]:
-        for sym in all_symbols:
-            ohlc = ohlc_map.get(sym)
-            if not ohlc:
-                continue
-            high  = ohlc["high"]
-            low   = ohlc["low"]
-            close = ohlc["close"]
-            if not all([high, low, close]):
-                continue
-            cpr   = compute_cpr(high, low, close)
-            label = get_cpr_label(cpr["width_pct"])
-            prev  = prev_map.get(sym, {})
-            trend = get_cpr_trend(cpr["tc"], cpr["bc"], prev.get("tc"), prev.get("bc"))
-            records.append({
-                "trade_date":     trade_date,
-                "timeframe":      timeframe,
-                "symbol":         sym,
-                "is_index":       sym in INDICES,
-                "prev_high":      high,
-                "prev_low":       low,
-                "prev_close":     close,
-                "pivot":          cpr["pivot"],
-                "tc":             cpr["tc"],
-                "bc":             cpr["bc"],
-                "width_pts":      cpr["width_pts"],
-                "width_pct":      cpr["width_pct"],
-                "width_label":    label["label"],
-                "width_color":    label["color"],
-                "width_emoji":    label["emoji"],
-                "width_priority": label["priority"],
-                "cpr_trend":      trend,
-                "is_virgin":      True,
-                "last_cmp":       None,
-            })
+    for sym in all_symbols:
+        ohlc = ohlc_map.get(sym)
+        if not ohlc:
+            continue
+        high  = ohlc["high"]
+        low   = ohlc["low"]
+        close = ohlc["close"]
+        if not all([high, low, close]):
+            continue
+        cpr   = compute_cpr(high, low, close)
+        label = get_cpr_label(cpr["width_pct"])
+        prev  = prev_cpr_map.get(sym, {})
+        trend = get_cpr_trend(cpr["tc"], cpr["bc"], prev.get("tc"), prev.get("bc"))
+        records.append({
+            "trade_date":        trade_date,
+            "symbol":            sym,
+            "is_index":          sym in INDICES,
+            "prev_high":         high,
+            "prev_low":          low,
+            "prev_close":        close,
+            "pivot":             cpr["pivot"],
+            "tc":                cpr["tc"],
+            "bc":                cpr["bc"],
+            "width_pts":         cpr["width_pts"],
+            "width_pct":         cpr["width_pct"],
+            "width_label":       label["label"],
+            "width_color":       label["color"],
+            "width_emoji":       label["emoji"],
+            "width_priority":    label["priority"],
+            "prev_tc":           prev.get("tc"),
+            "prev_bc":           prev.get("bc"),
+            "cpr_trend":         trend,
+            "is_virgin":         True,
+            "cpr_status":        None,
+            "last_cmp":          None,
+            "status_updated_at": None,
+        })
 
     if records:
         for i in range(0, len(records), 50):
-            supabase.table("cpr_levels_weekly")\
-                .upsert(records[i:i+50], on_conflict="trade_date,symbol,timeframe")\
+            supabase.table("cpr_levels")\
+                .upsert(records[i:i+50], on_conflict="trade_date,symbol")\
                 .execute()
 
-    print(f"[CPR_WM] Stored {len(records)} weekly/monthly CPR records for {trade_date}")
+    global _cpr_cache, _cpr_cache_time
+    _cpr_cache = {}
+    _cpr_cache_time = 0
+
+    print(f"[CPR] Stored {len(records)} CPR records for {trade_date}")
     return {"stored": len(records), "trade_date": trade_date}
 
 
