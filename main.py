@@ -272,6 +272,12 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.add_job(
+        save_eod_signal_log,
+        "cron", hour=15, minute=35, timezone="Asia/Kolkata", id="eod_signal_save",
+        misfire_grace_time=600
+    )
+
+    scheduler.add_job(
         watchdog_cpr,
         "cron", hour=17, minute=15, timezone="Asia/Kolkata", id="cpr_watchdog",
         misfire_grace_time=600
@@ -477,6 +483,29 @@ def watchdog_participant_flow():
     except Exception as e:
         print(f"[ParticipantFlow Watchdog] ❌ {e}")
 
+def save_eod_signal_log():
+    import pytz
+    from datetime import datetime
+    ist = pytz.timezone('Asia/Kolkata')
+    if datetime.now(ist).weekday() >= 5:
+        return
+    try:
+        import api.signal_log as sl
+        from utils.db import get_supabase
+        original = sl.is_market_hours
+        sl.is_market_hours = lambda: True
+        try:
+            result = sl.get_signal_log()
+        finally:
+            sl.is_market_hours = original
+        if result.get("signals"):
+            sl._save_eod_to_supabase(get_supabase(), result)
+            print(f"[EOD Signal] ✅ Saved {len(result['signals'])} signals")
+        else:
+            print(f"[EOD Signal] ℹ️ No signals today")
+    except Exception as e:
+        print(f"[EOD Signal] ❌ {e}")
+
 def auto_refresh_token():
     from datetime import datetime
     import pytz
@@ -645,18 +674,27 @@ def signal_log(date: str = None, symbol: str = None):
     return get_signal_log(date)
 
 @app.get("/signal-log/seed-eod")
-def seed_signal_log_eod():
-    """Manually force-compute and save EOD snapshot from last trading day."""
+def seed_signal_log_eod(date: str = None):
+    """Manually force-compute and save EOD snapshot. Defaults to today if market closed, else yesterday."""
     from api.signal_log import _save_eod_to_supabase
     from utils.db import get_supabase
     import datetime, pytz
     ist = pytz.timezone("Asia/Kolkata")
-    today = datetime.datetime.now(ist).date()
-    for i in range(1, 6):
-        d = today - datetime.timedelta(days=i)
-        if d.weekday() < 5:
-            last_trading_day = d.isoformat()
-            break
+    now = datetime.datetime.now(ist)
+    
+    if date:
+        last_trading_day = date
+    else:
+        # Use today if post-market, else yesterday
+        today = now.date()
+        if now.hour >= 15 and now.minute >= 30 and today.weekday() < 5:
+            last_trading_day = today.isoformat()
+        else:
+            for i in range(1, 6):
+                d = today - datetime.timedelta(days=i)
+                if d.weekday() < 5:
+                    last_trading_day = d.isoformat()
+                    break
 
     supabase = get_supabase()
 
