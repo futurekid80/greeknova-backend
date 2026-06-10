@@ -278,6 +278,17 @@ async def lifespan(app: FastAPI):
     )
     scheduler.start()
 
+    scheduler.add_job(
+        lambda: __import__('api.participant_flow', fromlist=['fetch_and_store_participant_flow']).fetch_and_store_participant_flow(),
+        "cron", hour=18, minute=30, timezone="Asia/Kolkata", id="participant_flow_fetch",
+        misfire_grace_time=600
+    )
+    scheduler.add_job(
+        watchdog_participant_flow,
+        "cron", hour=19, minute=0, timezone="Asia/Kolkata", id="participant_flow_watchdog",
+        misfire_grace_time=600
+    )
+
     # ── CommodityNova scheduler ────────────────────────────────────────────
     from services.kite_auth import get_kite_client
     from utils.db import get_supabase
@@ -441,6 +452,31 @@ def watchdog_cpr():
     except Exception as e:
         print(f"[CPR Watchdog] ❌ Error: {e}")
 
+def watchdog_participant_flow():
+    """Watchdog — runs at 7 PM. Re-fetches if today's data missing."""
+    import pytz
+    from datetime import datetime, timedelta
+    ist = pytz.timezone('Asia/Kolkata')
+    now = datetime.now(ist)
+    if now.weekday() >= 5:
+        return
+    today = now.date()
+    try:
+        from utils.db import get_supabase
+        supabase = get_supabase()
+        result = supabase.from_("participant_flow")\
+            .select("participant")\
+            .eq("trade_date", today.isoformat())\
+            .limit(1).execute()
+        if result.data:
+            print(f"[ParticipantFlow Watchdog] ✅ Data exists for {today}")
+            return
+        print(f"[ParticipantFlow Watchdog] ⚠️ Missing — fetching...")
+        from api.participant_flow import fetch_and_store_participant_flow
+        fetch_and_store_participant_flow()
+    except Exception as e:
+        print(f"[ParticipantFlow Watchdog] ❌ {e}")
+
 def auto_refresh_token():
     from datetime import datetime
     import pytz
@@ -569,6 +605,34 @@ def cpr_scanner_timeframe(timeframe: str = "daily"):
 def cpr_compute_weekly(trade_date: str = None):
     from api.cpr import compute_and_store_weekly_monthly_cpr
     return compute_and_store_weekly_monthly_cpr(trade_date=trade_date)
+
+@app.get("/participant-flow")
+def participant_flow_endpoint(days: int = 20):
+    from api.participant_flow import get_participant_flow
+    return get_participant_flow(days)
+
+@app.get("/participant-flow/fetch")
+def participant_flow_fetch(trade_date: str = None):
+    from api.participant_flow import fetch_and_store_participant_flow
+    return fetch_and_store_participant_flow(trade_date)
+
+@app.get("/participant-flow/backfill")
+def participant_flow_backfill(days: int = 20):
+    from api.participant_flow import fetch_and_store_participant_flow
+    from datetime import date, timedelta
+    results = []
+    d = date.today() - timedelta(days=1)
+    fetched = 0
+    attempts = 0
+    while fetched < days and attempts < 40:
+        if d.weekday() < 5:
+            result = fetch_and_store_participant_flow(d.isoformat())
+            results.append({"date": d.isoformat(), **result})
+            if "stored" in result:
+                fetched += 1
+        d -= timedelta(days=1)
+        attempts += 1
+    return {"fetched": fetched, "results": results}
     
 @app.get("/cpr-compute")
 def cpr_compute(trade_date: str = None):
