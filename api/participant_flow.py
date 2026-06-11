@@ -59,11 +59,15 @@ def _parse_csv(text: str, trade_date) -> list:
 
 
 def fetch_and_store_participant_flow(trade_date=None):
-    """Fetch NSE participant OI CSV and store. Called at 6:30 PM IST by scheduler."""
     supabase = get_supabase()
 
     if trade_date is None:
-        target_date = _get_prev_trading_day()
+        today = datetime.now(IST).date()
+        # Use today if weekday, else last trading day
+        if today.weekday() >= 5:
+            target_date = _get_prev_trading_day(today)
+        else:
+            target_date = today
     else:
         target_date = date_type.fromisoformat(trade_date) if isinstance(trade_date, str) else trade_date
 
