@@ -292,12 +292,12 @@ async def lifespan(app: FastAPI):
 
     scheduler.add_job(
         lambda: __import__('api.participant_flow', fromlist=['fetch_and_store_participant_flow']).fetch_and_store_participant_flow(),
-        "cron", hour=18, minute=30, timezone="Asia/Kolkata", id="participant_flow_fetch",
+        "cron", hour=19, minute=30, timezone="Asia/Kolkata", id="participant_flow_fetch",
         misfire_grace_time=600
     )
     scheduler.add_job(
         watchdog_participant_flow,
-        "cron", hour=19, minute=0, timezone="Asia/Kolkata", id="participant_flow_watchdog",
+        "cron", hour=20, minute=0, timezone="Asia/Kolkata", id="participant_flow_watchdog",
         misfire_grace_time=600
     )
 
