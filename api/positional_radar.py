@@ -236,30 +236,17 @@ def get_positional_radar(min_consec: int = 0):
 
     # ── SERVER-SIDE AGGREGATION via RPC ──────────────────────────────────────
     # PostgreSQL aggregates EOD OI per symbol per day — avoids fetching 1M+ rows
-    print(f"[Positional Radar] Fetching EOD OI via RPC from {series_start}...")
+    print(f"[Positional Radar] Fetching EOD OI from cache table {series_start}...")
     try:
-        # Set longer timeout for this heavy query before calling
-        try:
-            supabase.rpc("set_config", {
-                "parameter": "statement_timeout",
-                "value": "25000",
-                "is_local": True
-            }).execute()
-        except:
-            pass
-        rpc_result = supabase.rpc("get_positional_radar_eod", {
-            "p_expiry":       current_expiry,
+        rpc_result = supabase.rpc("get_positional_radar_eod_fast", {
             "p_series_start": series_start,
             "p_series_end":   today_str,
         }).execute()
         all_oi_rows = rpc_result.data or []
     except Exception as e:
-        print(f"[Positional Radar] OI RPC failed: {e}")
+        print(f"[Positional Radar] Cache RPC failed: {e}")
         all_oi_rows = []
-    except Exception as e:
-        print(f"[Positional Radar] OI RPC failed: {e}")
-        all_oi_rows = []
-    print(f"[Positional Radar] RPC returned {len(all_oi_rows)} rows in {time_module.time()-t0:.1f}s")
+    print(f"[Positional Radar] Cache returned {len(all_oi_rows)} rows in {time_module.time()-t0:.1f}s")
 
     # ── CMP data — EOD CMP per symbol per day via RPC ────────────────────────
     try:
