@@ -278,6 +278,12 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.add_job(
+        refresh_radar_cache,
+        "cron", hour=16, minute=46, timezone="Asia/Kolkata", id="radar_cache_refresh",
+        misfire_grace_time=600
+    )
+
+    scheduler.add_job(
         watchdog_cpr,
         "cron", hour=17, minute=15, timezone="Asia/Kolkata", id="cpr_watchdog",
         misfire_grace_time=600
@@ -505,6 +511,28 @@ def save_eod_signal_log():
             print(f"[EOD Signal] ℹ️ No signals today")
     except Exception as e:
         print(f"[EOD Signal] ❌ {e}")
+
+def refresh_radar_cache():
+    """Refresh positional radar cache at 4:46 PM after EOD summary."""
+    import pytz
+    from datetime import datetime
+    ist = pytz.timezone('Asia/Kolkata')
+    if datetime.now(ist).weekday() >= 5:
+        return
+    try:
+        from api.positional_radar import get_monthly_expiry, get_series_start
+        from utils.db import get_supabase
+        import datetime as dt
+        today = dt.date.today()
+        expiry = get_monthly_expiry(today.year, today.month)
+        series_start = get_series_start(expiry)
+        result = get_supabase().rpc("refresh_positional_radar_cache", {
+            "p_series_start": series_start,
+            "p_series_end": today.isoformat()
+        }).execute()
+        print(f"[Radar Cache] ✅ Refreshed")
+    except Exception as e:
+        print(f"[Radar Cache] ❌ {e}")
 
 def auto_refresh_token():
     from datetime import datetime
