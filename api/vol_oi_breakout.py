@@ -226,7 +226,7 @@ def get_vol_oi_breakout(supabase):
             elif oi_chg_pct < 0 and price_chg <= -MIN_PRICE_CHG:
                 sig_type, sig_label = "LONG_UNWINDING", "Long Unwinding"
             else:
-                sig_type, sig_label = "NEUTRAL", "Neutral""
+                continue  # skip flat price stocks entirely
 
             valid_prices = [p for p in price_list if p > 0]
             day_high = max(valid_prices) if valid_prices else cmp
