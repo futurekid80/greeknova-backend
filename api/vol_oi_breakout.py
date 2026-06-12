@@ -7,7 +7,6 @@ from datetime import datetime, timezone, timedelta
 
 _breakout_cache = {}
 _breakout_cache_time = 0.0
-_peak_signals = {}
 
 def is_market_hours():
     import pytz
@@ -97,10 +96,17 @@ def get_vol_oi_breakout(supabase):
 
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-    # Reset peak signals at start of new day
-    global _peak_signals
-    if _breakout_cache.get("date") and _breakout_cache.get("date") != today:
-        _peak_signals = {}
+    # Save to Supabase after market close
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        ist_now = datetime.now(ist)
+        if ist_now.hour >= 15 and ist_now.minute >= 25:
+            _save_to_supabase(supabase, top_signals, len(signals), today)
+
+        _breakout_cache.update(result)
+        _breakout_cache_time = time_module.time()
+        print(f"[VOL_OI_BREAKOUT] {len(signals)} signals computed")
+        return result
 
     # Post-market or weekend: serve EOD snapshot
     if not is_market_hours():
