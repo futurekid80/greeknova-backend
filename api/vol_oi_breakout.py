@@ -12,7 +12,7 @@ def is_market_hours():
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
-    if now.weekday() >= 5:  # Saturday=5, Sunday=6
+    if now.weekday() >= 5:
         return False
     mins = now.hour * 60 + now.minute
     return 555 <= mins <= 930
@@ -20,7 +20,7 @@ def is_market_hours():
 def is_weekday():
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
-    return datetime.now(ist).weekday() < 5  # Mon-Fri
+    return datetime.now(ist).weekday() < 5
 
 def get_price_context(cmp, day_high, day_low):
     if day_high <= day_low or day_high == 0:
@@ -57,7 +57,6 @@ def _load_from_supabase(supabase):
         if result.data:
             row = result.data[0]
             signals = row.get("signals", [])
-            # Handle string JSON (not auto-parsed)
             if isinstance(signals, str):
                 import json
                 signals = json.loads(signals)
@@ -96,29 +95,14 @@ def get_vol_oi_breakout(supabase):
 
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
-    # Save to Supabase after market close
-        import pytz
-        ist = pytz.timezone('Asia/Kolkata')
-        ist_now = datetime.now(ist)
-        if ist_now.hour >= 15 and ist_now.minute >= 25:
-            _save_to_supabase(supabase, top_signals, len(signals), today)
-
-        _breakout_cache.update(result)
-        _breakout_cache_time = time_module.time()
-        print(f"[VOL_OI_BREAKOUT] {len(signals)} signals computed")
-        return result
-
     # Post-market or weekend: serve EOD snapshot
     if not is_market_hours():
-        # Try in-memory cache first
         if _breakout_cache.get("signals") and _breakout_cache.get("date") == today:
             return dict(_breakout_cache, is_eod_snapshot=True)
-        # Try Supabase persistent cache
         saved = _load_from_supabase(supabase)
         if saved:
-            _breakout_cache = saved  # warm in-memory cache
+            _breakout_cache = saved
             return saved
-        # No data at all
         return {"signals": [], "total": 0, "is_eod_snapshot": True, "date": today}
 
     # During market hours: use in-memory cache (5 min TTL)
@@ -279,31 +263,22 @@ def get_vol_oi_breakout(supabase):
             "is_eod_snapshot": False,
         }
 
-        # ── Track peak signals throughout the day ─────────────────────────
-        global _peak_signals
-        for sig in signals:
-            sym = sig["symbol"]
-            if sym not in _peak_signals or sig["vol_ratio"] > _peak_signals[sym]["vol_ratio"]:
-                _peak_signals[sym] = sig
-
         # Save to Supabase after market close (3:30 PM IST = 10:00 UTC)
         import pytz
         ist = pytz.timezone('Asia/Kolkata')
         ist_now = datetime.now(ist)
         if ist_now.hour >= 15 and ist_now.minute >= 25:
-            # Use peak signals for EOD save — captures best vol_ratio seen all day
-            peak_list = sorted(_peak_signals.values(), key=lambda x: x["vol_ratio"], reverse=True)[:10]
-            _save_to_supabase(supabase, peak_list, len(peak_list), today)
+            _save_to_supabase(supabase, top_signals, len(signals), today)
 
         _breakout_cache.update(result)
         _breakout_cache_time = time_module.time()
         print(f"[VOL_OI_BREAKOUT] {len(signals)} signals computed")
         return result
+
     except Exception as e:
         import traceback
         traceback.print_exc()
         print(f"[VOL_OI_BREAKOUT] Error: {e}")
-        # Try Supabase fallback on error
         saved = _load_from_supabase(supabase)
         if saved:
             return saved
