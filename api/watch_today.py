@@ -18,8 +18,15 @@ def get_watch_today(supabase):
     last_trading_day = check.strftime('%Y-%m-%d')
 
     # ── Step 1: Get yesterday's Positional Radar — Conviction+ stocks ────────
+    # Get series start dynamically
+    from api.positional_radar import get_monthly_expiry, get_series_start
+    import datetime as _dt
+    _today_date = _dt.date.today()
+    _expiry = get_monthly_expiry(_today_date.year, _today_date.month)
+    _series_start = get_series_start(_expiry)
+
     radar_result = supabase.rpc("get_positional_radar_eod_fast", {
-        "p_series_start": "2026-05-27",
+        "p_series_start": _series_start,
         "p_series_end": last_trading_day
     }).execute()
 
@@ -28,8 +35,8 @@ def get_watch_today(supabase):
         level = r.get("conviction_level", "")
         rank = r.get("conviction_rank", 0)
         ignition = r.get("ignition", False)
-        # Only include Conviction (rank>=3) or Ignition
-        if rank >= 3 or ignition:
+        # Include BUILDING+ (rank>=2) — lowers bar when market has no Conviction/Ignition
+        if rank >= 2 or ignition:
             radar_stocks[r["symbol"]] = {
                 "symbol": r["symbol"],
                 "conviction_level": level,
