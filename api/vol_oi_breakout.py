@@ -155,7 +155,7 @@ def get_vol_oi_breakout(supabase):
             .gte("timestamp", f"{hist_start}T00:00:00+00:00")\
             .lt("timestamp",  f"{today}T00:00:00+00:00")\
             .gte("volume", 1000)\
-            .limit(5000)\
+            .limit(50000)\
             .execute()
 
         sym_date_vol = {}
