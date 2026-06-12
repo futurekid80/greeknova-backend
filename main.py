@@ -633,6 +633,42 @@ def radar_cache_clear():
     from api.positional_radar import clear_radar_cache
     return clear_radar_cache()
 
+@app.get("/oi-buildup/{symbol}")
+def oi_buildup(symbol: str, days: int = 15):
+    from utils.db import get_supabase
+    supabase = get_supabase()
+    result = supabase.from_("daily_oi_summary")\
+        .select("trade_date, oi_chg_pct, price_chg_pct, close_price, total_oi, fut_vol")\
+        .eq("symbol", symbol.upper())\
+        .order("trade_date", desc=True)\
+        .limit(days)\
+        .execute()
+    rows = sorted(result.data or [], key=lambda x: x["trade_date"])
+    
+    def classify(oi, price):
+        if oi > 0 and price > 0: return "LONG_BUILDUP", "Long Buildup"
+        if oi > 0 and price < 0: return "SHORT_BUILDUP", "Short Buildup"
+        if oi < 0 and price > 0: return "SHORT_COVERING", "Short Covering"
+        if oi < 0 and price < 0: return "LONG_UNWINDING", "Long Unwinding"
+        return "NEUTRAL", "Neutral"
+    
+    data = []
+    for r in rows:
+        oi = round(float(r.get("oi_chg_pct") or 0), 2)
+        price = round(float(r.get("price_chg_pct") or 0), 2)
+        sig, label = classify(oi, price)
+        data.append({
+            "date": r["trade_date"],
+            "oi_chg_pct": oi,
+            "price_chg_pct": price,
+            "close_price": float(r.get("close_price") or 0),
+            "total_oi": int(r.get("total_oi") or 0),
+            "fut_vol": int(r.get("fut_vol") or 0),
+            "signal": sig,
+            "label": label,
+        })
+    return {"symbol": symbol.upper(), "days": len(data), "data": data}
+
 @app.get("/watch-today")
 def watch_today():
     from api.watch_today import get_watch_today
