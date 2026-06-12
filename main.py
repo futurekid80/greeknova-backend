@@ -641,32 +641,44 @@ def oi_buildup(symbol: str, days: int = 15):
         .select("trade_date, oi_chg_pct, price_chg_pct, close_price, total_oi, fut_vol")\
         .eq("symbol", symbol.upper())\
         .order("trade_date", desc=True)\
-        .limit(days)\
+        .limit(days + 1)\
         .execute()
     rows = sorted(result.data or [], key=lambda x: x["trade_date"])
-    
+
     def classify(oi, price):
-        if oi > 0 and price > 0: return "LONG_BUILDUP", "Long Buildup"
-        if oi > 0 and price < 0: return "SHORT_BUILDUP", "Short Buildup"
-        if oi < 0 and price > 0: return "SHORT_COVERING", "Short Covering"
-        if oi < 0 and price < 0: return "LONG_UNWINDING", "Long Unwinding"
+        MIN = 0.3
+        if oi > 0 and price >= MIN:  return "LONG_BUILDUP",   "Long Buildup"
+        if oi > 0 and price <= -MIN: return "SHORT_BUILDUP",  "Short Buildup"
+        if oi < 0 and price >= MIN:  return "SHORT_COVERING", "Short Covering"
+        if oi < 0 and price <= -MIN: return "LONG_UNWINDING", "Long Unwinding"
         return "NEUTRAL", "Neutral"
-    
+
     data = []
-    for r in rows:
+    for i, r in enumerate(rows):
         oi = round(float(r.get("oi_chg_pct") or 0), 2)
-        price = round(float(r.get("price_chg_pct") or 0), 2)
+        close = float(r.get("close_price") or 0)
+        # Compute price change from previous day's close
+        if i > 0 and rows[i-1].get("close_price"):
+            prev_close = float(rows[i-1]["close_price"])
+            price = round((close - prev_close) / prev_close * 100, 2) if prev_close > 0 else 0
+        else:
+            price = 0
         sig, label = classify(oi, price)
         data.append({
-            "date": r["trade_date"],
-            "oi_chg_pct": oi,
+            "date":          r["trade_date"],
+            "oi_chg_pct":    oi,
             "price_chg_pct": price,
-            "close_price": float(r.get("close_price") or 0),
-            "total_oi": int(r.get("total_oi") or 0),
-            "fut_vol": int(r.get("fut_vol") or 0),
-            "signal": sig,
-            "label": label,
+            "close_price":   close,
+            "total_oi":      int(r.get("total_oi") or 0),
+            "fut_vol":        int(r.get("fut_vol") or 0),
+            "signal":        sig,
+            "label":         label,
         })
+
+    # Remove first row (no prev day to compute price from)
+    if data:
+        data = data[1:]
+
     return {"symbol": symbol.upper(), "days": len(data), "data": data}
 
 @app.get("/watch-today")
