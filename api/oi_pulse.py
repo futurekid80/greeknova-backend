@@ -64,13 +64,14 @@ def is_market_hours() -> bool:
 
 
 def classify(oi_chg_pct, price_chg_pct):
-    if oi_chg_pct > 0 and price_chg_pct > 0:
+    MIN_PRICE_CHG = 0.3  # minimum price move to confirm signal
+    if oi_chg_pct > 0 and price_chg_pct >= MIN_PRICE_CHG:
         return "LONG_BUILDUP",   "Long Buildup",   "text-emerald-400", "bg-emerald-950/30", "border-emerald-800/40"
-    if oi_chg_pct > 0 and price_chg_pct < 0:
+    if oi_chg_pct > 0 and price_chg_pct <= -MIN_PRICE_CHG:
         return "SHORT_BUILDUP",  "Short Buildup",  "text-red-400",     "bg-red-950/30",     "border-red-800/40"
-    if oi_chg_pct < 0 and price_chg_pct > 0:
+    if oi_chg_pct < 0 and price_chg_pct >= MIN_PRICE_CHG:
         return "SHORT_COVERING", "Short Covering", "text-cyan-400",    "bg-cyan-950/30",    "border-cyan-800/40"
-    if oi_chg_pct < 0 and price_chg_pct < 0:
+    if oi_chg_pct < 0 and price_chg_pct <= -MIN_PRICE_CHG:
         return "LONG_UNWINDING", "Long Unwinding", "text-orange-400",  "bg-orange-950/30",  "border-orange-800/40"
     return "NEUTRAL", "Neutral", "text-gray-400", "bg-gray-900/30", "border-gray-800"
 
