@@ -483,6 +483,20 @@ def get_signal_log(date: str = None):
         oi_chg_pct    = round((oi_latest - oi_open) / oi_open * 100, 2)
         price_chg_pct = round((price_latest - price_open) / price_open * 100, 2)
         vol_chg_pct   = round((vol_latest - vol_open) / vol_open * 100, 2) if vol_open > 0 else 0
+        
+        # Pace-adjusted volume ratio vs 5-day avg
+        # expected_vol = avg_daily_vol * (minutes_elapsed / 375)
+        hist_vols_sym = hist_vol_map.get(sym, [])
+        avg_daily_vol = sum(hist_vols_sym) / len(hist_vols_sym) if hist_vols_sym else 0
+        try:
+            from datetime import datetime as _dt
+            _now_utc = _dt.now(timezone.utc)
+            _ist_mins = _now_utc.hour * 60 + _now_utc.minute + 330 - 555  # mins since 9:15 IST
+            _elapsed_pct = min(max(_ist_mins / 375, 0.05), 1.0)
+        except:
+            _elapsed_pct = 0.5
+        expected_vol = avg_daily_vol * _elapsed_pct
+        vol_ratio = round(vol_latest / expected_vol, 2) if expected_vol > 0 else 0
 
         if abs(oi_chg_pct) < 3.0:      continue
         if abs(price_chg_pct) < 0.3:   continue
@@ -582,7 +596,8 @@ def get_signal_log(date: str = None):
             "vol_now":         vol_latest,
             "vol_open":        vol_open,
             "vol_chg_pct":     vol_chg_pct,
-            "vol_surge":       vol_chg_pct > 50,
+            "vol_ratio":       vol_ratio,
+            "vol_surge":       vol_ratio >= 1.5,
             "signal_type":     signal_type,
             "label":           label,
             "bias":            bias,
