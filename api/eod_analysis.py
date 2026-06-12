@@ -120,7 +120,7 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
     # ── Intraday journey ──────────────────────────────────────────────────────
     journey_raw = []
     journey_q = supabase.from_("oi_snapshots")\
-        .select("timestamp, option_type, oi")\
+        .select("timestamp, option_type, oi, strike")\
         .eq("symbol", symbol)\
         .gte("timestamp", f"{active_date}T00:00:00+00:00")\
         .lt("timestamp",  f"{active_date}T23:59:59+00:00")
