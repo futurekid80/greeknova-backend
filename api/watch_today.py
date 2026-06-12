@@ -1,29 +1,32 @@
 """
 api/watch_today.py
-Cross-references yesterday's Positional Radar (Conviction/Ignition stocks)
-with today's Intraday Scanner activity.
-Shows: stocks that were flagged positionally AND are active intraday today.
+Cross-references Positional Radar stocks with today's Intraday Scanner.
+Three rules to qualify:
+1. Stock is in Positional Radar (2+ days same directional OI buildup)
+2. Stock is active in today's Intraday Scanner (FUT OI moving today)
+3. Positional bias matches intraday bias (aligned direction)
 """
 from datetime import datetime, timezone, timedelta
-from utils.db import get_supabase
+import datetime as _dt
 
 
 def get_watch_today(supabase):
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime('%Y-%m-%d')
-    # Walk back to last trading day
-    check = datetime.now(timezone.utc) - timedelta(days=1)
-    while check.weekday() >= 5:
-        check -= timedelta(days=1)
-    last_trading_day = check.strftime('%Y-%m-%d')
 
-    # ── Step 1: Get yesterday's Positional Radar — Conviction+ stocks ────────
-    # Get series start dynamically
-    from api.positional_radar import get_monthly_expiry, get_series_start
-    import datetime as _dt
-    _today_date = _dt.date.today()
-    _expiry = get_monthly_expiry(_today_date.year, _today_date.month)
-    _series_start = get_series_start(_expiry)
+    # Walk back to last trading day
+    check = _dt.date.today() - _dt.timedelta(days=1)
+    while check.weekday() >= 5:
+        check -= _dt.timedelta(days=1)
+    last_trading_day = check.isoformat()
+
+    # ── Step 1: Get Positional Radar — ALL stocks (already filtered 2+ days) ──
+    try:
+        from api.positional_radar import get_monthly_expiry, get_series_start
+        _today_date = _dt.date.today()
+        _expiry = get_monthly_expiry(_today_date.year, _today_date.month)
+        _series_start = get_series_start(_expiry)
+    except:
+        _series_start = "2026-05-27"
 
     radar_result = supabase.rpc("get_positional_radar_eod_fast", {
         "p_series_start": _series_start,
@@ -32,33 +35,28 @@ def get_watch_today(supabase):
 
     radar_stocks = {}
     for r in (radar_result.data or []):
-        level = r.get("conviction_level", "")
-        rank = r.get("conviction_rank", 0)
-        ignition = r.get("ignition", False)
-        # Include BUILDING+ (rank>=2) — lowers bar when market has no Conviction/Ignition
-        if rank >= 2 or ignition:
-            radar_stocks[r["symbol"]] = {
-                "symbol": r["symbol"],
-                "conviction_level": level,
-                "conviction_label": r.get("conviction_label", ""),
-                "conviction_emoji": r.get("conviction_emoji", ""),
-                "conviction_rank": rank,
-                "ignition": ignition,
-                "signal": r.get("signal", ""),
-                "bias": r.get("bias", ""),
-                "consistency_pct": r.get("consistency_pct", 0),
-                "pcr_series": r.get("pcr_series", 0),
-            }
+        radar_stocks[r["symbol"]] = {
+            "symbol":            r["symbol"],
+            "conviction_level":  r.get("conviction_level", ""),
+            "conviction_label":  r.get("conviction_label", ""),
+            "conviction_emoji":  r.get("conviction_emoji", ""),
+            "conviction_rank":   r.get("conviction_rank", 0),
+            "ignition":          r.get("ignition", False),
+            "positional_signal": r.get("signal", ""),
+            "positional_bias":   r.get("bias", ""),
+            "consistency_pct":   r.get("consistency_pct", 0),
+            "pcr_series":        r.get("pcr_series", 0),
+        }
 
     if not radar_stocks:
         return {
             "date": today,
             "watch_today": [],
             "total": 0,
-            "message": "No Conviction/Ignition stocks from yesterday's Positional Radar"
+            "message": "Positional Radar has no data yet"
         }
 
-    # ── Step 2: Get today's intraday signals ──────────────────────────────────
+    # ── Step 2: Get today's intraday signals from cache ───────────────────────
     intraday_result = supabase.from_("intraday_signal_cache")\
         .select("*")\
         .eq("id", 1)\
@@ -75,57 +73,62 @@ def get_watch_today(supabase):
         for sig in signals:
             intraday_map[sig["symbol"]] = sig
 
-    # ── Step 3: Cross-reference ───────────────────────────────────────────────
+    # ── Step 3: Cross-reference with alignment filter ─────────────────────────
     watch_today = []
     for sym, radar in radar_stocks.items():
         intraday = intraday_map.get(sym)
 
-        # Alignment check — positional and intraday biases match?
-        aligned = None
-        if intraday:
-            positional_bias = radar["bias"]
-            intraday_bias = intraday.get("bias", "")
-            aligned = positional_bias == intraday_bias
+        # Rule 2: Must have intraday signal today
+        if not intraday:
+            continue
+
+        # Rule 3: Positional and intraday bias must align
+        positional_bias = radar["positional_bias"]
+        intraday_bias = intraday.get("bias", "")
+        if positional_bias != intraday_bias:
+            continue
 
         watch_today.append({
-            "symbol": sym,
-            # Positional Radar context
-            "conviction_level": radar["conviction_level"],
-            "conviction_label": radar["conviction_label"],
-            "conviction_emoji": radar["conviction_emoji"],
-            "conviction_rank": radar["conviction_rank"],
-            "ignition": radar["ignition"],
-            "positional_signal": radar["signal"],
-            "positional_bias": radar["bias"],
-            "consistency_pct": radar["consistency_pct"],
-            # Today's intraday activity
-            "has_intraday_signal": intraday is not None,
-            "intraday_signal_type": intraday.get("signal_type") if intraday else None,
-            "intraday_label": intraday.get("label") if intraday else None,
-            "intraday_bias": intraday.get("bias") if intraday else None,
-            "intraday_oi_chg_pct": intraday.get("oi_chg_pct") if intraday else None,
-            "intraday_price_chg_pct": intraday.get("price_chg_pct") if intraday else None,
-            "intraday_persistence_pct": intraday.get("persistence_pct") if intraday else None,
-            "intraday_cpr_position": intraday.get("cpr_position") if intraday else None,
-            "intraday_options_confirms": intraday.get("options_confirms") if intraday else None,
-            "cmp": intraday.get("cmp") if intraday else None,
-            # Alignment
-            "aligned": aligned,
+            "symbol":                    sym,
+            # Positional context
+            "conviction_level":          radar["conviction_level"],
+            "conviction_label":          radar["conviction_label"],
+            "conviction_emoji":          radar["conviction_emoji"],
+            "conviction_rank":           radar["conviction_rank"],
+            "ignition":                  radar["ignition"],
+            "positional_signal":         radar["positional_signal"],
+            "positional_bias":           positional_bias,
+            "consistency_pct":           radar["consistency_pct"],
+            "pcr_series":                radar["pcr_series"],
+            # Intraday confirmation
+            "intraday_signal_type":      intraday.get("signal_type"),
+            "intraday_label":            intraday.get("label"),
+            "intraday_bias":             intraday_bias,
+            "intraday_oi_chg_pct":       intraday.get("oi_chg_pct"),
+            "intraday_price_chg_pct":    intraday.get("price_chg_pct"),
+            "intraday_persistence_pct":  intraday.get("persistence_pct"),
+            "intraday_cpr_position":     intraday.get("cpr_position"),
+            "intraday_options_confirms": intraday.get("options_confirms"),
+            "intraday_vol_ratio":        intraday.get("vol_ratio", 0),
+            "intraday_vol_rank_label":   intraday.get("vol_rank_label", ""),
+            "cmp":                       intraday.get("cmp"),
+            "ce_wall":                   intraday.get("ce_wall"),
+            "pe_wall":                   intraday.get("pe_wall"),
         })
 
-    # Sort: ignition first, then by conviction rank, then aligned on top
+    # Sort: ignition first → conviction rank → consistency
     watch_today.sort(key=lambda x: (
         -int(x["ignition"]),
         -x["conviction_rank"],
-        -int(x["aligned"] or False),
-        -int(x["has_intraday_signal"])
+        -x["consistency_pct"],
     ))
 
     return {
-        "date": today,
-        "last_radar_date": last_trading_day,
-        "watch_today": watch_today,
-        "total": len(watch_today),
-        "with_intraday": sum(1 for w in watch_today if w["has_intraday_signal"]),
-        "aligned": sum(1 for w in watch_today if w["aligned"]),
+        "date":             today,
+        "last_radar_date":  last_trading_day,
+        "watch_today":      watch_today,
+        "total":            len(watch_today),
+        "radar_total":      len(radar_stocks),
+        "intraday_total":   len(intraday_map),
+        "message":          None if watch_today else "No stocks with aligned positional + intraday signals today"
     }
