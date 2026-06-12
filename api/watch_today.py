@@ -28,13 +28,12 @@ def get_watch_today(supabase):
     except:
         _series_start = "2026-05-27"
 
-    radar_result = supabase.rpc("get_positional_radar_eod_fast", {
-        "p_series_start": _series_start,
-        "p_series_end": last_trading_day
-    }).execute()
+    # Use positional radar directly from the get_positional_radar function
+    from api.positional_radar import get_positional_radar
+    radar_data = get_positional_radar(min_consec=0)
 
     radar_stocks = {}
-    for r in (radar_result.data or []):
+    for r in (radar_data.get("results") or []):
         radar_stocks[r["symbol"]] = {
             "symbol":            r["symbol"],
             "conviction_level":  r.get("conviction_level", ""),
