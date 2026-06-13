@@ -739,6 +739,126 @@ def oi_buildup(symbol: str, days: int = 15):
 
     return {"symbol": symbol.upper(), "days": len(data), "data": data}
 
+@app.get("/positional-volume-alert")
+def positional_volume_alert():
+    from utils.db import get_supabase
+    from datetime import datetime, timezone, timedelta
+    from collections import defaultdict
+    supabase = get_supabase()
+
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    # Get last 21 days of daily OI summary for all symbols
+    hist_start = (datetime.now(timezone.utc) - timedelta(days=35)).strftime('%Y-%m-%d')
+    rows = supabase.from_("daily_oi_summary")\
+        .select("symbol, trade_date, total_volume, fut_vol, oi_chg_pct, price_chg_pct, close_price")\
+        .gte("trade_date", hist_start)\
+        .order("trade_date", desc=False)\
+        .limit(10000)\
+        .execute()
+
+    # Group by symbol
+    sym_rows = defaultdict(list)
+    for r in (rows.data or []):
+        sym_rows[r["symbol"]].append(r)
+
+    # Get today's positional radar for context
+    try:
+        from api.positional_radar import get_positional_radar
+        radar_data = get_positional_radar(min_consec=0)
+        radar_map = {r["symbol"]: r for r in radar_data.get("results", [])}
+    except:
+        radar_map = {}
+
+    alerts = []
+    for sym, sym_data in sym_rows.items():
+        # Sort by date
+        sym_data = sorted(sym_data, key=lambda x: x["trade_date"])
+
+        # Need at least 21 days for 20D avg
+        if len(sym_data) < 5:
+            continue
+
+        today_row = sym_data[-1]
+        if today_row["trade_date"] != today:
+            continue  # no today data
+
+        today_vol = int(today_row.get("fut_vol") or today_row.get("total_volume") or 0)
+        if today_vol == 0:
+            continue
+
+        # Historical rows (exclude today)
+        hist = sym_data[:-1]
+        hist_vols = [int(r.get("fut_vol") or r.get("total_volume") or 0) for r in hist if (r.get("fut_vol") or r.get("total_volume") or 0) > 0]
+
+        if len(hist_vols) < 5:
+            continue
+
+        avg_10d = sum(hist_vols[-10:]) / len(hist_vols[-10:]) if len(hist_vols) >= 10 else None
+        avg_20d = sum(hist_vols[-20:]) / len(hist_vols[-20:]) if len(hist_vols) >= 20 else None
+
+        # Check thresholds
+        ratio_10d = round(today_vol / avg_10d, 2) if avg_10d and avg_10d > 0 else 0
+        ratio_20d = round(today_vol / avg_20d, 2) if avg_20d and avg_20d > 0 else 0
+
+        # Must exceed 1.5x either avg
+        if ratio_10d < 1.5 and ratio_20d < 1.5:
+            continue
+
+        # OI confirmation — must have meaningful OI change
+        oi_chg = float(today_row.get("oi_chg_pct") or 0)
+        if abs(oi_chg) < 2.0:
+            continue
+
+        # Tier
+        best_ratio = max(ratio_10d, ratio_20d)
+        if ratio_20d >= 2.0:
+            tier = "🔴 Elite"
+            tier_color = "RED"
+        elif ratio_20d >= 1.5:
+            tier = "🟠 Strong"
+            tier_color = "ORANGE"
+        elif ratio_10d >= 2.0:
+            tier = "🟡 Notable"
+            tier_color = "AMBER"
+        else:
+            tier = "⚪ Watch"
+            tier_color = "GRAY"
+
+        # Radar context
+        radar = radar_map.get(sym, {})
+
+        alerts.append({
+            "symbol":           sym,
+            "today_vol":        today_vol,
+            "avg_10d":          round(avg_10d) if avg_10d else None,
+            "avg_20d":          round(avg_20d) if avg_20d else None,
+            "ratio_10d":        ratio_10d,
+            "ratio_20d":        ratio_20d,
+            "best_ratio":       best_ratio,
+            "oi_chg_pct":       round(oi_chg, 2),
+            "price_chg_pct":    round(float(today_row.get("price_chg_pct") or 0), 2),
+            "close_price":      float(today_row.get("close_price") or 0),
+            "tier":             tier,
+            "tier_color":       tier_color,
+            # Radar context
+            "in_radar":         sym in radar_map,
+            "radar_signal":     radar.get("signal"),
+            "radar_bias":       radar.get("bias"),
+            "radar_conviction": radar.get("conviction_label"),
+            "radar_consec":     radar.get("consec_days"),
+            "radar_consistency": radar.get("consistency_pct"),
+        })
+
+    # Sort: radar stocks first, then by best ratio
+    alerts.sort(key=lambda x: (-int(x["in_radar"]), -x["best_ratio"]))
+
+    return {
+        "date":   today,
+        "total":  len(alerts),
+        "alerts": alerts
+    }
+
 @app.get("/watch-today")
 def watch_today():
     from api.watch_today import get_watch_today
