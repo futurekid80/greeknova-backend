@@ -732,7 +732,7 @@ def oi_buildup(symbol: str, days: int = 15):
         _today = _dt.date.today()
         _expiry = get_monthly_expiry(_today.year, _today.month)
         _series_start = get_series_start(_expiry)
-        data = [d for d in data if d["date"] >= _series_start]
+        data = [d for d in data if d["date"] > _series_start]
     except Exception as e:
         print(f"[OI Buildup] Series filter failed: {e}")
         data = data[-days:]
