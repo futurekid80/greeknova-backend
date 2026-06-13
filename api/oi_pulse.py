@@ -243,7 +243,9 @@ def _get_eod_pulse(supabase):
     items = []
     for r in rows.data:
         sym = r["symbol"]
-        oi_chg = round(float(r.get("oi_chg_pct") or 0), 2)
+        # Use FUT OI change if available, fall back to total OI change
+        fut_oi_chg = float(r.get("fut_oi_chg_pct") or 0)
+        oi_chg = fut_oi_chg if fut_oi_chg != 0 else round(float(r.get("oi_chg_pct") or 0), 2)
         price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         ltp = cmp_map.get(sym, 0)
         is_index = sym in INDEX_NSE_MAP
