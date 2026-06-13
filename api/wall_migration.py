@@ -119,6 +119,13 @@ def get_wall_migration(supabase) -> dict:
                 return None
 
             interval = STRIKE_INTERVALS.get(sym, DEFAULT_INTERVAL)
+            # Auto-detect interval from actual strikes if not in STRIKE_INTERVALS
+            if sym not in STRIKE_INTERVALS and strike_map:
+                strikes_sorted = sorted(strike_map.keys())
+                if len(strikes_sorted) >= 2:
+                    diffs = [strikes_sorted[i+1] - strikes_sorted[i] 
+                             for i in range(min(5, len(strikes_sorted)-1))]
+                    interval = min(d for d in diffs if d > 0) if diffs else DEFAULT_INTERVAL
             
             # ATM ±10 strikes filter — matches OI Profile methodology exactly
             snapped_atm = round(cmp / interval) * interval
