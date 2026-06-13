@@ -118,19 +118,19 @@ def get_wall_migration(supabase) -> dict:
             if not strike_map or cmp <= 0:
                 return None
 
-            # Auto-detect strike interval from actual data
+            # Auto-detect strike interval
             strikes_sorted = sorted(strike_map.keys())
             if sym in STRIKE_INTERVALS:
                 interval = STRIKE_INTERVALS[sym]
             elif len(strikes_sorted) >= 2:
-                diffs = [strikes_sorted[i+1] - strikes_sorted[i] 
+                diffs = [strikes_sorted[i+1] - strikes_sorted[i]
                          for i in range(min(10, len(strikes_sorted)-1))]
                 valid_diffs = [d for d in diffs if d > 0]
                 interval = min(valid_diffs) if valid_diffs else DEFAULT_INTERVAL
             else:
                 interval = DEFAULT_INTERVAL
 
-            # ATM ±10 strike intervals (matches OI Profile exactly)
+            # ATM ±10 strike intervals — matches OI Profile exactly
             snapped_atm = round(cmp / interval) * interval
             strike_lower = snapped_atm - (10 * interval)
             strike_upper = snapped_atm + (10 * interval)
@@ -138,48 +138,35 @@ def get_wall_migration(supabase) -> dict:
             ce_oi: dict = {}
             pe_oi: dict = {}
             for strike, v in strike_map.items():
-                # Only include ATM ±10 strikes
                 if strike < strike_lower or strike > strike_upper:
                     continue
                 ce_oi[strike] = v.get("ce_oi", 0)
                 pe_oi[strike] = v.get("pe_oi", 0)
 
+            # CE wall = highest CE OI above CMP (OI Profile methodology)
             ce_above = {s: v for s, v in ce_oi.items() if s > cmp and v > 0}
+            # PE wall = highest PE OI below CMP (OI Profile methodology)
             pe_below = {s: v for s, v in pe_oi.items() if s < cmp and v > 0}
-            if not ce_above: ce_above = {s: v for s, v in ce_oi.items() if v > 0}
-            if not pe_below: pe_below = {s: v for s, v in pe_oi.items() if v > 0}
+
             if not ce_above or not pe_below:
                 return None
 
-            max_ce = max(ce_above.values(), default=1)
-            max_pe = max(pe_below.values(), default=1)
-            ce_sig = {s: v for s, v in ce_above.items() if v >= max_ce * 0.10} or ce_above
-            pe_sig = {s: v for s, v in pe_below.items() if v >= max_pe * 0.10} or pe_below
+            ce_wall = max(ce_above, key=ce_above.get)
+            pe_wall = max(pe_below, key=pe_below.get)
 
-            ce_wall = min(ce_sig.keys())
-            pe_wall = max(pe_sig.keys())
-
-            # Sanity check — CE wall must be above PE wall
             if ce_wall <= pe_wall:
-                # Force correct sides
-                all_strikes_above = {s: v for s, v in ce_oi.items() if s >= cmp and v > 0}
-                all_strikes_below = {s: v for s, v in pe_oi.items() if s <= cmp and v > 0}
-                if all_strikes_above and all_strikes_below:
-                    ce_wall = max(all_strikes_above, key=all_strikes_above.get)
-                    pe_wall = max(all_strikes_below, key=all_strikes_below.get)
-                else:
-                    return None
+                return None
 
             trade_range = round(abs(ce_wall - pe_wall), 1)
             trade_range_pct = round(trade_range / cmp * 100, 2) if cmp > 0 else 0
 
             return {
-                "ce_wall":     ce_wall,
-                "pe_wall":     pe_wall,
-                "ce_wall_oi":  ce_sig[ce_wall],
-                "pe_wall_oi":  pe_sig[pe_wall],
-                "range":       trade_range,
-                "range_pct":   trade_range_pct,
+                "ce_wall":       ce_wall,
+                "pe_wall":       pe_wall,
+                "ce_wall_oi":    ce_above[ce_wall],
+                "pe_wall_oi":    pe_below[pe_wall],
+                "range":         trade_range,
+                "range_pct":     trade_range_pct,
             }
 
         # ── Analyze each symbol ───────────────────────────────────────────
@@ -292,7 +279,7 @@ def get_wall_migration(supabase) -> dict:
                 })
 
             # 8. Price inside very narrow range
-            if latest_walls["range_pct"] < 0.5 and cmp > pe_now and cmp < ce_now:
+            if latest_walls["range_pct"] < 1.5 and cmp > pe_now and cmp < ce_now:
                 alerts.append({
                     "type": "NARROW_RANGE_COILING",
                     "label": "Coiling — Narrow Range",
