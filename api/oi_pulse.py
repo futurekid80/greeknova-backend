@@ -206,13 +206,16 @@ def to_ist(ts: str) -> str:
 
 def get_oi_pulse():
     global _pulse_cache, _pulse_cache_time
+    supabase = get_supabase()
 
-    # Return cached result if fresh enough
-    cache_ttl = 15 if is_market_hours() else PULSE_CACHE_TTL
-    if _pulse_cache and (time_module.time() - _pulse_cache_time) < cache_ttl:
+    # Post-market: serve clean EOD numbers from daily_oi_summary
+    if not is_market_hours():
+        return _get_eod_pulse(supabase)
+
+    # During market: use in-memory cache (15s TTL)
+    if _pulse_cache and (time_module.time() - _pulse_cache_time) < 15:
         return _pulse_cache
 
-    supabase = get_supabase()
     live = is_market_hours()
 
     # Step 1: Get latest market-hours snapshot
