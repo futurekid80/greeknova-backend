@@ -273,22 +273,26 @@ def get_signal_log(date: str = None):
     # ── Post-market / weekend: serve EOD snapshot ─────────────────────────────
     if not is_market_hours():
         today_str = datetime.now(timezone.utc).strftime('%Y-%m-%d')
-        if _signal_cache and _signal_cache.get("signals") and _signal_cache.get("date") == today_str:
+        # Walk back to last trading day
+        import pytz
+        ist = pytz.timezone('Asia/Kolkata')
+        check = datetime.now(ist).date()
+        while check.weekday() >= 5:
+            from datetime import timedelta
+            check -= timedelta(days=1)
+        last_trading_day = check.isoformat()
+
+        if _signal_cache and _signal_cache.get("signals") and _signal_cache.get("date") == last_trading_day:
             return {**_signal_cache, "is_eod_snapshot": True}
         saved = _load_eod_from_supabase(supabase)
-        # Only serve saved snapshot if it's from today
-        if saved and saved.get("signals") and saved.get("date") == today_str:
+        # Serve snapshot if it's from last trading day
+        if saved and saved.get("signals") and saved.get("date") == last_trading_day:
             _signal_cache = saved
             _signal_cache_time = time_module.time()
             return {**saved, "is_eod_snapshot": True}
-        # No valid today snapshot — return empty with message
         return {"signals": [], "total": 0, "snapshots": 0,
-                "date": today_str,
+                "date": last_trading_day,
                 "message": "No signals captured today — market was low activity",
-                "is_eod_snapshot": True}
-        # No snapshot available yet
-        return {"signals": [], "total": 0, "snapshots": 0,
-                "message": "No EOD snapshot yet — will be available after first market session",
                 "is_eod_snapshot": True}
 
     # ── Market hours: use in-memory cache ─────────────────────────────────────
