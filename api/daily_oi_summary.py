@@ -69,23 +69,51 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         if not rows:
             return {"error": "No rows to write", "rows_written": 0}
 
-        # ── Fetch FUT-only volume separately ──────────────────────────────
-        fut_res = supabase.from_("oi_snapshots")\
-            .select("symbol, volume")\
+        # ── Fetch FUT open snapshot (9:15-9:20 AM IST = 03:45-03:50 UTC) ─
+        fut_open_res = supabase.from_("oi_snapshots")\
+            .select("symbol, oi, volume")\
             .eq("option_type", "FUT")\
-            .gte("timestamp", f"{trade_date}T00:00:00+00:00")\
-            .lte("timestamp", f"{trade_date}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(5000)\
+            .gte("timestamp", f"{trade_date}T03:44:00+00:00")\
+            .lte("timestamp", f"{trade_date}T03:52:00+00:00")\
+            .order("timestamp", desc=False)\
+            .limit(500)\
             .execute()
 
-        # Get max FUT volume per symbol (EOD snapshot)
-        fut_vol_map = {}
-        for r in (fut_res.data or []):
+        # ── Fetch FUT close snapshot (3:25-3:30 PM IST = 09:55-10:00 UTC) ─
+        fut_close_res = supabase.from_("oi_snapshots")\
+            .select("symbol, oi, volume")\
+            .eq("option_type", "FUT")\
+            .gte("timestamp", f"{trade_date}T09:50:00+00:00")\
+            .lte("timestamp", f"{trade_date}T10:05:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(500)\
+            .execute()
+
+        # Build open OI map (first snapshot per symbol)
+        fut_open_map = {}
+        for r in (fut_open_res.data or []):
             sym = r["symbol"]
-            vol = int(r.get("volume") or 0)
-            if sym not in fut_vol_map or vol > fut_vol_map[sym]:
-                fut_vol_map[sym] = vol
+            if sym not in fut_open_map:
+                fut_open_map[sym] = int(r.get("oi") or 0)
+
+        # Build close OI + volume map (latest snapshot per symbol)
+        fut_close_oi_map = {}
+        fut_vol_map = {}
+        seen_close = set()
+        for r in (fut_close_res.data or []):
+            sym = r["symbol"]
+            if sym not in seen_close:
+                fut_close_oi_map[sym] = int(r.get("oi") or 0)
+                fut_vol_map[sym] = int(r.get("volume") or 0)
+                seen_close.add(sym)
+
+        # Compute FUT OI change %
+        fut_oi_chg_map = {}
+        for sym in fut_close_oi_map:
+            open_oi = fut_open_map.get(sym, 0)
+            close_oi = fut_close_oi_map[sym]
+            if open_oi > 0:
+                fut_oi_chg_map[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
 
         # Add fut_vol and fut_oi_chg_pct to rows
         for row in rows:
