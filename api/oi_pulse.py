@@ -202,7 +202,87 @@ def to_ist(ts: str) -> str:
         return f"{(ist // 60) % 24:02d}:{ist % 60:02d}"
     except:
         return ts[11:16]
+def _get_eod_pulse(supabase):
+    """Post-market: serve clean EOD numbers from daily_oi_summary."""
+    global _pulse_cache, _pulse_cache_time
 
+    # Cache for 5 mins
+    if _pulse_cache and (time_module.time() - _pulse_cache_time) < 300:
+        return _pulse_cache
+
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    check = datetime.now(ist).date()
+    while check.weekday() >= 5:
+        check -= timedelta(days=1)
+    last_trading_day = check.isoformat()
+
+    rows = supabase.from_("daily_oi_summary")\
+        .select("symbol, oi_chg_pct, price_chg_pct, close_price, fut_vol")\
+        .eq("trade_date", last_trading_day)\
+        .limit(200)\
+        .execute()
+
+    if not rows.data:
+        return {"items": [], "count": 0, "message": "No EOD data available"}
+
+    cmp_res = supabase.from_("cmp_prices")\
+        .select("symbol, cmp")\
+        .gte("timestamp", f"{last_trading_day}T00:00:00+00:00")\
+        .lte("timestamp", f"{last_trading_day}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(500)\
+        .execute()
+    cmp_map = {}
+    seen = set()
+    for r in (cmp_res.data or []):
+        if r["symbol"] not in seen:
+            cmp_map[r["symbol"]] = float(r["cmp"])
+            seen.add(r["symbol"])
+
+    items = []
+    for r in rows.data:
+        sym = r["symbol"]
+        oi_chg = round(float(r.get("oi_chg_pct") or 0), 2)
+        price_chg = round(float(r.get("price_chg_pct") or 0), 2)
+        ltp = cmp_map.get(sym, 0)
+        is_index = sym in INDEX_NSE_MAP
+        signal, label, color, bg, border = classify(oi_chg, price_chg)
+        items.append({
+            "symbol":        sym,
+            "is_index":      is_index,
+            "oi_chg_pct":    oi_chg,
+            "price_chg_pct": price_chg,
+            "ltp":           ltp,
+            "signal":        signal,
+            "label":         label,
+            "color":         color,
+            "bg":            bg,
+            "border":        border,
+            "has_fut_data":  True,
+            "oi_now":        0,
+            "oi_prev":       0,
+            "fut_oi_now":    0,
+            "fut_oi_prev":   0,
+            "vol_surge":     False,
+        })
+
+    items.sort(key=lambda x: abs(x["oi_chg_pct"]), reverse=True)
+
+    result = {
+        "items":       items,
+        "count":       len(items),
+        "active_date": last_trading_day,
+        "is_live":     False,
+        "is_eod":      True,
+        "open_time":   "09:15",
+        "close_time":  "15:30",
+        "snapshots":   76,
+    }
+
+    _pulse_cache = result
+    _pulse_cache_time = time_module.time()
+    return result
 
 def get_oi_pulse():
     global _pulse_cache, _pulse_cache_time
