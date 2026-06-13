@@ -69,6 +69,28 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         if not rows:
             return {"error": "No rows to write", "rows_written": 0}
 
+        # ── Fetch FUT-only volume separately ──────────────────────────────
+        fut_res = supabase.from_("oi_snapshots")\
+            .select("symbol, volume")\
+            .eq("option_type", "FUT")\
+            .gte("timestamp", f"{trade_date}T00:00:00+00:00")\
+            .lte("timestamp", f"{trade_date}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(5000)\
+            .execute()
+
+        # Get max FUT volume per symbol (EOD snapshot)
+        fut_vol_map = {}
+        for r in (fut_res.data or []):
+            sym = r["symbol"]
+            vol = int(r.get("volume") or 0)
+            if sym not in fut_vol_map or vol > fut_vol_map[sym]:
+                fut_vol_map[sym] = vol
+
+        # Add fut_vol to rows
+        for row in rows:
+            row["fut_vol"] = fut_vol_map.get(row["symbol"], 0)
+
         supabase.from_("daily_oi_summary") \
             .upsert(rows, on_conflict="trade_date,symbol").execute()
 
