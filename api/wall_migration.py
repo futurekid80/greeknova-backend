@@ -149,6 +149,17 @@ def get_wall_migration(supabase) -> dict:
             ce_wall = min(ce_sig.keys())
             pe_wall = max(pe_sig.keys())
 
+            # Sanity check — CE wall must be above PE wall
+            if ce_wall <= pe_wall:
+                # Force correct sides
+                all_strikes_above = {s: v for s, v in ce_oi.items() if s >= cmp and v > 0}
+                all_strikes_below = {s: v for s, v in pe_oi.items() if s <= cmp and v > 0}
+                if all_strikes_above and all_strikes_below:
+                    ce_wall = max(all_strikes_above, key=all_strikes_above.get)
+                    pe_wall = max(all_strikes_below, key=all_strikes_below.get)
+                else:
+                    return None
+
             trade_range = round(abs(ce_wall - pe_wall), 1)
             trade_range_pct = round(trade_range / cmp * 100, 2) if cmp > 0 else 0
 
