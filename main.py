@@ -779,10 +779,7 @@ def positional_volume_alert():
         if len(sym_data) < 5:
             continue
 
-        today_row = sym_data[-1]
-        if today_row["trade_date"] != today:
-            continue  # no today data
-
+        today_row = sym_data[-1]  # last available trading day
         today_vol = int(today_row.get("fut_vol") or today_row.get("total_volume") or 0)
         if today_vol == 0:
             continue
