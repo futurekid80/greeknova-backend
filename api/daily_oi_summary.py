@@ -87,9 +87,11 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if sym not in fut_vol_map or vol > fut_vol_map[sym]:
                 fut_vol_map[sym] = vol
 
-        # Add fut_vol to rows
+        # Add fut_vol and fut_oi_chg_pct to rows
         for row in rows:
-            row["fut_vol"] = fut_vol_map.get(row["symbol"], 0)
+            sym = row["symbol"]
+            row["fut_vol"] = fut_vol_map.get(sym, 0)
+            row["fut_oi_chg_pct"] = fut_oi_chg_map.get(sym, 0)
 
         supabase.from_("daily_oi_summary") \
             .upsert(rows, on_conflict="trade_date,symbol").execute()
