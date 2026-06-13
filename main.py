@@ -646,7 +646,7 @@ def oi_buildup(symbol: str, days: int = 15):
 
     # Fetch all FUT snapshots for this symbol in date range
     rows = supabase.from_("oi_snapshots")\
-        .select("timestamp, oi, last_price")\
+        .select("timestamp, oi, last_price, expiry")\
         .eq("symbol", symbol.upper())\
         .eq("option_type", "FUT")\
         .gte("timestamp", f"{hist_start}T00:00:00+00:00")\
@@ -658,11 +658,19 @@ def oi_buildup(symbol: str, days: int = 15):
     if not rows.data:
         return {"symbol": symbol.upper(), "days": 0, "data": []}
 
-    # Group by date — get first and last snapshot per day
-    date_map = defaultdict(list)
+    # Group by date + expiry — pick nearest active expiry per day
+    date_expiry_map = defaultdict(lambda: defaultdict(list))
     for r in rows.data:
         date_str = r["timestamp"][:10]
-        date_map[date_str].append(r)
+        expiry = str(r.get("expiry") or "")
+        if expiry >= date_str:  # only future/same-day expiries
+            date_expiry_map[date_str][expiry].append(r)
+
+    # For each date pick nearest expiry (smallest expiry >= that date)
+    date_map = {}
+    for date_str, expiry_groups in date_expiry_map.items():
+        nearest = min(expiry_groups.keys())
+        date_map[date_str] = expiry_groups[nearest]
 
     # Build daily summary — FUT OI only
     daily = []
