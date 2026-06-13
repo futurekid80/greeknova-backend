@@ -636,14 +636,51 @@ def radar_cache_clear():
 @app.get("/oi-buildup/{symbol}")
 def oi_buildup(symbol: str, days: int = 15):
     from utils.db import get_supabase
+    from datetime import datetime, timezone, timedelta
+    from collections import defaultdict
     supabase = get_supabase()
-    result = supabase.from_("daily_oi_summary")\
-        .select("trade_date, oi_chg_pct, price_chg_pct, close_price, total_oi, fut_vol")\
+
+    # Get last N+1 trading days with FUT snapshots
+    hist_start = (datetime.now(timezone.utc) - timedelta(days=days + 10)).strftime('%Y-%m-%d')
+    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+
+    # Fetch all FUT snapshots for this symbol in date range
+    rows = supabase.from_("oi_snapshots")\
+        .select("timestamp, oi, last_price")\
         .eq("symbol", symbol.upper())\
-        .order("trade_date", desc=True)\
-        .limit(days + 1)\
+        .eq("option_type", "FUT")\
+        .gte("timestamp", f"{hist_start}T00:00:00+00:00")\
+        .lte("timestamp", f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(50000)\
         .execute()
-    rows = sorted(result.data or [], key=lambda x: x["trade_date"])
+
+    if not rows.data:
+        return {"symbol": symbol.upper(), "days": 0, "data": []}
+
+    # Group by date — get first and last snapshot per day
+    date_map = defaultdict(list)
+    for r in rows.data:
+        date_str = r["timestamp"][:10]
+        date_map[date_str].append(r)
+
+    # Build daily summary — FUT OI only
+    daily = []
+    for date_str in sorted(date_map.keys()):
+        snaps = date_map[date_str]
+        first = snaps[0]
+        last = snaps[-1]
+        open_oi = int(first.get("oi") or 0)
+        close_oi = int(last.get("oi") or 0)
+        open_price = float(first.get("last_price") or 0)
+        close_price = float(last.get("last_price") or 0)
+        daily.append({
+            "date": date_str,
+            "open_oi": open_oi,
+            "close_oi": close_oi,
+            "open_price": open_price,
+            "close_price": close_price,
+        })
 
     def classify(oi, price):
         MIN = 0.3
@@ -654,32 +691,34 @@ def oi_buildup(symbol: str, days: int = 15):
         return "NEUTRAL", "Neutral"
 
     data = []
-    for i, r in enumerate(rows):
-        oi = round(float(r.get("oi_chg_pct") or 0), 2)
-        close = float(r.get("close_price") or 0)
-        # Compute price change from previous day's close
-        if i > 0 and rows[i-1].get("close_price"):
-            prev_close = float(rows[i-1]["close_price"])
-            price = round((close - prev_close) / prev_close * 100, 2) if prev_close > 0 else 0
-        else:
-            price = 0
-        sig, label = classify(oi, price)
+    for i in range(1, len(daily)):
+        today_d = daily[i]
+        prev_d = daily[i - 1]
+
+        # FUT OI change: prev day close OI → today close OI
+        prev_close_oi = prev_d["close_oi"]
+        today_close_oi = today_d["close_oi"]
+        oi_chg_pct = round((today_close_oi - prev_close_oi) / prev_close_oi * 100, 2) if prev_close_oi > 0 else 0
+
+        # Price change: prev day close → today close (candle close to close)
+        prev_close_price = prev_d["close_price"]
+        today_close_price = today_d["close_price"]
+        price_chg_pct = round((today_close_price - prev_close_price) / prev_close_price * 100, 2) if prev_close_price > 0 else 0
+
+        sig, label = classify(oi_chg_pct, price_chg_pct)
+
         data.append({
-            "date":          r["trade_date"],
-            "oi_chg_pct":    oi,
-            "price_chg_pct": price,
-            "close_price":   close,
-            "total_oi":      int(r.get("total_oi") or 0),
-            "fut_vol":        int(r.get("fut_vol") or 0),
+            "date":          today_d["date"],
+            "oi_chg_pct":    oi_chg_pct,
+            "price_chg_pct": price_chg_pct,
+            "close_price":   today_close_price,
+            "close_oi":      today_close_oi,
             "signal":        sig,
             "label":         label,
         })
 
-    # Remove first row (no prev day to compute price from)
-    if data:
-        data = data[1:]
-
-    return {"symbol": symbol.upper(), "days": len(data), "data": data}
+    # Return last N days
+    return {"symbol": symbol.upper(), "days": len(data), "data": data[-days:]}
 
 @app.get("/watch-today")
 def watch_today():
