@@ -725,8 +725,19 @@ def oi_buildup(symbol: str, days: int = 15):
             "label":         label,
         })
 
-    # Return last N days
-    return {"symbol": symbol.upper(), "days": len(data), "data": data[-days:]}
+    # Filter to current series only — avoids rollover confusion
+    try:
+        from api.positional_radar import get_monthly_expiry, get_series_start
+        import datetime as _dt
+        _today = _dt.date.today()
+        _expiry = get_monthly_expiry(_today.year, _today.month)
+        _series_start = get_series_start(_expiry)
+        data = [d for d in data if d["date"] >= _series_start]
+    except Exception as e:
+        print(f"[OI Buildup] Series filter failed: {e}")
+        data = data[-days:]
+
+    return {"symbol": symbol.upper(), "days": len(data), "data": data}
 
 @app.get("/watch-today")
 def watch_today():
