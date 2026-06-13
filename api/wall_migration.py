@@ -78,16 +78,32 @@ def get_wall_migration(supabase) -> dict:
 
         # ── Fetch OI for both timestamps in one bulk query ────────────────
         oi_res = supabase.from_("oi_snapshots") \
-            .select("symbol,strike,option_type,oi,timestamp") \
+            .select("symbol,strike,option_type,oi,timestamp,expiry") \
             .in_("timestamp", [ts_latest, ts_prev]) \
             .in_("option_type", ["CE", "PE"]) \
             .limit(15000).execute()
 
         # ── Organize by timestamp → symbol → strike ───────────────────────
+        # Find nearest expiry per symbol from latest snapshot
+        nearest_expiry: dict = {}
+        for r in (oi_res.data or []):
+            if r["timestamp"] != ts_latest:
+                continue
+            sym = r["symbol"]
+            exp = str(r.get("expiry") or "")
+            if not exp or exp < today:
+                continue
+            if sym not in nearest_expiry or exp < nearest_expiry[sym]:
+                nearest_expiry[sym] = exp
+
         snap: dict[str, dict] = {ts_latest: {}, ts_prev: {}}
         for r in (oi_res.data or []):
             ts  = r["timestamp"]
             sym = r["symbol"]
+            exp = str(r.get("expiry") or "")
+            # Only nearest expiry
+            if exp != nearest_expiry.get(sym, ""):
+                continue
             s   = float(r["strike"])
             ot  = r["option_type"]
             oi  = int(r["oi"] or 0)
@@ -98,13 +114,23 @@ def get_wall_migration(supabase) -> dict:
             snap[ts][sym][s][f"{ot.lower()}_oi"] += oi
 
         # ── Compute walls for a snapshot ──────────────────────────────────
-        def get_walls(strike_map: dict, cmp: float) -> dict | None:
+        def get_walls(strike_map: dict, cmp: float, sym: str) -> dict | None:
             if not strike_map or cmp <= 0:
                 return None
+
+            interval = STRIKE_INTERVALS.get(sym, DEFAULT_INTERVAL)
+            
+            # ATM ±10 strikes filter — matches OI Profile methodology exactly
+            snapped_atm = round(cmp / interval) * interval
+            strike_lower = snapped_atm - (10 * interval)
+            strike_upper = snapped_atm + (10 * interval)
 
             ce_oi: dict = {}
             pe_oi: dict = {}
             for strike, v in strike_map.items():
+                # Only include ATM ±10 strikes
+                if strike < strike_lower or strike > strike_upper:
+                    continue
                 ce_oi[strike] = v.get("ce_oi", 0)
                 pe_oi[strike] = v.get("pe_oi", 0)
 
@@ -146,8 +172,8 @@ def get_wall_migration(supabase) -> dict:
 
             interval = STRIKE_INTERVALS.get(sym, DEFAULT_INTERVAL)
 
-            latest_walls = get_walls(snap[ts_latest].get(sym, {}), cmp)
-            prev_walls   = get_walls(snap[ts_prev].get(sym, {}), cmp)
+            latest_walls = get_walls(snap[ts_latest].get(sym, {}), cmp, sym)
+            prev_walls   = get_walls(snap[ts_prev].get(sym, {}), cmp, sym)
 
             if not latest_walls or not prev_walls:
                 continue
