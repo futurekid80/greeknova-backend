@@ -450,20 +450,24 @@ def writer_buyer_score(symbol: str):
     atm3_oi = atm3_ce + atm3_pe
     atm10_oi = atm10_ce + atm10_pe
 
-    # Component 1: OI Concentration score (0-30)
+# Component 1: OI Concentration score (0-30) — TIGHTENED
     conc_pct = round(atm3_oi / atm10_oi * 100, 1) if atm10_oi > 0 else 0
     if conc_pct >= 60:   conc_score = 30
-    elif conc_pct >= 45: conc_score = 22
-    elif conc_pct >= 30: conc_score = 14
-    else:                conc_score = 5
+    elif conc_pct >= 50: conc_score = 20
+    elif conc_pct >= 40: conc_score = 10
+    else:                conc_score = 0
 
     # ── 2. PCR stability (0-20) ────────────────────────────────────────────
     pcr = round(atm10_pe / atm10_ce, 2) if atm10_ce > 0 else 0
-    if 0.7 <= pcr <= 1.3:   pcr_score = 20
-    elif 0.5 <= pcr <= 1.6: pcr_score = 12
-    else:                    pcr_score = 4
+    if 0.8 <= pcr <= 1.2:   pcr_score = 20  # tight balanced = writers
+    elif 0.6 <= pcr <= 1.5: pcr_score = 10  # slightly skewed
+    else:                    pcr_score = 0   # heavily skewed = buyers dominating
 
-    # ── 3. FUT OI alignment (0-25) ────────────────────────────────────────
+    # ── 3. FUT vs Options DIVERGENCE (0-25) — NEW LOGIC ──────────────────
+    # Writers = FUT OI and Options OI move in OPPOSITE directions
+    # (e.g. FUT longs building while CE OI also building = institutions
+    #  writing calls against their FUT longs = writer behavior)
+    # Buyers = Options OI spikes without FUT confirmation
     hist_res = supabase.from_("daily_oi_summary")\
         .select("trade_date, fut_oi_chg_pct, oi_chg_pct, price_chg_pct")\
         .eq("symbol", sym)\
@@ -473,26 +477,35 @@ def writer_buyer_score(symbol: str):
         .limit(10).execute()
 
     hist_rows = hist_res.data or []
-    fut_align_days = 0
+
+    # Writer signal: FUT OI meaningful + options OI also building (covered writing)
+    # OR FUT OI meaningful + options OI shrinking (directional FUT only)
+    writer_days = 0
+    buyer_days = 0
     for r in hist_rows:
         fut_chg = float(r.get("fut_oi_chg_pct") or 0)
         opt_chg = float(r.get("oi_chg_pct") or 0)
-        price_chg = float(r.get("price_chg_pct") or 0)
-        # FUT and options OI both building in same direction as price = aligned
-        if fut_chg > 0 and opt_chg > 0:
-            fut_align_days += 1
-        elif fut_chg < 0 and opt_chg < 0:
-            fut_align_days += 1
+        # Writer: FUT has meaningful position change (>1%) = institutional
+        if abs(fut_chg) >= 1.0:
+            writer_days += 1
+        # Buyer: Options OI spikes (>5%) with minimal FUT activity (<0.5%)
+        elif abs(opt_chg) >= 5.0 and abs(fut_chg) < 0.5:
+            buyer_days += 1
 
-    fut_score = min(25, fut_align_days * 5)
+    total_days = len(hist_rows)
+    writer_pct = writer_days / total_days * 100 if total_days > 0 else 0
+    if writer_pct >= 70:   fut_score = 25
+    elif writer_pct >= 50: fut_score = 15
+    elif writer_pct >= 30: fut_score = 5
+    else:                  fut_score = 0
 
-    # ── 4. OI consistency (0-25) ──────────────────────────────────────────
+    # ── 4. OI consistency (0-25) — TIGHTENED ─────────────────────────────
     directions = []
     for r in hist_rows:
         fut_chg = float(r.get("fut_oi_chg_pct") or 0)
         price_chg = float(r.get("price_chg_pct") or 0)
         if abs(fut_chg) > 0.5:
-            if fut_chg > 0 and price_chg >= 0.3:   directions.append("LONG")
+            if fut_chg > 0 and price_chg >= 0.3:    directions.append("LONG")
             elif fut_chg > 0 and price_chg <= -0.3: directions.append("SHORT")
             elif fut_chg < 0 and price_chg >= 0.3:  directions.append("COVER")
             elif fut_chg < 0 and price_chg <= -0.3: directions.append("UNWIND")
@@ -501,13 +514,17 @@ def writer_buyer_score(symbol: str):
     if directions:
         most_common = max(set(directions), key=directions.count)
         consistency_pct = directions.count(most_common) / len(directions) * 100
-        if consistency_pct >= 70:   consec_score = 25
-        elif consistency_pct >= 50: consec_score = 15
-        else:                       consec_score = 5
+        if consistency_pct >= 75:   consec_score = 25  # very consistent
+        elif consistency_pct >= 65: consec_score = 15
+        elif consistency_pct >= 55: consec_score = 8
+        else:                       consec_score = 0   # mixed = not writer
     else:
         consec_score = 0
         consistency_pct = 0
         most_common = "NEUTRAL"
+
+    # Update fut_align note for breakdown
+    fut_align_days = writer_days
 
     # ── Final score ────────────────────────────────────────────────────────
     total_score = conc_score + pcr_score + fut_score + consec_score
@@ -553,8 +570,8 @@ def writer_buyer_score(symbol: str):
             "fut_alignment": {
                 "score":      fut_score,
                 "max":        25,
-                "aligned_days": fut_align_days,
-                "note":       f"FUT+Options aligned {fut_align_days} of {len(hist_rows)} days"
+                "aligned_days": writer_days,
+                "note":       f"FUT meaningful activity {writer_days} of {total_days} days ({round(writer_pct)}%)"
             },
             "oi_consistency": {
                 "score":      consec_score,
