@@ -1071,6 +1071,11 @@ def watch_today():
     from utils.db import get_supabase
     return get_watch_today(get_supabase())
 
+@app.get("/clear-radar-cache")
+def clear_radar_cache_endpoint():
+    from api.positional_radar import clear_radar_cache
+    return clear_radar_cache()
+
 @app.get("/positional-radar")
 def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
