@@ -37,14 +37,41 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             .order("timestamp", desc=True) \
             .limit(500).execute()
 
+        # Get previous trading day's close for price change calculation
+        from datetime import datetime as _dt2
+        trade_dt = _dt2.strptime(trade_date, '%Y-%m-%d')
+        prev_day = trade_dt
+        for _ in range(5):
+            prev_day = prev_day - timedelta(days=1)
+            if prev_day.weekday() < 5:
+                break
+        prev_date = prev_day.strftime('%Y-%m-%d')
+
+        prev_cmp_res = supabase.from_("cmp_prices")\
+            .select("symbol, cmp")\
+            .gte("timestamp", f"{prev_date}T00:00:00+00:00")\
+            .lte("timestamp", f"{prev_date}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(500).execute()
+
+        prev_cmp_map = {}
+        seen_prev = set()
+        for row in (prev_cmp_res.data or []):
+            if row["symbol"] not in seen_prev:
+                prev_cmp_map[row["symbol"]] = float(row["cmp"])
+                seen_prev.add(row["symbol"])
+
         cmp_map = {}
         seen = set()
         for row in (cmp_res.data or []):
             sym = row["symbol"]
             if sym not in seen:
+                curr = float(row.get("cmp") or 0)
+                prev = prev_cmp_map.get(sym, 0)
+                price_chg = round((curr - prev) / prev * 100, 2) if prev > 0 else None
                 cmp_map[sym] = {
                     "cmp": row.get("cmp"),
-                    "price_chg_pct": None
+                    "price_chg_pct": price_chg
                 }
                 seen.add(sym)
 
