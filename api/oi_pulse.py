@@ -206,10 +206,6 @@ def _get_eod_pulse(supabase):
     """Post-market: serve clean EOD numbers from daily_oi_summary."""
     global _pulse_cache, _pulse_cache_time
 
-    # Cache for 5 mins
-    if _pulse_cache and (time_module.time() - _pulse_cache_time) < 300:
-        return _pulse_cache
-
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     check = datetime.now(ist).date()
