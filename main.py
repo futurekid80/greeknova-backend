@@ -1206,13 +1206,26 @@ def stealth_buildup():
             "close_price": float(r.get("close_price") or 0),
         })
 
-    # ── Get today's price change ──────────────────────────────────────────
+    # ── Get today's price change (open-to-close candle body) ──────────────
     price_res = supabase.from_("daily_oi_summary")\
-        .select("symbol, close_price, price_chg_pct")\
+        .select("symbol, close_price")\
         .eq("trade_date", last_trading_day)\
         .limit(200)\
         .execute()
     price_map = {r["symbol"]: r for r in (price_res.data or [])}
+
+    # Fetch open price (first CMP snapshot of the day)
+    open_res = supabase.from_("cmp_prices")\
+        .select("symbol, cmp")\
+        .gte("timestamp", f"{last_trading_day}T03:44:00+00:00")\
+        .lte("timestamp", f"{last_trading_day}T03:52:00+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(500)\
+        .execute()
+    open_map = {}
+    for r in (open_res.data or []):
+        if r["symbol"] not in open_map:
+            open_map[r["symbol"]] = float(r["cmp"])
 
     # ── Get CMP for ATM calculation ───────────────────────────────────────
     cmp_res = supabase.from_("cmp_prices")\
@@ -1305,11 +1318,15 @@ def stealth_buildup():
         all_oi_values = sorted([h["fut_oi_chg_pct"] for h in last_15], reverse=True)
         rank = all_oi_values.index(today_oi_chg) + 1 if today_oi_chg in all_oi_values else 99
 
-        # Price change today
+        # Price change — open to close candle body
         price_data = price_map.get(sym, {})
-        price_chg = float(price_data.get("price_chg_pct") or 0)
         close_price = float(price_data.get("close_price") or 0)
         cmp = cmp_map.get(sym, close_price)
+        open_price = open_map.get(sym, 0)
+        if open_price > 0 and close_price > 0:
+            price_chg = round((close_price - open_price) / open_price * 100, 2)
+        else:
+            price_chg = 0
 
         # Net Delta (ATM±5)
         net_delta, pe_oi, ce_oi = compute_net_delta(sym, cmp)
