@@ -276,9 +276,13 @@ def get_signal_log(date: str = None):
         # Walk back to last trading day
         import pytz
         ist = pytz.timezone('Asia/Kolkata')
-        check = datetime.now(ist).date()
+        now_ist = datetime.now(ist)
+        check = now_ist.date()
+        # If before market open (9:15 AM IST), treat today as not yet traded
+        if now_ist.hour < 9 or (now_ist.hour == 9 and now_ist.minute < 15):
+            check -= timedelta(days=1)
+        # Walk back to last trading weekday
         while check.weekday() >= 5:
-            from datetime import timedelta
             check -= timedelta(days=1)
         last_trading_day = check.isoformat()
 
