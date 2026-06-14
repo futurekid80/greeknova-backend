@@ -216,7 +216,13 @@ def get_positional_radar(min_consec: int = 0):
 
     # Serve cache if fresh
     cache_key = str(min_consec)
-    if _radar_cache.get(cache_key) and (time_module.time() - _radar_cache_time) < _CACHE_TTL:
+    import pytz
+    _ist = pytz.timezone('Asia/Kolkata')
+    _now_ist = datetime.now(_ist)
+    _is_market = _now_ist.weekday() < 5 and 9 <= _now_ist.hour < 16
+    _ttl = 300 if _is_market else 3600  # 5 min market, 1 hour post-market
+
+    if _radar_cache.get(cache_key) and (time_module.time() - _radar_cache_time) < _ttl:
         print(f"[Positional Radar] Serving cached result")
         return _radar_cache[cache_key]
 
