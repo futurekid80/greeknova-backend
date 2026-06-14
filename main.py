@@ -930,6 +930,211 @@ def signal_log(date: str = None, symbol: str = None):
     from api.signal_log import get_signal_log
     return get_signal_log(date)
 
+@app.get("/stealth-buildup")
+def stealth_buildup():
+    from utils.db import get_supabase
+    from collections import defaultdict
+    import datetime as _dt
+    import pytz
+
+    supabase = get_supabase()
+    IST = pytz.timezone("Asia/Kolkata")
+
+    # ── Get last trading day ──────────────────────────────────────────────
+    today = _dt.datetime.now(IST).date()
+    check = today
+    for _ in range(7):
+        if check.weekday() < 5:
+            break
+        check -= _dt.timedelta(days=1)
+    last_trading_day = check.isoformat()
+
+    # ── Get series start ──────────────────────────────────────────────────
+    from api.positional_radar import get_monthly_expiry, get_series_start
+    expiry = get_monthly_expiry(today.year, today.month)
+    series_start = get_series_start(expiry)
+
+    # ── Fetch last 15 days of FUT OI change from daily_oi_summary ────────
+    hist_start = (check - _dt.timedelta(days=25)).isoformat()
+    hist_res = supabase.from_("daily_oi_summary")\
+        .select("symbol, trade_date, fut_oi_chg_pct, close_price")\
+        .gte("trade_date", hist_start)\
+        .lte("trade_date", last_trading_day)\
+        .gt("fut_oi_chg_pct", 0)\
+        .order("trade_date", desc=False)\
+        .limit(10000)\
+        .execute()
+
+    # Group by symbol — get last 15 trading days
+    from collections import defaultdict
+    sym_history = defaultdict(list)
+    for r in (hist_res.data or []):
+        sym_history[r["symbol"]].append({
+            "date": r["trade_date"],
+            "fut_oi_chg_pct": float(r.get("fut_oi_chg_pct") or 0),
+            "close_price": float(r.get("close_price") or 0),
+        })
+
+    # ── Get today's price change ──────────────────────────────────────────
+    price_res = supabase.from_("daily_oi_summary")\
+        .select("symbol, close_price, price_chg_pct")\
+        .eq("trade_date", last_trading_day)\
+        .limit(200)\
+        .execute()
+    price_map = {r["symbol"]: r for r in (price_res.data or [])}
+
+    # ── Get CMP for ATM calculation ───────────────────────────────────────
+    cmp_res = supabase.from_("cmp_prices")\
+        .select("symbol, cmp")\
+        .gte("timestamp", f"{last_trading_day}T00:00:00+00:00")\
+        .lte("timestamp", f"{last_trading_day}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(500)\
+        .execute()
+    cmp_map = {}
+    seen = set()
+    for r in (cmp_res.data or []):
+        if r["symbol"] not in seen:
+            cmp_map[r["symbol"]] = float(r["cmp"])
+            seen.add(r["symbol"])
+
+    # ── Fetch ATM±5 strikes CE/PE OI for last trading day ────────────────
+    STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50}
+
+    oi_res = supabase.from_("oi_snapshots")\
+        .select("symbol, strike, option_type, oi, expiry")\
+        .in_("option_type", ["CE", "PE"])\
+        .gte("timestamp", f"{last_trading_day}T09:50:00+00:00")\
+        .lte("timestamp", f"{last_trading_day}T10:05:00+00:00")\
+        .limit(50000)\
+        .execute()
+
+    # Group CE/PE OI by symbol → strike
+    sym_strikes = defaultdict(lambda: defaultdict(lambda: {"ce_oi": 0, "pe_oi": 0}))
+    sym_expiry = {}
+    for r in (oi_res.data or []):
+        sym = r["symbol"]
+        exp = str(r.get("expiry") or "")
+        if not exp or exp < last_trading_day:
+            continue
+        if sym not in sym_expiry or exp < sym_expiry[sym]:
+            sym_expiry[sym] = exp
+    for r in (oi_res.data or []):
+        sym = r["symbol"]
+        if str(r.get("expiry") or "") != sym_expiry.get(sym, ""):
+            continue
+        strike = float(r["strike"])
+        ot = r["option_type"]
+        oi = int(r.get("oi") or 0)
+        sym_strikes[sym][strike][f"{ot.lower()}_oi"] += oi
+
+    # Compute Net Delta (ATM±5 strikes only)
+    def compute_net_delta(sym, cmp):
+        if cmp <= 0 or sym not in sym_strikes:
+            return None, 0, 0
+        strikes_data = sym_strikes[sym]
+        interval = STRIKE_INTERVALS.get(sym, None)
+        if not interval:
+            strikes_sorted = sorted(strikes_data.keys())
+            if len(strikes_sorted) >= 2:
+                diffs = [strikes_sorted[i+1]-strikes_sorted[i] for i in range(min(5, len(strikes_sorted)-1))]
+                valid = [d for d in diffs if d > 0]
+                interval = min(valid) if valid else 5
+            else:
+                interval = 5
+        snapped_atm = round(cmp / interval) * interval
+        lower = snapped_atm - (5 * interval)
+        upper = snapped_atm + (5 * interval)
+        ce_total = 0
+        pe_total = 0
+        for strike, v in strikes_data.items():
+            if lower <= strike <= upper:
+                ce_total += v.get("ce_oi", 0)
+                pe_total += v.get("pe_oi", 0)
+        net_delta = pe_total - ce_total
+        return net_delta, pe_total, ce_total
+
+    # ── Score each symbol ─────────────────────────────────────────────────
+    results = []
+    for sym, history in sym_history.items():
+        if len(history) < 3:
+            continue
+
+        # Get last 15 days OI values
+        last_15 = history[-15:]
+        today_data = next((h for h in reversed(last_15) if h["date"] == last_trading_day), None)
+        if not today_data:
+            continue
+
+        today_oi_chg = today_data["fut_oi_chg_pct"]
+        if today_oi_chg <= 0:
+            continue
+
+        # Rank today's OI vs last 15 days
+        all_oi_values = sorted([h["fut_oi_chg_pct"] for h in last_15], reverse=True)
+        rank = all_oi_values.index(today_oi_chg) + 1 if today_oi_chg in all_oi_values else 99
+
+        # Price change today
+        price_data = price_map.get(sym, {})
+        price_chg = float(price_data.get("price_chg_pct") or 0)
+        close_price = float(price_data.get("close_price") or 0)
+        cmp = cmp_map.get(sym, close_price)
+
+        # Net Delta (ATM±5)
+        net_delta, pe_oi, ce_oi = compute_net_delta(sym, cmp)
+        net_delta_L = round(net_delta / 100000, 2) if net_delta is not None else None
+        net_delta_bullish = net_delta is not None and net_delta > 0
+
+        # Classify tier
+        abs_price = abs(price_chg)
+        if rank <= 3 and abs_price <= 0.5 and net_delta_bullish:
+            tier = "ELITE"
+            tier_label = "🥇 Elite"
+            tier_color = "GOLD"
+        elif rank <= 3 and abs_price <= 1.0:
+            tier = "STRONG"
+            tier_label = "🥈 Strong"
+            tier_color = "SILVER"
+        elif rank <= 5 and abs_price <= 1.5:
+            tier = "WATCH"
+            tier_label = "🥉 Watch"
+            tier_color = "BRONZE"
+        else:
+            continue
+
+        results.append({
+            "symbol":           sym,
+            "tier":             tier,
+            "tier_label":       tier_label,
+            "tier_color":       tier_color,
+            "rank":             rank,
+            "total_days":       len(last_15),
+            "fut_oi_chg_pct":   round(today_oi_chg, 2),
+            "price_chg_pct":    round(price_chg, 2),
+            "close_price":      close_price,
+            "cmp":              cmp,
+            "net_delta_L":      net_delta_L,
+            "net_delta_bullish": net_delta_bullish,
+            "pe_oi_L":          round(pe_oi / 100000, 2),
+            "ce_oi_L":          round(ce_oi / 100000, 2),
+            "oi_history":       [round(h["fut_oi_chg_pct"], 2) for h in last_15],
+        })
+
+    # Sort: Elite first, then Strong, then Watch, then by OI rank
+    tier_order = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
+    results.sort(key=lambda x: (tier_order.get(x["tier"], 3), x["rank"]))
+
+    return {
+        "date":         last_trading_day,
+        "series_start": series_start,
+        "expiry":       expiry,
+        "total":        len(results),
+        "elite":        sum(1 for r in results if r["tier"] == "ELITE"),
+        "strong":       sum(1 for r in results if r["tier"] == "STRONG"),
+        "watch":        sum(1 for r in results if r["tier"] == "WATCH"),
+        "results":      results,
+    }
+
 @app.get("/signal-log/seed-eod")
 def seed_signal_log_eod(date: str = None):
     """Manually force-compute and save EOD snapshot. Defaults to today if market closed, else yesterday."""
