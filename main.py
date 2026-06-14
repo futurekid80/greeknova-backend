@@ -708,10 +708,10 @@ def oi_buildup(symbol: str, days: int = 15):
         today_close_oi = today_d["close_oi"]
         oi_chg_pct = round((today_close_oi - prev_close_oi) / prev_close_oi * 100, 2) if prev_close_oi > 0 else 0
 
-        # Price change: prev day close → today close (candle close to close)
-        prev_close_price = prev_d["close_price"]
+        # Price change: today open → today close (candle body — more accurate for signal classification)
+        today_open_price = today_d["open_price"]
         today_close_price = today_d["close_price"]
-        price_chg_pct = round((today_close_price - prev_close_price) / prev_close_price * 100, 2) if prev_close_price > 0 else 0
+        price_chg_pct = round((today_close_price - today_open_price) / today_open_price * 100, 2) if today_open_price > 0 else 0
 
         sig, label = classify(oi_chg_pct, price_chg_pct)
 
