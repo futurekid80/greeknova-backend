@@ -366,6 +366,215 @@ def oi_spikes(threshold: float = 10.0, date: str = None):
     from api.oi_spike import get_oi_spikes
     return get_oi_spikes(threshold, date)
 
+@app.get("/writer-buyer-score/{symbol}")
+def writer_buyer_score(symbol: str):
+    from utils.db import get_supabase
+    from collections import defaultdict
+    import datetime as _dt
+    import pytz
+
+    supabase = get_supabase()
+    IST = pytz.timezone("Asia/Kolkata")
+    sym = symbol.upper()
+
+    today = _dt.datetime.now(IST).date()
+    check = today
+    for _ in range(7):
+        if check.weekday() < 5:
+            break
+        check -= _dt.timedelta(days=1)
+    last_trading_day = check.isoformat()
+
+    # ── 1. Fetch ATM±10 strikes OI (EOD snapshot) ─────────────────────────
+    from api.positional_radar import get_monthly_expiry, get_series_start
+    expiry = get_monthly_expiry(today.year, today.month)
+
+    cmp_res = supabase.from_("cmp_prices")\
+        .select("cmp")\
+        .eq("symbol", sym)\
+        .gte("timestamp", f"{last_trading_day}T00:00:00+00:00")\
+        .lte("timestamp", f"{last_trading_day}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
+
+    cmp = float(cmp_res.data[0]["cmp"]) if cmp_res.data else 0
+    if cmp <= 0:
+        return {"symbol": sym, "error": "No CMP data"}
+
+    # Auto detect interval
+    oi_res = supabase.from_("oi_snapshots")\
+        .select("strike, option_type, oi")\
+        .eq("symbol", sym)\
+        .eq("expiry", expiry)\
+        .in_("option_type", ["CE", "PE"])\
+        .gte("timestamp", f"{last_trading_day}T09:50:00+00:00")\
+        .lte("timestamp", f"{last_trading_day}T10:05:00+00:00")\
+        .limit(10000).execute()
+
+    if not oi_res.data:
+        return {"symbol": sym, "error": "No OI snapshot data"}
+
+    strikes_list = sorted(set(float(r["strike"]) for r in oi_res.data))
+    if len(strikes_list) >= 2:
+        diffs = [strikes_list[i+1]-strikes_list[i] for i in range(min(5, len(strikes_list)-1))]
+        interval = min(d for d in diffs if d > 0)
+    else:
+        interval = 5
+
+    snapped_atm = round(cmp / interval) * interval
+
+    # Compute ATM±3 and total OI
+    atm3_ce = atm3_pe = total_ce = total_pe = 0
+    atm10_ce = atm10_pe = 0
+
+    for r in oi_res.data:
+        strike = float(r["strike"])
+        oi = int(r.get("oi") or 0)
+        ot = r["option_type"]
+        dist = abs(strike - snapped_atm) / interval  # distance in strike intervals
+
+        if ot == "CE":
+            total_ce += oi
+            if dist <= 10:
+                atm10_ce += oi
+            if dist <= 3:
+                atm3_ce += oi
+        else:
+            total_pe += oi
+            if dist <= 10:
+                atm10_pe += oi
+            if dist <= 3:
+                atm3_pe += oi
+
+    total_oi = total_ce + total_pe
+    atm3_oi = atm3_ce + atm3_pe
+    atm10_oi = atm10_ce + atm10_pe
+
+    # Component 1: OI Concentration score (0-30)
+    conc_pct = round(atm3_oi / atm10_oi * 100, 1) if atm10_oi > 0 else 0
+    if conc_pct >= 60:   conc_score = 30
+    elif conc_pct >= 45: conc_score = 22
+    elif conc_pct >= 30: conc_score = 14
+    else:                conc_score = 5
+
+    # ── 2. PCR stability (0-20) ────────────────────────────────────────────
+    pcr = round(atm10_pe / atm10_ce, 2) if atm10_ce > 0 else 0
+    if 0.7 <= pcr <= 1.3:   pcr_score = 20
+    elif 0.5 <= pcr <= 1.6: pcr_score = 12
+    else:                    pcr_score = 4
+
+    # ── 3. FUT OI alignment (0-25) ────────────────────────────────────────
+    hist_res = supabase.from_("daily_oi_summary")\
+        .select("trade_date, fut_oi_chg_pct, oi_chg_pct, price_chg_pct")\
+        .eq("symbol", sym)\
+        .gte("trade_date", (check - _dt.timedelta(days=10)).isoformat())\
+        .lte("trade_date", last_trading_day)\
+        .order("trade_date", desc=False)\
+        .limit(10).execute()
+
+    hist_rows = hist_res.data or []
+    fut_align_days = 0
+    for r in hist_rows:
+        fut_chg = float(r.get("fut_oi_chg_pct") or 0)
+        opt_chg = float(r.get("oi_chg_pct") or 0)
+        price_chg = float(r.get("price_chg_pct") or 0)
+        # FUT and options OI both building in same direction as price = aligned
+        if fut_chg > 0 and opt_chg > 0:
+            fut_align_days += 1
+        elif fut_chg < 0 and opt_chg < 0:
+            fut_align_days += 1
+
+    fut_score = min(25, fut_align_days * 5)
+
+    # ── 4. OI consistency (0-25) ──────────────────────────────────────────
+    directions = []
+    for r in hist_rows:
+        fut_chg = float(r.get("fut_oi_chg_pct") or 0)
+        price_chg = float(r.get("price_chg_pct") or 0)
+        if abs(fut_chg) > 0.5:
+            if fut_chg > 0 and price_chg >= 0.3:   directions.append("LONG")
+            elif fut_chg > 0 and price_chg <= -0.3: directions.append("SHORT")
+            elif fut_chg < 0 and price_chg >= 0.3:  directions.append("COVER")
+            elif fut_chg < 0 and price_chg <= -0.3: directions.append("UNWIND")
+            else:                                    directions.append("NEUTRAL")
+
+    if directions:
+        most_common = max(set(directions), key=directions.count)
+        consistency_pct = directions.count(most_common) / len(directions) * 100
+        if consistency_pct >= 70:   consec_score = 25
+        elif consistency_pct >= 50: consec_score = 15
+        else:                       consec_score = 5
+    else:
+        consec_score = 0
+        consistency_pct = 0
+        most_common = "NEUTRAL"
+
+    # ── Final score ────────────────────────────────────────────────────────
+    total_score = conc_score + pcr_score + fut_score + consec_score
+
+    if total_score >= 70:
+        verdict = "WRITER_DOMINATED"
+        verdict_label = "✍️ Writer Dominated"
+        verdict_color = "EMERALD"
+        verdict_note = "Institutional writers setting the range — high conviction positioning"
+    elif total_score >= 45:
+        verdict = "MIXED"
+        verdict_label = "⚖️ Mixed Activity"
+        verdict_color = "AMBER"
+        verdict_note = "Both writers and buyers active — wait for clarity"
+    else:
+        verdict = "BUYER_DOMINATED"
+        verdict_label = "🎯 Buyer Dominated"
+        verdict_color = "RED"
+        verdict_note = "Speculative/event-driven activity — options being bought not written"
+
+    return {
+        "symbol":            sym,
+        "date":              last_trading_day,
+        "cmp":               cmp,
+        "score":             total_score,
+        "verdict":           verdict,
+        "verdict_label":     verdict_label,
+        "verdict_color":     verdict_color,
+        "verdict_note":      verdict_note,
+        "breakdown": {
+            "concentration": {
+                "score":      conc_score,
+                "max":        30,
+                "atm3_pct":   conc_pct,
+                "note":       f"ATM±3 = {conc_pct}% of ATM±10 OI"
+            },
+            "pcr_stability": {
+                "score":      pcr_score,
+                "max":        20,
+                "pcr":        pcr,
+                "note":       f"PCR {pcr} — {'balanced' if 0.7 <= pcr <= 1.3 else 'skewed'}"
+            },
+            "fut_alignment": {
+                "score":      fut_score,
+                "max":        25,
+                "aligned_days": fut_align_days,
+                "note":       f"FUT+Options aligned {fut_align_days} of {len(hist_rows)} days"
+            },
+            "oi_consistency": {
+                "score":      consec_score,
+                "max":        25,
+                "consistency_pct": round(consistency_pct, 1),
+                "dominant":   most_common,
+                "note":       f"{most_common} signal {round(consistency_pct,1)}% of days"
+            }
+        },
+        "atm_data": {
+            "atm_strike":  snapped_atm,
+            "interval":    interval,
+            "atm3_ce_L":   round(atm3_ce/100000, 2),
+            "atm3_pe_L":   round(atm3_pe/100000, 2),
+            "atm10_ce_L":  round(atm10_ce/100000, 2),
+            "atm10_pe_L":  round(atm10_pe/100000, 2),
+            "pcr":         pcr,
+        }
+    }
+
 if __name__ == "__main__":
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=False)
 
