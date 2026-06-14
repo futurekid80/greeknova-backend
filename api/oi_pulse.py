@@ -214,7 +214,7 @@ def _get_eod_pulse(supabase):
     last_trading_day = check.isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
-        .select("symbol, oi_chg_pct, price_chg_pct, close_price, fut_vol")\
+        .select("symbol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol")\
         .eq("trade_date", last_trading_day)\
         .limit(200)\
         .execute()
