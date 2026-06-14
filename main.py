@@ -1214,18 +1214,6 @@ def stealth_buildup():
         .execute()
     price_map = {r["symbol"]: r for r in (price_res.data or [])}
 
-    # Fetch open price (first CMP snapshot of the day)
-    open_res = supabase.from_("cmp_prices")\
-        .select("symbol, cmp")\
-        .gte("timestamp", f"{last_trading_day}T03:44:00+00:00")\
-        .lte("timestamp", f"{last_trading_day}T03:52:00+00:00")\
-        .order("timestamp", desc=False)\
-        .limit(500)\
-        .execute()
-    open_map = {}
-    for r in (open_res.data or []):
-        if r["symbol"] not in open_map:
-            open_map[r["symbol"]] = float(r["cmp"])
 
     # ── Get CMP for ATM calculation ───────────────────────────────────────
     cmp_res = supabase.from_("cmp_prices")\
@@ -1318,13 +1306,19 @@ def stealth_buildup():
         all_oi_values = sorted([h["fut_oi_chg_pct"] for h in last_15], reverse=True)
         rank = all_oi_values.index(today_oi_chg) + 1 if today_oi_chg in all_oi_values else 99
 
-        # Price change — open to close candle body
+        # Price change — close-to-close (prev day close → today close)
+        # This correctly identifies days where price DIDN'T react to OI accumulation
         price_data = price_map.get(sym, {})
         close_price = float(price_data.get("close_price") or 0)
         cmp = cmp_map.get(sym, close_price)
-        open_price = open_map.get(sym, 0)
-        if open_price > 0 and close_price > 0:
-            price_chg = round((close_price - open_price) / open_price * 100, 2)
+        # Get prev day close from daily_oi_summary history
+        today_idx = next((i for i, h in enumerate(history) if h["date"] == last_trading_day), -1)
+        if today_idx > 0:
+            prev_close = history[today_idx - 1].get("close_price", 0)
+            if prev_close > 0 and close_price > 0:
+                price_chg = round((close_price - prev_close) / prev_close * 100, 2)
+            else:
+                price_chg = 0
         else:
             price_chg = 0
 
