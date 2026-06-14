@@ -1610,6 +1610,14 @@ def oi_walls_detail(symbol: str):
         "intraday_range_pct":  intraday_range_pct,
     }
 
+@app.get("/run-archive")
+def run_archive():
+    try:
+        archive_old_snapshots()
+        return {"status": "archive triggered"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 # ── CommodityNova routes ───────────────────────────────────────────────────
 app.include_router(mcx_router, prefix="/mcx", tags=["MCX"])
 app.include_router(mcx_oi_map_router, prefix="/mcx", tags=["MCX"])
