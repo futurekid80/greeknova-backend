@@ -1057,7 +1057,7 @@ def stealth_buildup():
     # ── Score each symbol ─────────────────────────────────────────────────
     results = []
     for sym, history in sym_history.items():
-        if len(history) < 3:
+        if len(history) < 8:
             continue
 
         # Get last 15 days OI values
@@ -1091,7 +1091,7 @@ def stealth_buildup():
             tier = "ELITE"
             tier_label = "🥇 Elite"
             tier_color = "GOLD"
-        elif rank <= 3 and abs_price <= 1.0:
+        elif rank <= 2 and abs_price <= 1.0:
             tier = "STRONG"
             tier_label = "🥈 Strong"
             tier_color = "SILVER"
