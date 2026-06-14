@@ -406,7 +406,7 @@ def get_signal_log(date: str = None):
     # vol_rank = how many of last 5 days today's volume exceeds
     hist_vol_map: dict = {}  # sym -> [vol_day1, vol_day2, ...] sorted recent first
     try:
-        from datetime import timedelta
+        
         from collections import defaultdict
         # Get last 5 trading dates before today — limit to 5000 rows max
         hist_start = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%d')
