@@ -299,6 +299,219 @@ def compute_and_store_cpr(trade_date: str = None):
     print(f"[CPR] Stored {len(records)} CPR records for {trade_date}")
     return {"stored": len(records), "trade_date": trade_date}
 
+def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
+    """
+    Computes weekly and monthly CPR levels.
+    Weekly: uses previous week's H/L/C (Mon-Fri)
+    Monthly: uses previous month's H/L/C
+    Stores in cpr_levels_weekly table.
+    """
+    supabase = get_supabase()
+    try:
+        from services.kite_auth import get_kite_client
+        kite = get_kite_client()
+    except Exception as e:
+        return {"error": str(e)}
+
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.now(ist).date()
+
+    # ── Determine trade_date (next trading day) ────────────────────────────
+    if not trade_date:
+        next_day = today + timedelta(days=1)
+        while next_day.weekday() >= 5:
+            next_day += timedelta(days=1)
+        trade_date = next_day.isoformat()
+
+    # ── Build instrument token map ─────────────────────────────────────────
+    INDEX_TOKENS = {
+        "NIFTY":     256265,
+        "BANKNIFTY": 260105,
+        "FINNIFTY":  257801,
+    }
+    token_map = {**INDEX_TOKENS}
+    try:
+        instruments = kite.instruments("NSE")
+        for inst in instruments:
+            if inst["tradingsymbol"] in STOCKS:
+                token_map[inst["tradingsymbol"]] = inst["instrument_token"]
+    except Exception as e:
+        print(f"[CPR Weekly] Instruments fetch failed: {e}")
+
+    all_symbols = INDICES + STOCKS
+
+    # ── Find previous week's Mon-Fri range ────────────────────────────────
+    # Go back to find last complete week (Mon to Fri)
+    days_back = today.weekday() + 7  # go back to previous week's Monday
+    prev_week_friday = today - timedelta(days=today.weekday() + 3)
+    prev_week_monday = prev_week_friday - timedelta(days=4)
+
+    # For monthly: first and last day of previous month
+    first_of_month = today.replace(day=1)
+    prev_month_end = first_of_month - timedelta(days=1)
+    prev_month_start = prev_month_end.replace(day=1)
+
+    from_date = prev_month_start.isoformat()
+    to_date   = today.isoformat()
+
+    print(f"[CPR Weekly] Week range: {prev_week_monday} to {prev_week_friday}")
+    print(f"[CPR Weekly] Month range: {prev_month_start} to {prev_month_end}")
+
+    weekly_ohlc  = {}
+    monthly_ohlc = {}
+
+    for sym in all_symbols:
+        token = token_map.get(sym)
+        if not token:
+            continue
+        try:
+            candles = kite.historical_data(
+                instrument_token=token,
+                from_date=from_date,
+                to_date=to_date,
+                interval="day",
+                continuous=False,
+                oi=False,
+            )
+            if not candles:
+                continue
+
+            # Weekly: filter candles within prev week Mon-Fri
+            week_candles = [
+                c for c in candles
+                if prev_week_monday.isoformat() <= str(c["date"])[:10] <= prev_week_friday.isoformat()
+            ]
+            if week_candles:
+                weekly_ohlc[sym] = {
+                    "high":  max(float(c["high"]) for c in week_candles),
+                    "low":   min(float(c["low"]) for c in week_candles),
+                    "close": float(week_candles[-1]["close"]),
+                }
+
+            # Monthly: filter candles within prev month
+            month_candles = [
+                c for c in candles
+                if prev_month_start.isoformat() <= str(c["date"])[:10] <= prev_month_end.isoformat()
+            ]
+            if month_candles:
+                monthly_ohlc[sym] = {
+                    "high":  max(float(c["high"]) for c in month_candles),
+                    "low":   min(float(c["low"]) for c in month_candles),
+                    "close": float(month_candles[-1]["close"]),
+                }
+
+            time.sleep(0.05)
+        except Exception as e:
+            print(f"[CPR Weekly] {sym}: {e}")
+
+    print(f"[CPR Weekly] Got weekly OHLC: {len(weekly_ohlc)}, monthly: {len(monthly_ohlc)}")
+
+    # ── Fetch previous weekly/monthly CPR for trend ────────────────────────
+    prev_weekly_map = {}
+    prev_monthly_map = {}
+    try:
+        prev_rows = supabase.from_("cpr_levels_weekly")\
+            .select("symbol, tc, bc, timeframe")\
+            .lt("trade_date", trade_date)\
+            .order("trade_date", desc=True)\
+            .limit(len(all_symbols) * 4)\
+            .execute()
+        seen_w = set()
+        seen_m = set()
+        for r in (prev_rows.data or []):
+            sym = r["symbol"]
+            tf  = r.get("timeframe")
+            if tf == "weekly" and sym not in seen_w:
+                prev_weekly_map[sym] = {"tc": float(r["tc"]), "bc": float(r["bc"])}
+                seen_w.add(sym)
+            elif tf == "monthly" and sym not in seen_m:
+                prev_monthly_map[sym] = {"tc": float(r["tc"]), "bc": float(r["bc"])}
+                seen_m.add(sym)
+    except Exception as e:
+        print(f"[CPR Weekly] Prev fetch: {e}")
+
+    # ── Compute and store records ──────────────────────────────────────────
+    records = []
+
+    for sym in all_symbols:
+        # Weekly record
+        ohlc = weekly_ohlc.get(sym)
+        if ohlc:
+            cpr   = compute_cpr(ohlc["high"], ohlc["low"], ohlc["close"])
+            label = get_cpr_label(cpr["width_pct"])
+            prev  = prev_weekly_map.get(sym, {})
+            trend = get_cpr_trend(cpr["tc"], cpr["bc"], prev.get("tc"), prev.get("bc"))
+            records.append({
+                "trade_date":     trade_date,
+                "symbol":         sym,
+                "timeframe":      "weekly",
+                "is_index":       sym in INDICES,
+                "prev_high":      ohlc["high"],
+                "prev_low":       ohlc["low"],
+                "prev_close":     ohlc["close"],
+                "pivot":          cpr["pivot"],
+                "tc":             cpr["tc"],
+                "bc":             cpr["bc"],
+                "width_pts":      cpr["width_pts"],
+                "width_pct":      cpr["width_pct"],
+                "width_label":    label["label"],
+                "width_color":    label["color"],
+                "width_emoji":    label["emoji"],
+                "width_priority": label["priority"],
+                "prev_tc":        prev.get("tc"),
+                "prev_bc":        prev.get("bc"),
+                "cpr_trend":      trend,
+                "is_virgin":      True,
+                "last_cmp":       None,
+            })
+
+        # Monthly record
+        ohlc = monthly_ohlc.get(sym)
+        if ohlc:
+            cpr   = compute_cpr(ohlc["high"], ohlc["low"], ohlc["close"])
+            label = get_cpr_label(cpr["width_pct"])
+            prev  = prev_monthly_map.get(sym, {})
+            trend = get_cpr_trend(cpr["tc"], cpr["bc"], prev.get("tc"), prev.get("bc"))
+            records.append({
+                "trade_date":     trade_date,
+                "symbol":         sym,
+                "timeframe":      "monthly",
+                "is_index":       sym in INDICES,
+                "prev_high":      ohlc["high"],
+                "prev_low":       ohlc["low"],
+                "prev_close":     ohlc["close"],
+                "pivot":          cpr["pivot"],
+                "tc":             cpr["tc"],
+                "bc":             cpr["bc"],
+                "width_pts":      cpr["width_pts"],
+                "width_pct":      cpr["width_pct"],
+                "width_label":    label["label"],
+                "width_color":    label["color"],
+                "width_emoji":    label["emoji"],
+                "width_priority": label["priority"],
+                "prev_tc":        prev.get("tc"),
+                "prev_bc":        prev.get("bc"),
+                "cpr_trend":      trend,
+                "is_virgin":      True,
+                "last_cmp":       None,
+            })
+
+    if records:
+        for i in range(0, len(records), 50):
+            supabase.table("cpr_levels_weekly")\
+                .upsert(records[i:i+50], on_conflict="trade_date,symbol,timeframe")\
+                .execute()
+
+    weekly_count  = sum(1 for r in records if r["timeframe"] == "weekly")
+    monthly_count = sum(1 for r in records if r["timeframe"] == "monthly")
+    print(f"[CPR Weekly] Stored {weekly_count} weekly + {monthly_count} monthly for {trade_date}")
+    return {
+        "stored_weekly":  weekly_count,
+        "stored_monthly": monthly_count,
+        "trade_date":     trade_date
+    }
+
 
 def get_cpr_scanner_timeframe(timeframe: str = "daily"):
     """Get CPR scanner for weekly or monthly timeframe."""
