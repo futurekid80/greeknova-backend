@@ -33,6 +33,8 @@ STOCK_NSE_MAP = {
     "HAL":"NSE:HAL","INDIGO":"NSE:INDIGO","PFC":"NSE:PFC",
     "RECLTD":"NSE:RECLTD","SAIL":"NSE:SAIL","TATAPOWER":"NSE:TATAPOWER",
     "VEDL":"NSE:VEDL",
+    "PAYTM":"NSE:PAYTM","NYKAA":"NSE:NYKAA",
+    "PERSISTENT":"NSE:PERSISTENT","DIXON":"NSE:DIXON",
 }
 INDEX_NSE_MAP = {
     "NIFTY":     "NSE:NIFTY 50",
@@ -208,7 +210,11 @@ def _get_eod_pulse(supabase):
 
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
-    check = datetime.now(ist).date()
+    now_ist = datetime.now(ist)
+    check = now_ist.date()
+    # Before 4:46 PM IST (when daily_oi_summary is computed), treat today as not yet available
+    if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 46):
+        check -= timedelta(days=1)
     while check.weekday() >= 5:
         check -= timedelta(days=1)
     last_trading_day = check.isoformat()
