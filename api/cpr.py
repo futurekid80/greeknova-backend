@@ -13,6 +13,7 @@ STOCKS = [
     "INDUSINDBK","JIOFIN","M&M","NESTLEIND","SBILIFE","SHRIRAMFIN","TRENT","ADANIPORTS",
     "BANKBARODA","BEL","CANBK","CHOLAFIN","DLF","GAIL","HAVELLS","HAL","INDIGO","PFC",
     "RECLTD","SAIL","TATAPOWER","VEDL",
+    "PAYTM","NYKAA","PERSISTENT","DIXON",
 ]
 
 INDEX_NSE_MAP = {
@@ -44,6 +45,8 @@ STOCK_NSE_MAP = {
     "HAL":"NSE:HAL","INDIGO":"NSE:INDIGO","PFC":"NSE:PFC",
     "RECLTD":"NSE:RECLTD","SAIL":"NSE:SAIL","TATAPOWER":"NSE:TATAPOWER",
     "VEDL":"NSE:VEDL",
+    "PAYTM":"NSE:PAYTM","NYKAA":"NSE:NYKAA",
+    "PERSISTENT":"NSE:PERSISTENT","DIXON":"NSE:DIXON",
 }
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
 
@@ -288,9 +291,18 @@ def compute_and_store_cpr(trade_date: str = None):
 
     if records:
         for i in range(0, len(records), 50):
-            supabase.table("cpr_levels")\
-                .upsert(records[i:i+50], on_conflict="trade_date,symbol")\
-                .execute()
+            try:
+                supabase.table("cpr_levels_weekly")\
+                    .upsert(records[i:i+50], on_conflict="trade_date,symbol,timeframe")\
+                    .execute()
+            except Exception as e:
+                print(f"[CPR Weekly] Upsert batch {i} failed: {e}")
+                # Try one by one to identify bad record
+                for rec in records[i:i+50]:
+                    try:
+                        supabase.table("cpr_levels_weekly").upsert([rec], on_conflict="trade_date,symbol,timeframe").execute()
+                    except Exception as e2:
+                        print(f"[CPR Weekly] Single upsert failed for {rec.get('symbol')}/{rec.get('timeframe')}: {e2}")
 
     global _cpr_cache, _cpr_cache_time
     _cpr_cache = {}
