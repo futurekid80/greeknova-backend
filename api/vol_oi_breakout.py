@@ -90,20 +90,106 @@ def _save_to_supabase(supabase, signals, total, trade_date):
     except Exception as e:
         print(f"[VOL_OI_BREAKOUT] Supabase save failed: {e}")
 
+def _get_eod_from_summary(supabase, now_ist):
+    """Fallback: compute Vol+OI breakout from daily_oi_summary when cache is stale."""
+    from collections import defaultdict
+    check = now_ist.date()
+    # Before 4:46 PM use previous trading day
+    if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 46):
+        check -= timedelta(days=1)
+    while check.weekday() >= 5:
+        check -= timedelta(days=1)
+    trade_date = check.isoformat()
+
+    rows = supabase.from_("daily_oi_summary")\
+        .select("symbol, fut_vol, oi_chg_pct, price_chg_pct, close_price")\
+        .eq("trade_date", trade_date)\
+        .gt("fut_vol", 0)\
+        .limit(200)\
+        .execute()
+
+    hist_start = (now_ist.date() - timedelta(days=35)).isoformat()
+    hist = supabase.from_("daily_oi_summary")\
+        .select("symbol, trade_date, fut_vol")\
+        .gte("trade_date", hist_start)\
+        .lt("trade_date", trade_date)\
+        .gt("fut_vol", 0)\
+        .limit(5000)\
+        .execute()
+
+    sym_hist = defaultdict(list)
+    for r in (hist.data or []):
+        sym_hist[r["symbol"]].append(int(r.get("fut_vol") or 0))
+
+    signals = []
+    for r in (rows.data or []):
+        sym = r["symbol"]
+        vol_today = int(r.get("fut_vol") or 0)
+        hist_vols = sorted(sym_hist[sym], reverse=True)[:5]
+        avg_5d = sum(hist_vols) / len(hist_vols) if hist_vols else 0
+        vol_ratio = round(vol_today / avg_5d, 2) if avg_5d > 0 else 0
+        if vol_ratio < 1.5:
+            continue
+        oi_chg = round(float(r.get("oi_chg_pct") or 0), 2)
+        if abs(oi_chg) < 2.0:
+            continue
+        price_chg = round(float(r.get("price_chg_pct") or 0), 2)
+        cmp = float(r.get("close_price") or 0)
+        if oi_chg > 0 and price_chg >= 0:
+            sig_type, sig_label = "LONG_BUILDUP", "Long Buildup"
+        elif oi_chg > 0 and price_chg < 0:
+            sig_type, sig_label = "SHORT_BUILDUP", "Short Buildup"
+        elif oi_chg < 0 and price_chg >= 0:
+            sig_type, sig_label = "SHORT_COVERING", "Short Covering"
+        else:
+            sig_type, sig_label = "LONG_UNWINDING", "Long Unwinding"
+        signals.append({
+            "symbol":          sym,
+            "cmp":             cmp,
+            "day_high":        cmp,
+            "day_low":         cmp,
+            "oi_chg_pct":      oi_chg,
+            "price_chg_pct":   price_chg,
+            "vol_latest":      vol_today,
+            "vol_avg_5d":      round(avg_5d),
+            "vol_ratio":       vol_ratio,
+            "signal_type":     sig_type,
+            "signal_label":    sig_label,
+            "price_context":   None,
+            "price_ctx_color": "GRAY",
+            "cpr_position":    None,
+            "cpr_width_label": None,
+            "cpr_width_emoji": None,
+        })
+
+    signals.sort(key=lambda x: (x["vol_ratio"], abs(x["oi_chg_pct"])), reverse=True)
+    return {
+        "signals":         signals[:10],
+        "total":           len(signals),
+        "date":            trade_date,
+        "is_eod_snapshot": True,
+    }
+
 def get_vol_oi_breakout(supabase):
     global _breakout_cache, _breakout_cache_time
 
-    today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.now(ist)
+    today = now_ist.strftime('%Y-%m-%d')
 
     # Post-market or weekend: serve EOD snapshot
     if not is_market_hours():
+        # Check if today's snapshot exists in cache
         if _breakout_cache.get("signals") and _breakout_cache.get("date") == today:
             return dict(_breakout_cache, is_eod_snapshot=True)
         saved = _load_from_supabase(supabase)
-        if saved:
+        # Only serve saved data if it's from today
+        if saved and saved.get("date") == today:
             _breakout_cache = saved
             return saved
-        return {"signals": [], "total": 0, "is_eod_snapshot": True, "date": today}
+        # Today's data not yet saved — compute fresh from daily_oi_summary
+        return _get_eod_from_summary(supabase, now_ist)
 
     # During market hours: use in-memory cache (5 min TTL)
     if _breakout_cache and (time_module.time() - _breakout_cache_time) < 300:
