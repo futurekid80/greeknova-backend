@@ -1574,13 +1574,18 @@ def oi_walls_detail(symbol: str):
     ce_wall_oi = ce_wall_s["ce_oi"]
     pe_wall_oi = pe_wall_s["pe_oi"]
 
-    # ── Intraday walls — nearest significant strike above/below CMP ───────
+   # ── Intraday walls — nearest significant strike above/below CMP ───────
     # Significant = OI >= 10% of max OI in that direction
     ce_threshold = ce_wall_oi * 0.10
     pe_threshold = pe_wall_oi * 0.10
 
-    ce_significant = [s for s in ce_candidates if s["ce_oi"] >= ce_threshold]
-    pe_significant = [s for s in pe_candidates if s["pe_oi"] >= pe_threshold]
+    ce_above = [s for s in strikes if s["strike"] > cmp]
+    pe_below = [s for s in strikes if s["strike"] < cmp]
+    if not ce_above: ce_above = strikes
+    if not pe_below: pe_below = strikes
+
+    ce_significant = [s for s in ce_above if s["ce_oi"] >= ce_threshold]
+    pe_significant = [s for s in pe_below if s["pe_oi"] >= pe_threshold]
 
     # Nearest = smallest distance from CMP
     intraday_ce = min(ce_significant, key=lambda x: x["strike"])["strike"] if ce_significant else ce_wall
