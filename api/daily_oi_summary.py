@@ -1,6 +1,9 @@
 """
 daily_oi_summary.py
 Uses server-side RPC to avoid statement timeouts.
+Fix: FUT open/close OI now uses nearest expiry only — prevents cross-expiry
+contamination that inflated fut_oi_chg_pct (e.g. HINDALCO showing +28% when
+actual Jun30 expiry change was only +1.6%).
 """
 from datetime import datetime, timedelta
 import pytz
@@ -97,56 +100,71 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             return {"error": "No rows to write", "rows_written": 0}
 
         # ── Fetch FUT open snapshot (9:15-9:20 AM IST = 03:45-03:50 UTC) ─
+        # Include expiry so we can filter to nearest expiry only
         fut_open_res = supabase.from_("oi_snapshots")\
-            .select("symbol, oi, volume")\
+            .select("symbol, oi, volume, expiry")\
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{trade_date}T03:44:00+00:00")\
             .lte("timestamp", f"{trade_date}T03:52:00+00:00")\
             .order("timestamp", desc=False)\
-            .limit(500)\
+            .limit(1000)\
             .execute()
 
         # ── Fetch FUT close snapshot (3:25-3:30 PM IST = 09:55-10:00 UTC) ─
+        # Include expiry so we can filter to nearest expiry only
         fut_close_res = supabase.from_("oi_snapshots")\
-            .select("symbol, oi, volume")\
+            .select("symbol, oi, volume, expiry")\
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{trade_date}T09:50:00+00:00")\
             .lte("timestamp", f"{trade_date}T10:05:00+00:00")\
             .order("timestamp", desc=True)\
-            .limit(500)\
+            .limit(1000)\
             .execute()
 
-        # Build open OI map (first snapshot per symbol)
+        # ── Build nearest expiry map from open snapshot ───────────────────
+        # For each symbol, find the smallest (nearest) expiry >= trade_date
+        fut_nearest_expiry = {}
+        for r in (fut_open_res.data or []):
+            sym = r["symbol"]
+            exp = str(r.get("expiry") or "")
+            if exp and exp >= trade_date:
+                if sym not in fut_nearest_expiry or exp < fut_nearest_expiry[sym]:
+                    fut_nearest_expiry[sym] = exp
+
+        # ── Build open OI map — nearest expiry only ───────────────────────
         fut_open_map = {}
         for r in (fut_open_res.data or []):
             sym = r["symbol"]
-            if sym not in fut_open_map:
+            exp = str(r.get("expiry") or "")
+            if exp == fut_nearest_expiry.get(sym) and sym not in fut_open_map:
                 fut_open_map[sym] = int(r.get("oi") or 0)
 
-        # Build close OI + volume map (latest snapshot per symbol)
+        # ── Build close OI + volume map — nearest expiry only ────────────
+        # Use same nearest expiry as open for consistency (apples-to-apples)
         fut_close_oi_map = {}
         fut_vol_map = {}
         seen_close = set()
         for r in (fut_close_res.data or []):
             sym = r["symbol"]
-            if sym not in seen_close:
+            exp = str(r.get("expiry") or "")
+            if exp == fut_nearest_expiry.get(sym) and sym not in seen_close:
                 fut_close_oi_map[sym] = int(r.get("oi") or 0)
                 fut_vol_map[sym] = int(r.get("volume") or 0)
                 seen_close.add(sym)
 
-        # Compute FUT OI change %
+        # ── Compute FUT OI change % ───────────────────────────────────────
         fut_oi_chg_map = {}
         for sym in fut_close_oi_map:
-            open_oi = fut_open_map.get(sym, 0)
+            open_oi  = fut_open_map.get(sym, 0)
             close_oi = fut_close_oi_map[sym]
             if open_oi > 0:
                 fut_oi_chg_map[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
 
-        # Add fut_vol and fut_oi_chg_pct to rows
+        # ── Add fut_vol and fut_oi_chg_pct to rows ───────────────────────
         for row in rows:
             sym = row["symbol"]
-            row["fut_vol"] = fut_vol_map.get(sym, 0)
-            row["fut_oi_chg_pct"] = fut_oi_chg_map.get(sym, 0)
+            row["fut_vol"]         = fut_vol_map.get(sym, 0)
+            row["fut_oi_chg_pct"]  = fut_oi_chg_map.get(sym, 0)
 
         supabase.from_("daily_oi_summary") \
             .upsert(rows, on_conflict="trade_date,symbol").execute()
