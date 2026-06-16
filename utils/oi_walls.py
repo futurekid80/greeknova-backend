@@ -89,18 +89,14 @@ def _compute_walls(symbol: str, rows: list, cmp: float) -> dict:
     if not ce_oi or not pe_oi:
         return {}
 
-    ce_above = {s: v for s, v in ce_oi.items() if s > cmp} if cmp > 0 else ce_oi
-    pe_below = {s: v for s, v in pe_oi.items() if s < cmp} if cmp > 0 else pe_oi
-    if not ce_above: ce_above = ce_oi
-    if not pe_below: pe_below = pe_oi
+    # REPLACE WITH:
+    max_ce = max(ce_oi.values(), default=1)
+    max_pe = max(pe_oi.values(), default=1)
+    ce_sig = {s: v for s, v in ce_oi.items() if v >= max_ce * 0.10} or ce_oi
+    pe_sig = {s: v for s, v in pe_oi.items() if v >= max_pe * 0.10} or pe_oi
 
-    max_ce = max(ce_above.values(), default=1)
-    max_pe = max(pe_below.values(), default=1)
-    ce_sig = {s: v for s, v in ce_above.items() if v >= max_ce * 0.10} or ce_above
-    pe_sig = {s: v for s, v in pe_below.items() if v >= max_pe * 0.10} or pe_below
-
-    ce_wall = min(ce_sig.keys())
-    pe_wall = max(pe_sig.keys())
+    ce_wall = max(ce_sig, key=ce_sig.get)
+    pe_wall = max(pe_sig, key=pe_sig.get)
     ce_wall_oi_L = round(ce_oi[ce_wall] / 100000, 1)
     pe_wall_oi_L = round(pe_oi[pe_wall] / 100000, 1)
     trade_range = round(abs(ce_wall - pe_wall), 1)
