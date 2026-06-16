@@ -1,6 +1,9 @@
 """
 vol_oi_breakout.py - Volume + OI Breakout scanner
 Persists EOD snapshot to Supabase so it survives Railway restarts.
+Fixes:
+- Price change now uses prev close → current (not FUT open → now)
+- ±0.3% threshold applied before classifying signal direction
 """
 import time as time_module
 from datetime import datetime, timezone, timedelta
@@ -44,6 +47,19 @@ def get_price_context(cmp, day_high, day_low):
         return {"label": f"Off Low +{pct_from_low}%", "color": "CYAN"}
     else:
         return {"label": "Mid Range", "color": "GRAY"}
+
+def classify_signal(oi_chg_pct, price_chg):
+    """Classify signal with ±0.3% price threshold to avoid flat-price misfires."""
+    if oi_chg_pct > 0 and price_chg >= 0.3:
+        return "LONG_BUILDUP", "Long Buildup"
+    elif oi_chg_pct > 0 and price_chg <= -0.3:
+        return "SHORT_BUILDUP", "Short Buildup"
+    elif oi_chg_pct < 0 and price_chg >= 0.3:
+        return "SHORT_COVERING", "Short Covering"
+    elif oi_chg_pct < 0 and price_chg <= -0.3:
+        return "LONG_UNWINDING", "Long Unwinding"
+    else:
+        return None, None  # flat price — skip
 
 def _load_from_supabase(supabase):
     """Load last saved EOD snapshot from Supabase."""
@@ -134,16 +150,14 @@ def _get_eod_from_summary(supabase, now_ist):
         oi_chg = round(fut_oi_chg if fut_oi_chg != 0 else float(r.get("oi_chg_pct") or 0), 2)
         if abs(oi_chg) < 2.0:
             continue
+        # EOD uses prev_close → close price change (already correct in daily_oi_summary)
         price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         cmp = float(r.get("close_price") or 0)
-        if oi_chg > 0 and price_chg >= 0:
-            sig_type, sig_label = "LONG_BUILDUP", "Long Buildup"
-        elif oi_chg > 0 and price_chg < 0:
-            sig_type, sig_label = "SHORT_BUILDUP", "Short Buildup"
-        elif oi_chg < 0 and price_chg >= 0:
-            sig_type, sig_label = "SHORT_COVERING", "Short Covering"
-        else:
-            sig_type, sig_label = "LONG_UNWINDING", "Long Unwinding"
+
+        sig_type, sig_label = classify_signal(oi_chg, price_chg)
+        if sig_type is None:
+            continue  # flat price — skip
+
         signals.append({
             "symbol":          sym,
             "cmp":             cmp,
@@ -209,7 +223,7 @@ def get_vol_oi_breakout(supabase):
         if not today_rows.data:
             return {"signals": [], "total": 0}
 
-        # ── Step 2: Build per-symbol data ─────────────────────────────────
+        # ── Step 2: Build per-symbol data (nearest expiry only) ───────────
         sym_data = {}
         for r in today_rows.data:
             sym    = r["symbol"]
@@ -268,7 +282,33 @@ def get_vol_oi_breakout(supabase):
             .execute()
         cpr_map = {r["symbol"]: r for r in (cpr_rows.data or [])}
 
-        # ── Step 5: Compute signals ────────────────────────────────────────
+        # ── Step 5: Prev close prices (for accurate price change) ─────────
+        # Use prev trading day's latest CMP — same as Market Pulse / OI Pulse
+        from datetime import datetime as _dt
+        prev_day = _dt.strptime(today, '%Y-%m-%d')
+        for _ in range(5):
+            prev_day = prev_day - timedelta(days=1)
+            if prev_day.weekday() < 5:
+                break
+        prev_date = prev_day.strftime('%Y-%m-%d')
+
+        prev_cmp_res = supabase.from_("cmp_prices")\
+            .select("symbol, cmp")\
+            .gte("timestamp", f"{prev_date}T00:00:00+00:00")\
+            .lte("timestamp", f"{prev_date}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(500)\
+            .execute()
+
+        prev_close_map = {}
+        seen_prev = set()
+        for row in (prev_cmp_res.data or []):
+            sym = row["symbol"]
+            if sym not in seen_prev:
+                prev_close_map[sym] = float(row["cmp"])
+                seen_prev.add(sym)
+
+        # ── Step 6: Compute signals ────────────────────────────────────────
         signals = []
         for sym, d in sym_data.items():
             oi_list    = d["oi"]
@@ -296,17 +336,18 @@ def get_vol_oi_breakout(supabase):
             if abs(oi_chg_pct) < 2.0:
                 continue
 
-            price_open = price_list[1] if len(price_list) >= 2 else price_list[0]
-            price_chg  = round((cmp - price_open) / price_open * 100, 2) if price_open else 0
-
-            if oi_chg_pct > 0 and price_chg >= 0:
-                sig_type, sig_label = "LONG_BUILDUP", "Long Buildup"
-            elif oi_chg_pct > 0 and price_chg < 0:
-                sig_type, sig_label = "SHORT_BUILDUP", "Short Buildup"
-            elif oi_chg_pct < 0 and price_chg >= 0:
-                sig_type, sig_label = "SHORT_COVERING", "Short Covering"
+            # Use prev close → current CMP for price change (consistent with Market Pulse)
+            prev_close = prev_close_map.get(sym, 0)
+            if prev_close > 0:
+                price_chg = round((cmp - prev_close) / prev_close * 100, 2)
             else:
-                sig_type, sig_label = "LONG_UNWINDING", "Long Unwinding"
+                # Fallback to intraday if no prev close available
+                price_open = price_list[1] if len(price_list) >= 2 else price_list[0]
+                price_chg = round((cmp - price_open) / price_open * 100, 2) if price_open else 0
+
+            sig_type, sig_label = classify_signal(oi_chg_pct, price_chg)
+            if sig_type is None:
+                continue  # flat price — skip
 
             valid_prices = [p for p in price_list if p > 0]
             day_high = max(valid_prices) if valid_prices else cmp
@@ -351,10 +392,8 @@ def get_vol_oi_breakout(supabase):
         }
 
         # Save to Supabase after market close (3:30 PM IST = 10:00 UTC)
-        import pytz
-        ist = pytz.timezone('Asia/Kolkata')
         ist_now = datetime.now(ist)
-        if ist_now.hour >= 15 and ist_now.minute >= 25:
+        if ist_now.hour >= 15 and ist_now.minute >= 30:
             _save_to_supabase(supabase, top_signals, len(signals), today)
 
         _breakout_cache.update(result)
