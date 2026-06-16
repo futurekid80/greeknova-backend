@@ -1565,18 +1565,14 @@ def oi_walls_detail(symbol: str):
     if not strikes:
         return {"symbol": symbol.upper(), "strikes": [], "cmp": cmp}
 
-    # ── Max OI walls — highest OI anywhere in range ───────────────────────
-    ce_candidates = [s for s in strikes if s["strike"] > cmp]
-    pe_candidates = [s for s in strikes if s["strike"] < cmp]
-
-    # Fallback if no strikes above/below
-    if not ce_candidates: ce_candidates = strikes
-    if not pe_candidates: pe_candidates = strikes
-
-    ce_wall = max(ce_candidates, key=lambda x: x["ce_oi"])["strike"]
-    pe_wall = max(pe_candidates, key=lambda x: x["pe_oi"])["strike"]
-    ce_wall_oi = max(ce_candidates, key=lambda x: x["ce_oi"])["ce_oi"]
-    pe_wall_oi = max(pe_candidates, key=lambda x: x["pe_oi"])["pe_oi"]
+    # REPLACE WITH:
+    # ── Max OI walls — highest OI anywhere in range (no CMP filter) ──────
+    ce_wall_s = max(strikes, key=lambda x: x["ce_oi"])
+    pe_wall_s = max(strikes, key=lambda x: x["pe_oi"])
+    ce_wall = ce_wall_s["strike"]
+    pe_wall = pe_wall_s["strike"]
+    ce_wall_oi = ce_wall_s["ce_oi"]
+    pe_wall_oi = pe_wall_s["pe_oi"]
 
     # ── Intraday walls — nearest significant strike above/below CMP ───────
     # Significant = OI >= 10% of max OI in that direction
