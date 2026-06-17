@@ -761,6 +761,10 @@ def refresh_radar_cache():
             "p_series_end": today.isoformat()
         }).execute()
         print(f"[Radar Cache] ✅ Refreshed")
+
+    from api.positional_radar import clear_radar_cache
+        clear_radar_cache()
+        print(f"[Radar Cache] ✅ In-memory cache cleared")
     except Exception as e:
         print(f"[Radar Cache] ❌ {e}")
 
@@ -840,7 +844,7 @@ async def ask_claude(request: dict):
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=1000,
+            max_tokens=3000,
             system=request.get("system", ""),
             messages=request.get("messages", []),
         )
@@ -1304,6 +1308,9 @@ def stealth_buildup():
 
         today_oi_chg = today_data["fut_oi_chg_pct"]
         if today_oi_chg <= 0:
+            continue
+
+        if price_chg < -0.3:
             continue
 
         # Rank today's OI vs last 15 days
