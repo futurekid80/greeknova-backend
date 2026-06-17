@@ -1309,9 +1309,6 @@ def stealth_buildup():
         if today_oi_chg <= 0:
             continue
 
-        if price_chg < -0.3:
-            continue
-
         # Rank today's OI vs last 15 days
         all_oi_values = sorted([h["fut_oi_chg_pct"] for h in last_15], reverse=True)
         rank = all_oi_values.index(today_oi_chg) + 1 if today_oi_chg in all_oi_values else 99
@@ -1331,7 +1328,11 @@ def stealth_buildup():
             else:
                 price_chg = 0
         else:
-            price_chg = 0
+                price_chg = 0
+
+        # Skip bearish days — stealth buildup must be accumulation without price reaction
+        if price_chg < -0.3:
+            continue
 
         # Net Delta (ATM±5)
         net_delta, pe_oi, ce_oi = compute_net_delta(sym, cmp)
