@@ -761,8 +761,7 @@ def refresh_radar_cache():
             "p_series_end": today.isoformat()
         }).execute()
         print(f"[Radar Cache] ✅ Refreshed")
-
-    from api.positional_radar import clear_radar_cache
+        from api.positional_radar import clear_radar_cache
         clear_radar_cache()
         print(f"[Radar Cache] ✅ In-memory cache cleared")
     except Exception as e:
