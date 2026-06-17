@@ -694,6 +694,32 @@ def watchdog_cpr():
     except Exception as e:
         print(f"[CPR Watchdog] ❌ Error: {e}")
 
+    # ── Also check positional radar cache for today ───────────────────────
+    try:
+        import datetime as _dt
+        _today = _dt.date.today().isoformat()
+        radar_check = supabase.from_("positional_radar_cache")\
+            .select("trade_date")\
+            .eq("trade_date", _today)\
+            .limit(1).execute()
+
+        if not radar_check.data:
+            print(f"[CPR Watchdog] ⚠️ Radar cache missing for {_today} — refreshing...")
+            from api.positional_radar import get_monthly_expiry, get_series_start, clear_radar_cache
+            _today_dt = _dt.date.today()
+            _expiry = get_monthly_expiry(_today_dt.year, _today_dt.month)
+            _series_start = get_series_start(_expiry)
+            supabase.rpc("refresh_positional_radar_cache", {
+                "p_series_start": _series_start,
+                "p_series_end": _today
+            }).execute()
+            clear_radar_cache()
+            print(f"[CPR Watchdog] ✅ Radar cache refreshed for {_today}")
+        else:
+            print(f"[CPR Watchdog] ✅ Radar cache OK for {_today}")
+    except Exception as re:
+        print(f"[CPR Watchdog] ❌ Radar cache check failed: {re}")
+
 def watchdog_participant_flow():
     """Watchdog — runs at 7 PM. Re-fetches if today's data missing."""
     import pytz
