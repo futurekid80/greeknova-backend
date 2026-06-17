@@ -2,6 +2,13 @@
 wall_migration.py
 OI Wall Migration Scanner — detects wall shifts, convergence, and price breaches.
 Experimental feature — Jun 2026.
+
+Fix log:
+- Wall computation: CE/PE wall = highest OI across ALL strikes (no CMP filter)
+  This correctly identifies dominant institutional positions regardless of price location.
+  Example: BAJAJ-AUTO PE 10,000 (1.5L OI) is the dominant wall even if price < 10,000.
+- Coiling detection: catches ce_wall == pe_wall (perfect convergence = 0pt range)
+- Range threshold raised to 2.0% to catch more coiling setups
 """
 
 from datetime import datetime, timedelta
@@ -83,8 +90,7 @@ def get_wall_migration(supabase) -> dict:
             .in_("option_type", ["CE", "PE"]) \
             .limit(15000).execute()
 
-        # ── Organize by timestamp → symbol → strike ───────────────────────
-        # Find nearest expiry per symbol from latest snapshot
+        # ── Find nearest expiry per symbol from latest snapshot ───────────
         nearest_expiry: dict = {}
         for r in (oi_res.data or []):
             if r["timestamp"] != ts_latest:
@@ -101,7 +107,6 @@ def get_wall_migration(supabase) -> dict:
             ts  = r["timestamp"]
             sym = r["symbol"]
             exp = str(r.get("expiry") or "")
-            # Only nearest expiry
             if exp != nearest_expiry.get(sym, ""):
                 continue
             s   = float(r["strike"])
@@ -143,18 +148,34 @@ def get_wall_migration(supabase) -> dict:
                 ce_oi[strike] = v.get("ce_oi", 0)
                 pe_oi[strike] = v.get("pe_oi", 0)
 
-            # CE wall = highest CE OI above CMP (OI Profile methodology)
-            ce_above = {s: v for s, v in ce_oi.items() if s > cmp and v > 0}
-            # PE wall = highest PE OI below CMP (OI Profile methodology)
-            pe_below = {s: v for s, v in pe_oi.items() if s < cmp and v > 0}
-
-            if not ce_above or not pe_below:
+            if not ce_oi or not pe_oi:
                 return None
 
-            ce_wall = max(ce_above, key=ce_above.get)
-            pe_wall = max(pe_below, key=pe_below.get)
+            # CE wall = strike with highest CE OI (no CMP filter)
+            # PE wall = strike with highest PE OI (no CMP filter)
+            # This correctly identifies dominant institutional positions
+            # regardless of whether price is above/below the strike.
+            # e.g. BAJAJ-AUTO PE 10,000 (1.5L) is the dominant wall
+            # even when price = 9,900 (below the strike).
+            max_ce = max(ce_oi.values(), default=0)
+            max_pe = max(pe_oi.values(), default=0)
 
-            if ce_wall <= pe_wall:
+            if max_ce == 0 or max_pe == 0:
+                return None
+
+            # Apply 10% threshold to filter noise strikes
+            ce_sig = {s: v for s, v in ce_oi.items() if v >= max_ce * 0.10}
+            pe_sig = {s: v for s, v in pe_oi.items() if v >= max_pe * 0.10}
+
+            if not ce_sig or not pe_sig:
+                return None
+
+            ce_wall = max(ce_sig, key=ce_sig.get)
+            pe_wall = max(pe_sig, key=pe_sig.get)
+
+            # Allow ce_wall == pe_wall (perfect convergence)
+            # Only skip if CE wall is strictly BELOW PE wall (impossible structure)
+            if ce_wall < pe_wall:
                 return None
 
             trade_range = round(abs(ce_wall - pe_wall), 1)
@@ -163,8 +184,8 @@ def get_wall_migration(supabase) -> dict:
             return {
                 "ce_wall":       ce_wall,
                 "pe_wall":       pe_wall,
-                "ce_wall_oi":    ce_above[ce_wall],
-                "pe_wall_oi":    pe_below[pe_wall],
+                "ce_wall_oi":    ce_sig[ce_wall],
+                "pe_wall_oi":    pe_sig[pe_wall],
                 "range":         trade_range,
                 "range_pct":     trade_range_pct,
             }
@@ -278,8 +299,9 @@ def get_wall_migration(supabase) -> dict:
                     "color": "emerald",
                 })
 
-            # 8. Price inside very narrow range
-            if latest_walls["range_pct"] < 1.5 and cmp > pe_now and cmp < ce_now:
+            # 8. Coiling — narrow range or perfect convergence
+            # Catches: range < 2% OR ce_wall == pe_wall (0pt range)
+            if latest_walls["range_pct"] < 2.0 and (ce_now == pe_now or (cmp > pe_now and cmp < ce_now)):
                 alerts.append({
                     "type": "NARROW_RANGE_COILING",
                     "label": "Coiling — Narrow Range",
@@ -292,7 +314,6 @@ def get_wall_migration(supabase) -> dict:
             if not alerts:
                 continue
 
-            # Severity order for sorting
             sev_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
             alerts.sort(key=lambda a: sev_order.get(a["severity"], 3))
 
@@ -310,7 +331,6 @@ def get_wall_migration(supabase) -> dict:
                 "alert_count":  len(alerts),
             })
 
-        # Sort — HIGH severity first, then by alert count
         signals.sort(key=lambda s: (
             0 if s["top_alert"]["severity"] == "HIGH" else
             1 if s["top_alert"]["severity"] == "MEDIUM" else 2,
