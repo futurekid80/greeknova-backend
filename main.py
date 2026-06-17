@@ -1267,10 +1267,11 @@ def stealth_buildup():
     STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50}
 
     oi_res = supabase.from_("oi_snapshots")\
-        .select("symbol, strike, option_type, oi, expiry")\
+        .select("symbol, strike, option_type, oi, expiry, timestamp")\
         .in_("option_type", ["CE", "PE"])\
-        .gte("timestamp", f"{last_trading_day}T09:50:00+00:00")\
-        .lte("timestamp", f"{last_trading_day}T10:05:00+00:00")\
+        .gte("timestamp", f"{last_trading_day}T09:45:00+00:00")\
+        .lte("timestamp", f"{last_trading_day}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
         .limit(50000)\
         .execute()
 
@@ -1284,9 +1285,22 @@ def stealth_buildup():
             continue
         if sym not in sym_expiry or exp < sym_expiry[sym]:
             sym_expiry[sym] = exp
+
+    # Build latest timestamp per symbol — use EOD OI (3:29 PM), not morning snapshot
+    latest_ts_per_sym = {}
     for r in (oi_res.data or []):
         sym = r["symbol"]
         if str(r.get("expiry") or "") != sym_expiry.get(sym, ""):
+            continue
+        ts = r.get("timestamp") or ""
+        if sym not in latest_ts_per_sym or ts > latest_ts_per_sym[sym]:
+            latest_ts_per_sym[sym] = ts
+
+    for r in (oi_res.data or []):
+        sym = r["symbol"]
+        if str(r.get("expiry") or "") != sym_expiry.get(sym, ""):
+            continue
+        if r.get("timestamp") != latest_ts_per_sym.get(sym):
             continue
         strike = float(r["strike"])
         ot = r["option_type"]
