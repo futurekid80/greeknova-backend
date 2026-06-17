@@ -156,11 +156,28 @@ def _get_uoa_signals_cached() -> dict:
     return active_signals
 
 
+def _get_prev_trading_day(ref_date):
+    """Get previous trading day (skip weekends)."""
+    prev = ref_date - timedelta(days=1)
+    while prev.weekday() >= 5:
+        prev -= timedelta(days=1)
+    return prev
+
+
+def _get_next_trading_day(ref_date):
+    """Get next trading day (skip weekends)."""
+    nxt = ref_date + timedelta(days=1)
+    while nxt.weekday() >= 5:
+        nxt += timedelta(days=1)
+    return nxt
+
+
 def compute_and_store_cpr(trade_date: str = None):
     """
-    EOD CPR computation — uses kite.historical_data() for official NSE VWAP close.
-    Fetches last completed daily candle — same data as TradingView/GoCharting.
-    Called at 4:30 PM after market fully settles.
+    EOD CPR computation — uses kite.historical_data() for official NSE settlement close.
+    CRITICAL: Always uses YESTERDAY's completed candle as OHLC source.
+    Never uses today's partial candle.
+    Stores CPR for TOMORROW's trade_date (next trading day).
     """
     supabase = get_supabase()
     try:
@@ -175,17 +192,18 @@ def compute_and_store_cpr(trade_date: str = None):
     today = datetime.now(ist).date()
 
     if not trade_date:
-        next_day = today + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        trade_date = next_day.isoformat()
+        trade_date = _get_next_trading_day(today).isoformat()
 
-    print(f"[CPR] Fetching OHLC via historical_data() for trade_date: {trade_date}")
+    print(f"[CPR] Computing for trade_date: {trade_date}")
+
+    # Previous trading day = the OHLC source
+    prev_trading_day = _get_prev_trading_day(today)
+    prev_str = prev_trading_day.isoformat()
+    print(f"[CPR] Using OHLC from: {prev_str}")
 
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
 
-    # ── Build instrument token map ────────────────────────────────────────────
     INDEX_TOKENS = {
         "NIFTY":     256265,
         "BANKNIFTY": 260105,
@@ -201,14 +219,12 @@ def compute_and_store_cpr(trade_date: str = None):
     except Exception as e:
         print(f"[CPR] Instruments fetch failed: {e}")
 
-    # ── Fetch OHLC via historical_data — last completed daily candle ──────────
     from_date = (today - timedelta(days=10)).isoformat()
     to_date   = today.isoformat()
 
     for sym in all_symbols:
         token = token_map.get(sym)
         if not token:
-            print(f"[CPR] No token for {sym}, skipping")
             continue
         try:
             candles = kite.historical_data(
@@ -220,11 +236,24 @@ def compute_and_store_cpr(trade_date: str = None):
                 oi=False,
             )
             if candles:
-                c = candles[-1]
+                # Always use previous trading day's candle — never today's
+                matched = None
+                for c in reversed(candles):
+                    c_date = str(c["date"])[:10]
+                    if c_date == prev_str:
+                        matched = c
+                        break
+                # Fallback: use second-to-last if prev_str not found
+                if not matched and len(candles) >= 2:
+                    matched = candles[-2]
+                    print(f"[CPR] {sym}: no match for {prev_str}, using {str(candles[-2]['date'])[:10]}")
+                elif not matched:
+                    matched = candles[-1]
+
                 ohlc_map[sym] = {
-                    "high":  float(c["high"]),
-                    "low":   float(c["low"]),
-                    "close": float(c["close"]),
+                    "high":  float(matched["high"]),
+                    "low":   float(matched["low"]),
+                    "close": float(matched["close"]),
                 }
             time.sleep(0.05)
         except Exception as e:
@@ -232,7 +261,6 @@ def compute_and_store_cpr(trade_date: str = None):
 
     print(f"[CPR] Got OHLC for {len(ohlc_map)} symbols")
 
-    # ── Fetch previous CPR for trend calculation ──────────────────────────────
     prev_cpr_map: dict = {}
     try:
         prev_rows = supabase.from_("cpr_levels")\
@@ -249,7 +277,6 @@ def compute_and_store_cpr(trade_date: str = None):
     except Exception as e:
         print(f"[CPR] Prev CPR fetch: {e}")
 
-    # ── Compute and store CPR records ─────────────────────────────────────────
     records = []
     for sym in all_symbols:
         ohlc = ohlc_map.get(sym)
@@ -292,17 +319,11 @@ def compute_and_store_cpr(trade_date: str = None):
     if records:
         for i in range(0, len(records), 50):
             try:
-                supabase.table("cpr_levels_weekly")\
-                    .upsert(records[i:i+50], on_conflict="trade_date,symbol,timeframe")\
+                supabase.table("cpr_levels")\
+                    .upsert(records[i:i+50], on_conflict="trade_date,symbol")\
                     .execute()
             except Exception as e:
-                print(f"[CPR Weekly] Upsert batch {i} failed: {e}")
-                # Try one by one to identify bad record
-                for rec in records[i:i+50]:
-                    try:
-                        supabase.table("cpr_levels_weekly").upsert([rec], on_conflict="trade_date,symbol,timeframe").execute()
-                    except Exception as e2:
-                        print(f"[CPR Weekly] Single upsert failed for {rec.get('symbol')}/{rec.get('timeframe')}: {e2}")
+                print(f"[CPR] Upsert batch {i} failed: {e}")
 
     global _cpr_cache, _cpr_cache_time
     _cpr_cache = {}
@@ -310,6 +331,7 @@ def compute_and_store_cpr(trade_date: str = None):
 
     print(f"[CPR] Stored {len(records)} CPR records for {trade_date}")
     return {"stored": len(records), "trade_date": trade_date}
+
 
 def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
     """
@@ -329,14 +351,9 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
     ist = pytz.timezone('Asia/Kolkata')
     today = datetime.now(ist).date()
 
-    # ── Determine trade_date (next trading day) ────────────────────────────
     if not trade_date:
-        next_day = today + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        trade_date = next_day.isoformat()
+        trade_date = _get_next_trading_day(today).isoformat()
 
-    # ── Build instrument token map ─────────────────────────────────────────
     INDEX_TOKENS = {
         "NIFTY":     256265,
         "BANKNIFTY": 260105,
@@ -353,13 +370,9 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
 
     all_symbols = INDICES + STOCKS
 
-    # ── Find previous week's Mon-Fri range ────────────────────────────────
-    # Go back to find last complete week (Mon to Fri)
-    days_back = today.weekday() + 7  # go back to previous week's Monday
     prev_week_friday = today - timedelta(days=today.weekday() + 3)
     prev_week_monday = prev_week_friday - timedelta(days=4)
 
-    # For monthly: first and last day of previous month
     first_of_month = today.replace(day=1)
     prev_month_end = first_of_month - timedelta(days=1)
     prev_month_start = prev_month_end.replace(day=1)
@@ -389,7 +402,6 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
             if not candles:
                 continue
 
-            # Weekly: filter candles within prev week Mon-Fri
             week_candles = [
                 c for c in candles
                 if prev_week_monday.isoformat() <= str(c["date"])[:10] <= prev_week_friday.isoformat()
@@ -401,7 +413,6 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
                     "close": float(week_candles[-1]["close"]),
                 }
 
-            # Monthly: filter candles within prev month
             month_candles = [
                 c for c in candles
                 if prev_month_start.isoformat() <= str(c["date"])[:10] <= prev_month_end.isoformat()
@@ -419,7 +430,6 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
 
     print(f"[CPR Weekly] Got weekly OHLC: {len(weekly_ohlc)}, monthly: {len(monthly_ohlc)}")
 
-    # ── Fetch previous weekly/monthly CPR for trend ────────────────────────
     prev_weekly_map = {}
     prev_monthly_map = {}
     try:
@@ -443,11 +453,9 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
     except Exception as e:
         print(f"[CPR Weekly] Prev fetch: {e}")
 
-    # ── Compute and store records ──────────────────────────────────────────
     records = []
 
     for sym in all_symbols:
-        # Weekly record
         ohlc = weekly_ohlc.get(sym)
         if ohlc:
             cpr   = compute_cpr(ohlc["high"], ohlc["low"], ohlc["close"])
@@ -476,7 +484,6 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
                 "last_cmp":       None,
             })
 
-        # Monthly record
         ohlc = monthly_ohlc.get(sym)
         if ohlc:
             cpr   = compute_cpr(ohlc["high"], ohlc["low"], ohlc["close"])
@@ -531,19 +538,12 @@ def get_cpr_scanner_timeframe(timeframe: str = "daily"):
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
 
-    # Weekend handling — use next trading day
     if now_ist.weekday() >= 5:
-        next_day = now_ist.date() + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        query_date = next_day.isoformat()
+        query_date = _get_next_trading_day(now_ist.date()).isoformat()
     elif now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
-        next_day = now_ist.date() + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        query_date = next_day.isoformat()
+        query_date = _get_next_trading_day(now_ist.date()).isoformat()
     else:
-        query_date = now_ist.date().isoformat()
+        query_date = _get_next_trading_day(now_ist.date()).isoformat()
 
     rows = supabase.from_("cpr_levels_weekly")\
         .select("*")\
@@ -555,7 +555,6 @@ def get_cpr_scanner_timeframe(timeframe: str = "daily"):
         return {"data": [], "total": 0, "trade_date": query_date,
                 "timeframe": timeframe, "message": f"No {timeframe} CPR computed yet"}
 
-    # Get latest CMP
     today_str = now_ist.date().isoformat()
     cmp_rows = supabase.from_("cmp_prices")\
         .select("symbol,cmp")\
@@ -620,203 +619,6 @@ def get_cpr_scanner_timeframe(timeframe: str = "daily"):
         "narrow_count": sum(1 for r in results if r["width_priority"] <= 2),
     }
 
-    # ── Build instrument token map ────────────────────────────────────────────
-    # Index tokens are hardcoded, stock tokens fetched from instruments list
-    INDEX_TOKENS = {
-        "NIFTY":    256265,
-        "BANKNIFTY": 260105,
-        "FINNIFTY":  257801,
-    }
-    token_map: dict = {**INDEX_TOKENS}
-    try:
-        instruments = kite.instruments("NSE")
-        for inst in instruments:
-            if inst["tradingsymbol"] in STOCKS:
-                token_map[inst["tradingsymbol"]] = inst["instrument_token"]
-        print(f"[CPR] Got {len(token_map)} instrument tokens")
-    except Exception as e:
-        print(f"[CPR] Instruments fetch failed: {e}")
-
-    # ── Fetch OHLC via historical_data — last completed daily candle ──────────
-    # historical_data with interval="day" returns official VWAP-based close
-    # candles[-1] is always the last completed candle (today if after 3:30 PM)
-    from_date = (today - timedelta(days=10)).isoformat()
-    to_date   = today.isoformat()
-
-    for sym in all_symbols:
-        token = token_map.get(sym)
-        if not token:
-            print(f"[CPR] No token for {sym}, skipping")
-            continue
-        try:
-            candles = kite.historical_data(
-                instrument_token=token,
-                from_date=from_date,
-                to_date=to_date,
-                interval="day",
-                continuous=False,
-                oi=False,
-            )
-            if candles:
-                # Find prev_trading_day candle explicitly — never use candles[-1]
-                # candles[-1] at 4:45 PM = today's candle (wrong for next-day CPR)
-                # We need yesterday's candle as the "previous" day's OHLC
-                prev_trading_day = (today - timedelta(days=1))
-                while prev_trading_day.weekday() >= 5:
-                    prev_trading_day -= timedelta(days=1)
-                prev_str = prev_trading_day.isoformat()
-
-                matched = None
-                for c in reversed(candles):
-                    c_date = str(c["date"])[:10]
-                    if c_date == prev_str:
-                        matched = c
-                        break
-
-                if not matched:
-                    matched = candles[-1]
-                    print(f"[CPR] {sym}: no match for {prev_str}, fallback to {str(candles[-1]['date'])[:10]}")
-
-                ohlc_map[sym] = {
-                    "high":  float(matched["high"]),
-                    "low":   float(matched["low"]),
-                    "close": float(matched["close"]),
-                }
-            time.sleep(0.05)
-        except Exception as e:
-            print(f"[CPR] historical_data {sym}: {e}")
-
-    print(f"[CPR] Got OHLC for {len(ohlc_map)} symbols")
-
-    # ── Fetch previous CPR for trend calculation ──────────────────────────────
-    prev_cpr_map: dict = {}
-    try:
-        prev_rows = supabase.from_("cpr_levels")\
-            .select("symbol, tc, bc")\
-            .lt("trade_date", trade_date)\
-            .limit(len(all_symbols) * 2)\
-            .execute()
-        seen_prev = set()
-        for r in (prev_rows.data or []):
-            if r["symbol"] not in seen_prev:
-                prev_cpr_map[r["symbol"]] = {"tc": float(r["tc"]), "bc": float(r["bc"])}
-                seen_prev.add(r["symbol"])
-    except Exception as e:
-        print(f"[CPR] Prev CPR fetch: {e}")
-
-    # ── Compute and store CPR records ─────────────────────────────────────────
-    records = []
-    for sym in all_symbols:
-        ohlc = ohlc_map.get(sym)
-        if not ohlc:
-            continue
-        high  = ohlc["high"]
-        low   = ohlc["low"]
-        close = ohlc["close"]
-        if not all([high, low, close]):
-            continue
-        cpr   = compute_cpr(high, low, close)
-        label = get_cpr_label(cpr["width_pct"])
-        prev  = prev_cpr_map.get(sym, {})
-        trend = get_cpr_trend(cpr["tc"], cpr["bc"], prev.get("tc"), prev.get("bc"))
-        records.append({
-            "trade_date":    trade_date,
-            "symbol":        sym,
-            "is_index":      sym in INDICES,
-            "prev_high":     high,
-            "prev_low":      low,
-            "prev_close":    close,
-            "pivot":         cpr["pivot"],
-            "tc":            cpr["tc"],
-            "bc":            cpr["bc"],
-            "width_pts":     cpr["width_pts"],
-            "width_pct":     cpr["width_pct"],
-            "width_label":   label["label"],
-            "width_color":   label["color"],
-            "width_emoji":   label["emoji"],
-            "width_priority":label["priority"],
-            "prev_tc":       prev.get("tc"),
-            "prev_bc":       prev.get("bc"),
-            "cpr_trend":     trend,
-            "is_virgin":     True,
-            "cpr_status":    None,
-            "last_cmp":      None,
-            "status_updated_at": None,
-        })
-
-    if records:
-        for i in range(0, len(records), 50):
-            supabase.table("cpr_levels")\
-                .upsert(records[i:i+50], on_conflict="trade_date,symbol")\
-                .execute()
-
-    global _cpr_cache, _cpr_cache_time
-    _cpr_cache = {}
-    _cpr_cache_time = 0
-
-    print(f"[CPR] Stored {len(records)} CPR records for {trade_date}")
-    return {"stored": len(records), "trade_date": trade_date}
-
-
-def update_cpr_status():
-    supabase = get_supabase()
-    import pytz
-    ist = pytz.timezone('Asia/Kolkata')
-    today = datetime.now(ist).date().isoformat()
-
-    cpr_rows = supabase.from_("cpr_levels")\
-        .select("*")\
-        .gte("trade_date", today)\
-        .limit(500)\
-        .execute()
-
-    if not cpr_rows.data:
-        return
-
-    cmp_rows = supabase.from_("cmp_prices")\
-        .select("symbol, cmp")\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .limit(500)\
-        .execute()
-
-    cmp_map: dict = {}
-    seen = set()
-    for r in (cmp_rows.data or []):
-        if r["symbol"] not in seen:
-            cmp_map[r["symbol"]] = float(r["cmp"])
-            seen.add(r["symbol"])
-
-    now_utc = datetime.now(timezone.utc).isoformat()
-
-    for row in cpr_rows.data:
-        sym = row["symbol"]
-        cmp = cmp_map.get(sym)
-        if not cmp:
-            continue
-        tc = float(row["tc"])
-        bc = float(row["bc"])
-        status    = get_cpr_status(cmp, tc, bc)
-        is_virgin = row.get("is_virgin", True)
-        if is_virgin and bc <= cmp <= tc:
-            is_virgin = False
-        try:
-            supabase.table("cpr_levels")\
-                .update({
-                    "cpr_status":        status,
-                    "last_cmp":          cmp,
-                    "is_virgin":         is_virgin,
-                    "status_updated_at": now_utc,
-                })\
-                .gte("trade_date", today)\
-                .eq("symbol", sym)\
-                .execute()
-        except Exception as e:
-            print(f"[CPR] Status update {sym}: {e}")
-
-    global _cpr_cache, _cpr_cache_time
-    _cpr_cache = {}
-    _cpr_cache_time = 0
-
 
 def _get_nearest_signal(sym_signals: list, cmp: float) -> dict | None:
     if not sym_signals:
@@ -846,6 +648,16 @@ def _get_nearest_signal(sym_signals: list, cmp: float) -> dict | None:
 
 
 def get_cpr_scanner():
+    """
+    CPR Scanner — always reads from cpr_levels table.
+    NEVER uses kite.ohlc() during market hours (that gives today's intraday OHLC).
+    
+    Query logic:
+    - compute_and_store_cpr() stores CPR for NEXT trading day
+    - So during market hours query NEXT trading day's CPR
+    - Fallback: previous trading day if next not found yet
+    - Last resort: _get_cpr_live() only if table is completely empty
+    """
     global _cpr_cache, _cpr_cache_time
 
     cache_ttl = 30 if _is_market_hours() else 60
@@ -856,21 +668,10 @@ def get_cpr_scanner():
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
-    today = now_ist.date().isoformat()
 
-    # On weekends, always query next Monday's CPR (already computed)
-    if now_ist.weekday() >= 5:
-        next_day = now_ist.date() + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        query_date = next_day.isoformat()
-    elif now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
-        next_day = now_ist.date() + timedelta(days=1)
-        while next_day.weekday() >= 5:
-            next_day += timedelta(days=1)
-        query_date = next_day.isoformat()
-    else:
-        query_date = today
+    # CPR compute job stores CPR for NEXT trading day always
+    # So always query next trading day during market hours
+    query_date = _get_next_trading_day(now_ist.date()).isoformat()
 
     cpr_rows = supabase.from_("cpr_levels")\
         .select("*")\
@@ -879,7 +680,34 @@ def get_cpr_scanner():
         .execute()
 
     if not cpr_rows.data:
-        return _get_cpr_live()
+        # Next day not computed yet — use previous trading day's CPR
+        # This is correct: yesterday's CPR is what we trade with today
+        prev_day = _get_prev_trading_day(now_ist.date())
+        print(f"[CPR] No data for {query_date}, falling back to {prev_day.isoformat()}")
+        cpr_rows = supabase.from_("cpr_levels")\
+            .select("*")\
+            .eq("trade_date", prev_day.isoformat())\
+            .limit(500)\
+            .execute()
+        if not cpr_rows.data:
+            # Absolute last resort — should never happen in normal operation
+            print(f"[CPR] No table data at all — falling back to live OHLC")
+            return _get_cpr_live()
+
+    # Get latest CMP from cmp_prices
+    today_str = now_ist.date().isoformat()
+    cmp_rows = supabase.from_("cmp_prices")\
+        .select("symbol, cmp")\
+        .gte("timestamp", f"{today_str}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(500)\
+        .execute()
+    cmp_map: dict = {}
+    seen_cmp = set()
+    for r in (cmp_rows.data or []):
+        if r["symbol"] not in seen_cmp:
+            cmp_map[r["symbol"]] = float(r["cmp"])
+            seen_cmp.add(r["symbol"])
 
     active_signals = _get_uoa_signals_cached()
 
@@ -888,7 +716,8 @@ def get_cpr_scanner():
         sym      = row["symbol"]
         tc       = float(row["tc"])
         bc       = float(row["bc"])
-        cmp      = float(row["last_cmp"]) if row.get("last_cmp") else float(row["prev_close"])
+        # Use live CMP if available, else last_cmp from table, else prev_close
+        cmp = cmp_map.get(sym) or (float(row["last_cmp"]) if row.get("last_cmp") else float(row["prev_close"]))
         position = get_cpr_position(cmp, tc, bc)
 
         sym_signals   = active_signals.get(sym, [])
@@ -1000,8 +829,14 @@ def get_cpr_scanner():
 
 
 def _get_cpr_live():
+    """
+    LAST RESORT ONLY — only called when cpr_levels table has no data at all.
+    Uses kite.ohlc() which returns today's intraday OHLC — NOT ideal for CPR.
+    Should never be called during normal operation.
+    """
     supabase = get_supabase()
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    print(f"[CPR] WARNING: Using live OHLC fallback — table data missing!")
 
     try:
         from services.kite_auth import get_kite_client
@@ -1034,17 +869,13 @@ def _get_cpr_live():
 
     cmp_rows = []
     try:
-        for offset in range(0, 10000, 1000):
-            batch = supabase.from_("cmp_prices")\
-                .select("symbol, cmp")\
-                .gte("timestamp", f"{today}T00:00:00+00:00")\
-                .range(offset, offset + 999)\
-                .execute()
-            if not batch.data:
-                break
-            cmp_rows.extend(batch.data)
-            if len(batch.data) < 1000:
-                break
+        batch = supabase.from_("cmp_prices")\
+            .select("symbol, cmp")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(500)\
+            .execute()
+        cmp_rows = batch.data or []
     except:
         pass
 
@@ -1069,42 +900,17 @@ def _get_cpr_live():
         cpr      = compute_cpr(high, low, close)
         label    = get_cpr_label(cpr["width_pct"])
         position = get_cpr_position(cmp, cpr["tc"], cpr["bc"])
-
         live_status = get_cpr_status(cmp, cpr["tc"], cpr["bc"])
         holding_score = {
-            "HOLDING_ABOVE": 3,
-            "HOLDING_BELOW": 3,
-            "BROKEN_UP":     2,
-            "BROKEN_DOWN":   2,
-            "INSIDE_CPR":    0,
+            "HOLDING_ABOVE": 3, "HOLDING_BELOW": 3,
+            "BROKEN_UP": 2, "BROKEN_DOWN": 2, "INSIDE_CPR": 0,
         }.get(live_status, 1)
-
         sym_signals   = active_signals.get(sym, [])
         has_oi_signal = len(sym_signals) > 0
         best_signal   = _get_nearest_signal(sym_signals, cmp)
         best_is_near_atm = best_signal is not None and (best_signal.get("strikes_from_atm", 99) <= 2.0)
         confluence    = label["priority"] <= 2 and has_oi_signal and holding_score >= 2 and best_is_near_atm
-        if best_signal:
-            pos = position["position"]
-            sig_type = best_signal.get("signal_type", "")
-            if (pos == "BELOW_CPR" and sig_type == "PUT_WRITING") or \
-               (pos == "ABOVE_CPR" and sig_type == "CALL_WRITING"):
-                best_signal["alignment"] = "⚠️ Contradicts"
-                best_signal["alignment_color"] = "AMBER"
-            elif (pos == "BELOW_CPR" and sig_type == "CALL_WRITING") or \
-                 (pos == "ABOVE_CPR" and sig_type == "PUT_WRITING"):
-                best_signal["alignment"] = "✅ Confirms"
-                best_signal["alignment_color"] = "EMERALD"
-        alignment = (best_signal or {}).get("alignment", "")
-        if "Confirms" in alignment:
-            confluence_type = "CONFIRMS"
-        elif "Contradicts" in alignment:
-            confluence_type = "CONTRADICTS"
-        elif confluence:
-            confluence_type = "NEUTRAL"
-        else:
-            confluence_type = None
-
+        confluence_type = None
         results.append({
             "symbol":         sym,
             "is_index":       sym in INDICES,
@@ -1153,5 +959,65 @@ def _get_cpr_live():
         "trade_date":       today,
         "confluence_count": sum(1 for r in results if r["confluence"]),
         "narrow_count":     sum(1 for r in results if r["width_priority"] <= 2),
-        "source":           "live",
+        "source":           "live_fallback",
     }
+
+
+def update_cpr_status():
+    supabase = get_supabase()
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.now(ist).date().isoformat()
+
+    cpr_rows = supabase.from_("cpr_levels")\
+        .select("*")\
+        .gte("trade_date", today)\
+        .limit(500)\
+        .execute()
+
+    if not cpr_rows.data:
+        return
+
+    cmp_rows = supabase.from_("cmp_prices")\
+        .select("symbol, cmp")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .limit(500)\
+        .execute()
+
+    cmp_map: dict = {}
+    seen = set()
+    for r in (cmp_rows.data or []):
+        if r["symbol"] not in seen:
+            cmp_map[r["symbol"]] = float(r["cmp"])
+            seen.add(r["symbol"])
+
+    now_utc = datetime.now(timezone.utc).isoformat()
+
+    for row in cpr_rows.data:
+        sym = row["symbol"]
+        cmp = cmp_map.get(sym)
+        if not cmp:
+            continue
+        tc = float(row["tc"])
+        bc = float(row["bc"])
+        status    = get_cpr_status(cmp, tc, bc)
+        is_virgin = row.get("is_virgin", True)
+        if is_virgin and bc <= cmp <= tc:
+            is_virgin = False
+        try:
+            supabase.table("cpr_levels")\
+                .update({
+                    "cpr_status":        status,
+                    "last_cmp":          cmp,
+                    "is_virgin":         is_virgin,
+                    "status_updated_at": now_utc,
+                })\
+                .gte("trade_date", today)\
+                .eq("symbol", sym)\
+                .execute()
+        except Exception as e:
+            print(f"[CPR] Status update {sym}: {e}")
+
+    global _cpr_cache, _cpr_cache_time
+    _cpr_cache = {}
+    _cpr_cache_time = 0
