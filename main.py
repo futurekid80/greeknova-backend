@@ -1322,6 +1322,7 @@ def stealth_buildup():
         close_price = float(price_data.get("close_price") or 0)
         cmp = cmp_map.get(sym, close_price)
         # Get prev day close from daily_oi_summary history
+        price_chg = 0  # default — overwritten if prev day found
         today_idx = next((i for i, h in enumerate(history) if h["date"] == last_trading_day), -1)
         if today_idx > 0:
             prev_close = history[today_idx - 1].get("close_price", 0)
