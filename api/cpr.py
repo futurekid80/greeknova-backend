@@ -197,9 +197,15 @@ def compute_and_store_cpr(trade_date: str = None):
     print(f"[CPR] Computing for trade_date: {trade_date}")
 
     # Previous trading day = the OHLC source
-    prev_trading_day = _get_prev_trading_day(today)
+    # If running post-market (after 15:30 IST), today's candle is complete — use it
+    now_ist = datetime.now(ist)
+    market_closed = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)
+    if market_closed and today.weekday() < 5:
+        prev_trading_day = today  # Use today's completed candle
+    else:
+        prev_trading_day = _get_prev_trading_day(today)
     prev_str = prev_trading_day.isoformat()
-    print(f"[CPR] Using OHLC from: {prev_str}")
+    print(f"[CPR] Using OHLC from: {prev_str} (market_closed={market_closed})")
 
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
