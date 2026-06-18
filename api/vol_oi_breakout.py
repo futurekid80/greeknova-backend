@@ -110,11 +110,13 @@ def _get_eod_from_summary(supabase, now_ist):
     """Fallback: compute Vol+OI breakout from daily_oi_summary when cache is stale."""
     from collections import defaultdict
     check = now_ist.date()
-    # Before 4:46 PM use previous trading day
-    if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 46):
-        check -= timedelta(days=1)
-    while check.weekday() >= 5:
-        check -= timedelta(days=1)
+    # Only use previous trading day post-market (after 4:46 PM)
+    # During market hours this function should not be called — but if it is, use today
+    if not is_market_hours():
+        if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 46):
+            check -= timedelta(days=1)
+        while check.weekday() >= 5:
+            check -= timedelta(days=1)
     trade_date = check.isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
@@ -210,13 +212,20 @@ def get_vol_oi_breakout(supabase):
         # Today's data not yet saved — compute fresh from daily_oi_summary
         return _get_eod_from_summary(supabase, now_ist)
 
+    # ── MARKET HOURS ONLY BELOW THIS LINE ────────────────────────────────
+    # During market hours NEVER serve EOD snapshot from Supabase
+    # Always compute live from oi_snapshots
+
     # During market hours: use in-memory cache (5 min TTL)
     # Invalidate cache if it contains stale date (yesterday's data)
     if _breakout_cache and _breakout_cache.get("date") != today:
+        print(f"[VOL_OI_BREAKOUT] Cache date mismatch — clearing stale cache")
         _breakout_cache = {}
         _breakout_cache_time = 0.0
     if _breakout_cache and (time_module.time() - _breakout_cache_time) < 300:
         return _breakout_cache
+    # Never load from Supabase during market hours — always compute live
+    print(f"[VOL_OI_BREAKOUT] Market hours — computing live data for {today}")
 
     try:
         # ── Step 1: Today's FUT snapshots ─────────────────────────────────
