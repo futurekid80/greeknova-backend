@@ -39,7 +39,8 @@ def get_price_context(cmp, day_high, day_low, signal_type=None):
         return {"label": "At Day Low", "color": "RED"}
 
     # For Short Buildup — highlight recovery from lows as a caution signal
-    if signal_type == "SHORT_BUILDUP" and range_pos >= 40:
+    # Any position above 30% of day range = not at lows = caution for bears
+    if signal_type == "SHORT_BUILDUP" and range_pos >= 30:
         return {"label": f"Recovered +{pct_from_low}% from Low ⚠️", "color": "AMBER"}
 
     elif pct_from_high > 1.5:
