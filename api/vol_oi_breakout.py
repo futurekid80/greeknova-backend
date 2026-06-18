@@ -195,6 +195,10 @@ def get_vol_oi_breakout(supabase):
 
     # Post-market or weekend: serve EOD snapshot
     if not is_market_hours():
+        # Invalidate cache if stale date
+        if _breakout_cache.get("date") != today:
+            _breakout_cache = {}
+            _breakout_cache_time = 0.0
         # Check if today's snapshot exists in cache
         if _breakout_cache.get("signals") and _breakout_cache.get("date") == today:
             return dict(_breakout_cache, is_eod_snapshot=True)
@@ -207,6 +211,10 @@ def get_vol_oi_breakout(supabase):
         return _get_eod_from_summary(supabase, now_ist)
 
     # During market hours: use in-memory cache (5 min TTL)
+    # Invalidate cache if it contains stale date (yesterday's data)
+    if _breakout_cache and _breakout_cache.get("date") != today:
+        _breakout_cache = {}
+        _breakout_cache_time = 0.0
     if _breakout_cache and (time_module.time() - _breakout_cache_time) < 300:
         return _breakout_cache
 
