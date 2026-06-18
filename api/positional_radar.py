@@ -330,6 +330,31 @@ def get_positional_radar(min_consec: int = 0):
     # ── Today's FUT signals (2 queries instead of N) ──────────────────────────
     today_fut_signals = get_today_fut_signals(supabase, today_str)
 
+    # ── Historical FUT signals from daily_oi_summary ──────────────────────────
+    # Used for accurate consec_days and consistency — same source as stealth/vol breakout
+    fut_hist_res = supabase.from_("daily_oi_summary")\
+        .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct")\
+        .gte("trade_date", series_start)\
+        .lte("trade_date", today_str)\
+        .order("trade_date", desc=False)\
+        .limit(5000)\
+        .execute()
+
+    # Build per-symbol FUT signal history
+    from collections import defaultdict
+    fut_signals_by_sym = defaultdict(list)
+    for r in (fut_hist_res.data or []):
+        sym = r["symbol"]
+        fc = float(r.get("fut_oi_chg_pct") or 0)
+        pc = float(r.get("price_chg_pct") or 0)
+        if fc > 0 and pc >= 0.3:    sig = "LONG_BUILDUP"
+        elif fc > 0 and pc <= -0.3: sig = "SHORT_BUILDUP"
+        elif fc < 0 and pc >= 0.3:  sig = "SHORT_COVERING"
+        elif fc < 0 and pc <= -0.3: sig = "LONG_UNWINDING"
+        else:                        sig = "NEUTRAL"
+        fut_signals_by_sym[sym].append({"date": r["trade_date"], "signal": sig})
+    print(f"[Positional Radar] FUT signal history loaded for {len(fut_signals_by_sym)} symbols")
+
     # ── UOA symbols ───────────────────────────────────────────────────────────
     uoa_symbols: set = set()
     try:
@@ -418,11 +443,29 @@ def get_positional_radar(min_consec: int = 0):
         else:
             continue
 
-        consec_days = count_signal_days(oi_series, cmp_series, signal)
+        # Use FUT-based signal history for consec_days — aligns with stealth/vol breakout
+        fut_hist = fut_signals_by_sym.get(sym, [])
+        if fut_hist:
+            # Count consecutive days from latest where signal matches
+            consec_days = 0
+            for fd in reversed(fut_hist):
+                if fd["signal"] == signal:
+                    consec_days += 1
+                elif fd["signal"] == "NEUTRAL":
+                    continue  # skip neutral days in streak
+                else:
+                    break
+            # Consistency: % of non-neutral days that match signal
+            non_neutral = [fd for fd in fut_hist if fd["signal"] != "NEUTRAL"]
+            match_days = sum(1 for fd in non_neutral if fd["signal"] == signal)
+            total_intervals = len(non_neutral)
+        else:
+            consec_days = count_signal_days(oi_series, cmp_series, signal)
+            match_days, total_intervals = count_consistent_days(oi_series, cmp_series, vol_series, signal)
+
         if min_consec > 0 and consec_days < min_consec:
             continue
 
-        match_days, total_intervals = count_consistent_days(oi_series, cmp_series, vol_series, signal)
         consistency_pct   = round(match_days / total_intervals * 100) if total_intervals > 0 else 0
         consistency_label = "HIGH" if consistency_pct >= 70 else "MEDIUM" if consistency_pct >= 50 else "LOW"
 
