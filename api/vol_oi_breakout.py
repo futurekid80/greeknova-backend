@@ -125,7 +125,7 @@ def _get_eod_from_summary(supabase, now_ist):
     trade_date = check.isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
-        .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price, day_high, day_low")\
+        .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price")\
         .eq("trade_date", trade_date)\
         .gt("fut_vol", 0)\
         .limit(200)\
