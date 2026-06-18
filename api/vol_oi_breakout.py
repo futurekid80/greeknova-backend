@@ -183,15 +183,8 @@ def _get_eod_from_summary(supabase, now_ist):
                 day_low  = min(prices)
         except:
             pass
-        # EOD path: no intraday H/L — infer context from price change direction
-        if sig_type == "SHORT_BUILDUP" and price_chg > -0.5:
-            price_ctx = {"label": f"Recovered {'+' if price_chg >= 0 else ''}{price_chg}% from open ⚠️", "color": "AMBER"}
-        elif sig_type == "SHORT_BUILDUP":
-            price_ctx = {"label": f"Price {price_chg}%", "color": "RED"}
-        elif sig_type == "LONG_BUILDUP" and price_chg < 0.5:
-            price_ctx = {"label": f"Price {price_chg}%", "color": "AMBER"}
-        else:
-            price_ctx = {"label": f"Price {'+' if price_chg >= 0 else ''}{price_chg}%", "color": "EMERALD" if price_chg > 0 else "RED"}
+        # Use actual H/L from cmp_prices for proper context
+        price_ctx = get_price_context(cmp, day_high, day_low, sig_type)
 
         signals.append({
             "symbol":          sym,
