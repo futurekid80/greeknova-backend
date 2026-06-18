@@ -446,19 +446,16 @@ def get_positional_radar(min_consec: int = 0):
         # Use FUT-based signal history for consec_days — aligns with stealth/vol breakout
         fut_hist = fut_signals_by_sym.get(sym, [])
         if fut_hist:
-            # Count consecutive days from latest where signal matches
+            # Count consecutive days from latest — stop at ANY non-matching signal including NEUTRAL
             consec_days = 0
             for fd in reversed(fut_hist):
                 if fd["signal"] == signal:
                     consec_days += 1
-                elif fd["signal"] == "NEUTRAL":
-                    continue  # skip neutral days in streak
                 else:
-                    break
-            # Consistency: % of non-neutral days that match signal
-            non_neutral = [fd for fd in fut_hist if fd["signal"] != "NEUTRAL"]
-            match_days = sum(1 for fd in non_neutral if fd["signal"] == signal)
-            total_intervals = len(non_neutral)
+                    break  # NEUTRAL or different signal = streak ends
+            # Consistency: % of all series days that match signal
+            match_days = sum(1 for fd in fut_hist if fd["signal"] == signal)
+            total_intervals = len(fut_hist)
         else:
             consec_days = count_signal_days(oi_series, cmp_series, signal)
             match_days, total_intervals = count_consistent_days(oi_series, cmp_series, vol_series, signal)
