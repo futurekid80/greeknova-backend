@@ -125,7 +125,7 @@ def _get_eod_from_summary(supabase, now_ist):
     trade_date = check.isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
-        .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price")\
+        .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price, day_high, day_low")\
         .eq("trade_date", trade_date)\
         .gt("fut_vol", 0)\
         .limit(200)\
@@ -165,11 +165,24 @@ def _get_eod_from_summary(supabase, now_ist):
         if sig_type is None:
             continue  # flat price — skip
 
+        # Use saved day_high/day_low from daily_oi_summary if available
+        day_high = cmp
+        day_low  = cmp
+        # EOD path: no intraday H/L — infer context from price change direction
+        if sig_type == "SHORT_BUILDUP" and price_chg > -0.5:
+            price_ctx = {"label": f"Recovered {'+' if price_chg >= 0 else ''}{price_chg}% from open ⚠️", "color": "AMBER"}
+        elif sig_type == "SHORT_BUILDUP":
+            price_ctx = {"label": f"Price {price_chg}%", "color": "RED"}
+        elif sig_type == "LONG_BUILDUP" and price_chg < 0.5:
+            price_ctx = {"label": f"Price {price_chg}%", "color": "AMBER"}
+        else:
+            price_ctx = {"label": f"Price {'+' if price_chg >= 0 else ''}{price_chg}%", "color": "EMERALD" if price_chg > 0 else "RED"}
+
         signals.append({
             "symbol":          sym,
             "cmp":             cmp,
-            "day_high":        cmp,
-            "day_low":         cmp,
+            "day_high":        day_high,
+            "day_low":         day_low,
             "oi_chg_pct":      oi_chg,
             "price_chg_pct":   price_chg,
             "vol_latest":      vol_today,
@@ -177,8 +190,8 @@ def _get_eod_from_summary(supabase, now_ist):
             "vol_ratio":       vol_ratio,
             "signal_type":     sig_type,
             "signal_label":    sig_label,
-            "price_context":   None,
-            "price_ctx_color": "GRAY",
+            "price_context":   price_ctx["label"],
+            "price_ctx_color": price_ctx["color"],
             "cpr_position":    None,
             "cpr_width_label": None,
             "cpr_width_emoji": None,
