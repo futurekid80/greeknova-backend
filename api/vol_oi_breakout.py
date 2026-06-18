@@ -166,8 +166,22 @@ def _get_eod_from_summary(supabase, now_ist):
             continue  # flat price — skip
 
         # Use saved day_high/day_low from daily_oi_summary if available
+        # Get intraday high/low from cmp_prices for today
         day_high = cmp
         day_low  = cmp
+        try:
+            hl_res = supabase.from_("cmp_prices")\
+                .select("cmp")\
+                .eq("symbol", sym)\
+                .gte("timestamp", f"{trade_date}T03:45:00+00:00")\
+                .lte("timestamp", f"{trade_date}T10:00:00+00:00")\
+                .execute()
+            if hl_res.data:
+                prices = [float(r["cmp"]) for r in hl_res.data]
+                day_high = max(prices)
+                day_low  = min(prices)
+        except:
+            pass
         # EOD path: no intraday H/L — infer context from price change direction
         if sig_type == "SHORT_BUILDUP" and price_chg > -0.5:
             price_ctx = {"label": f"Recovered {'+' if price_chg >= 0 else ''}{price_chg}% from open ⚠️", "color": "AMBER"}
