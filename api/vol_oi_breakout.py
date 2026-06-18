@@ -115,13 +115,13 @@ def _get_eod_from_summary(supabase, now_ist):
     """Fallback: compute Vol+OI breakout from daily_oi_summary when cache is stale."""
     from collections import defaultdict
     check = now_ist.date()
-    # Only use previous trading day post-market (after 4:46 PM)
-    # During market hours this function should not be called — but if it is, use today
+    # Post-market: use today if after 3:30 PM, else use previous trading day
     if not is_market_hours():
-        if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 46):
+        market_closed_today = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)
+        if not market_closed_today:
             check -= timedelta(days=1)
-        while check.weekday() >= 5:
-            check -= timedelta(days=1)
+            while check.weekday() >= 5:
+                check -= timedelta(days=1)
     trade_date = check.isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
