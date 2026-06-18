@@ -25,7 +25,7 @@ def is_weekday():
     ist = pytz.timezone('Asia/Kolkata')
     return datetime.now(ist).weekday() < 5
 
-def get_price_context(cmp, day_high, day_low):
+def get_price_context(cmp, day_high, day_low, signal_type=None):
     if day_high <= day_low or day_high == 0:
         return {"label": "Mid Range", "color": "GRAY"}
     day_range = day_high - day_low
@@ -37,6 +37,11 @@ def get_price_context(cmp, day_high, day_low):
         return {"label": "At Day High", "color": "EMERALD"}
     elif pct_from_low <= 0.3:
         return {"label": "At Day Low", "color": "RED"}
+
+    # For Short Buildup — highlight recovery from lows as a caution signal
+    if signal_type == "SHORT_BUILDUP" and range_pos >= 40:
+        return {"label": f"Recovered +{pct_from_low}% from Low ⚠️", "color": "AMBER"}
+
     elif pct_from_high > 1.5:
         return {"label": f"Off High -{pct_from_high}%", "color": "AMBER"}
     elif pct_from_low > 1.5 and range_pos <= 40:
@@ -369,7 +374,7 @@ def get_vol_oi_breakout(supabase):
             valid_prices = [p for p in price_list if p > 0]
             day_high = max(valid_prices) if valid_prices else cmp
             day_low  = min(valid_prices) if valid_prices else cmp
-            price_ctx = get_price_context(cmp, day_high, day_low)
+            price_ctx = get_price_context(cmp, day_high, day_low, sig_type)
 
             cpr = cpr_map.get(sym, {})
             cpr_position = None
