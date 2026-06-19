@@ -205,9 +205,8 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
 
             ts_key = row["tradingsymbol"]
             if _oi_persistence.get(ts_key, {}).get("last_date") != today:
-                _oi_persistence[ts_key] = {"first_seen": ts_new, "count": 0, "last_date": today}
-            _oi_persistence[ts_key]["count"] += 1
-            _oi_persistence[ts_key]["last_seen"] = ts_new
+                _oi_persistence[ts_key] = {"first_seen": ts_new, "snapshots": set(), "last_date": today}
+            _oi_persistence[ts_key]["snapshots"].add(ts_new)  # deduplicate by snapshot timestamp
             persist = _oi_persistence[ts_key]
 
             oi_spikes.append({
@@ -220,7 +219,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
                 "direction":       direction,
                 "interpretation":  interp,
                 "first_seen":      to_ist(persist["first_seen"]),
-                "snapshot_count":  persist["count"],
+                "snapshot_count":  len(persist["snapshots"]),
             })
 
         # ── Volume Spike ──────────────────────────────────────────────────────
@@ -234,8 +233,8 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
 
             ts_key = row["tradingsymbol"]
             if _vol_persistence.get(ts_key, {}).get("last_date") != today:
-                _vol_persistence[ts_key] = {"first_seen": ts_new, "count": 0, "last_date": today}
-            _vol_persistence[ts_key]["count"] += 1
+                _vol_persistence[ts_key] = {"first_seen": ts_new, "snapshots": set(), "last_date": today}
+            _vol_persistence[ts_key]["snapshots"].add(ts_new)
             vpersist = _vol_persistence[ts_key]
 
             vol_spikes.append({
@@ -246,7 +245,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
                 "oi_pct":          oi_pct,
                 "vol_signal":      vol_signal,
                 "first_seen":      to_ist(vpersist["first_seen"]),
-                "snapshot_count":  vpersist["count"],
+                "snapshot_count":  len(vpersist["snapshots"]),
             })
 
     oi_spikes.sort(key=lambda x: abs(x["oi_pct"]), reverse=True)
