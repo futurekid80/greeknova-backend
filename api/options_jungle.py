@@ -1,7 +1,12 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
 
+# Persistence tracking — survives across calls within same process
+_oi_persistence: dict = {}   # tradingsymbol -> {"first_seen": ts, "count": int, "last_date": str}
+_vol_persistence: dict = {}
+
 def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
+    global _oi_persistence, _vol_persistence
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
@@ -198,15 +203,24 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             else:
                 interp = direction
 
+            ts_key = row["tradingsymbol"]
+            if _oi_persistence.get(ts_key, {}).get("last_date") != today:
+                _oi_persistence[ts_key] = {"first_seen": ts_new, "count": 0, "last_date": today}
+            _oi_persistence[ts_key]["count"] += 1
+            _oi_persistence[ts_key]["last_seen"] = ts_new
+            persist = _oi_persistence[ts_key]
+
             oi_spikes.append({
                 **base,
-                "old_oi":         old_oi,
-                "new_oi":         new_oi,
-                "oi_change":      oi_change,
-                "oi_pct":         oi_pct,
-                "vol_change":     vol_change,
-                "direction":      direction,
-                "interpretation": interp,
+                "old_oi":          old_oi,
+                "new_oi":          new_oi,
+                "oi_change":       oi_change,
+                "oi_pct":          oi_pct,
+                "vol_change":      vol_change,
+                "direction":       direction,
+                "interpretation":  interp,
+                "first_seen":      to_ist(persist["first_seen"]),
+                "snapshot_count":  persist["count"],
             })
 
         # ── Volume Spike ──────────────────────────────────────────────────────
@@ -218,13 +232,21 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             else:
                 vol_signal = "CHURN"
 
+            ts_key = row["tradingsymbol"]
+            if _vol_persistence.get(ts_key, {}).get("last_date") != today:
+                _vol_persistence[ts_key] = {"first_seen": ts_new, "count": 0, "last_date": today}
+            _vol_persistence[ts_key]["count"] += 1
+            vpersist = _vol_persistence[ts_key]
+
             vol_spikes.append({
                 **base,
-                "old_volume":  old_vol,
-                "new_volume":  new_vol,
-                "vol_pct":     vol_pct,
-                "oi_pct":      oi_pct,
-                "vol_signal":  vol_signal,
+                "old_volume":      old_vol,
+                "new_volume":      new_vol,
+                "vol_pct":         vol_pct,
+                "oi_pct":          oi_pct,
+                "vol_signal":      vol_signal,
+                "first_seen":      to_ist(vpersist["first_seen"]),
+                "snapshot_count":  vpersist["count"],
             })
 
     oi_spikes.sort(key=lambda x: abs(x["oi_pct"]), reverse=True)
