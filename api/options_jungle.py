@@ -192,18 +192,17 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
         # ── OI Spike ──────────────────────────────────────────────────────────
         if old_oi >= 1000 and abs(oi_pct) >= oi_threshold:
             direction = "BUILD" if oi_change > 0 else "UNWIND"
-            # Deep ITM options (>3% ITM) behave like FUT — exclude from writing signals
-        deep_itm = not is_otm and cmp > 0 and (
-            (opt_type == 'CE' and (cmp - strike) / cmp > 0.03) or
-            (opt_type == 'PE' and (strike - cmp) / cmp > 0.03)
-        )
-        if ltp_chg > 0.5 and oi_pct > 0:
-            interp = "LONG_BUILDUP" if opt_type == "CE" else "SHORT_BUILDUP"
-        elif ltp_chg < -0.5 and oi_pct > 0 and deep_itm:
-            interp = "LONG_BUILDUP" if opt_type == "PE" else "SHORT_BUILDUP"
-        elif ltp_chg < -0.5 and oi_pct > 0:
-            interp = "CALL_WRITING" if opt_type == "CE" else "PUT_WRITING"
-        elif oi_pct < 0 and ltp_chg > 0:
+            deep_itm = not is_otm and cmp > 0 and (
+                (opt_type == 'CE' and (cmp - strike) / cmp > 0.03) or
+                (opt_type == 'PE' and (strike - cmp) / cmp > 0.03)
+            )
+            if ltp_chg > 0.5 and oi_pct > 0:
+                interp = "LONG_BUILDUP" if opt_type == "CE" else "SHORT_BUILDUP"
+            elif ltp_chg < -0.5 and oi_pct > 0 and deep_itm:
+                interp = "LONG_BUILDUP" if opt_type == "PE" else "SHORT_BUILDUP"
+            elif ltp_chg < -0.5 and oi_pct > 0:
+                interp = "CALL_WRITING" if opt_type == "CE" else "PUT_WRITING"
+            elif oi_pct < 0 and ltp_chg > 0:
                 interp = "SHORT_COVERING" if opt_type == "CE" else "LONG_UNWINDING"
             elif oi_pct < 0 and ltp_chg < 0:
                 interp = "LONG_UNWINDING" if opt_type == "CE" else "SHORT_COVERING"
@@ -213,7 +212,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             ts_key = row["tradingsymbol"]
             if _oi_persistence.get(ts_key, {}).get("last_date") != today:
                 _oi_persistence[ts_key] = {"first_seen": ts_new, "snapshots": set(), "last_date": today}
-            _oi_persistence[ts_key]["snapshots"].add(ts_new)  # deduplicate by snapshot timestamp
+            _oi_persistence[ts_key]["snapshots"].add(ts_new)
             persist = _oi_persistence[ts_key]
 
             oi_spikes.append({
