@@ -57,7 +57,6 @@ def _black_scholes_iv(option_price: float, S: float, K: float, T: float,
 
 
 def _iv_tag(iv):
-    """Returns IV label, color and strategy suggestion based on IV level."""
     if iv is None:
         return {"iv": None, "iv_label": None, "iv_color": None, "strategy": None}
     if iv < 15:
@@ -65,20 +64,20 @@ def _iv_tag(iv):
             "iv": iv,
             "iv_label": f"Low IV {iv}%",
             "iv_color": "sky",
-            "strategy": "📈 Buy breakout — options cheap"
+            "strategy": "📉 Options appear relatively cheap historically"
         }
     if iv < 25:
         return {
             "iv": iv,
             "iv_label": f"Mid IV {iv}%",
             "iv_color": "amber",
-            "strategy": "⏳ Wait for clarity"
+            "strategy": "〰️ IV in mid range — no clear edge either side"
         }
     return {
         "iv": iv,
         "iv_label": f"High IV {iv}%",
         "iv_color": "emerald",
-        "strategy": "✍️ Sell premium — straddle / iron condor candidate"
+        "strategy": "📊 IV elevated — premium-rich environment observed"
     }
 
 
