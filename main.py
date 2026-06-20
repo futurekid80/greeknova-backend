@@ -1131,6 +1131,11 @@ def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
 
+@app.get("/positional-intelligence")
+def positional_intelligence(min_consec: int = 0):
+    from api.positional_intelligence import get_positional_intelligence
+    return get_positional_intelligence(min_consec=min_consec)
+
 @app.get("/oi-profile/{symbol}")
 def oi_profile(symbol: str, date: str = None, expiry: str = None):
     from api.oi_profile import get_oi_profile
