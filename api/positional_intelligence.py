@@ -130,9 +130,11 @@ def get_positional_intelligence(min_consec: int = 0):
 
     # ── 5. Get OI walls (CPR position) ────────────────────────────────────
     try:
+        # CPR is stored for next trading day — find nearest available
         cpr_res = supabase.from_("cpr_levels")\
-            .select("symbol, tc, bc, width_label, width_emoji, cpr_trend")\
-            .eq("trade_date", today_str)\
+            .select("symbol, tc, bc, width_label, width_emoji, cpr_trend, trade_date")\
+            .gte("trade_date", today_str)\
+            .order("trade_date", desc=False)\
             .limit(200)\
             .execute()
         cpr_map = {r["symbol"]: r for r in (cpr_res.data or [])}
@@ -262,11 +264,14 @@ def get_positional_intelligence(min_consec: int = 0):
         dominant_consistency = 0
         dominant_series_oi = 0
 
-        if lb_consistency >= 60 and consec_lb < 2:
+        lb_days_count = int(pi.get("lb_days") or 0)
+        sb_days_count = int(pi.get("sb_days") or 0)
+
+        if lb_consistency >= 60 and consec_lb < 2 and lb_days_count >= 3:
             dominant_signal = "LONG_BUILDUP"
             dominant_consistency = lb_consistency
             dominant_series_oi = series_lb_oi
-        elif sb_consistency >= 60 and consec_sb < 2:
+        elif sb_consistency >= 60 and consec_sb < 2 and sb_days_count >= 3:
             dominant_signal = "SHORT_BUILDUP"
             dominant_consistency = sb_consistency
             dominant_series_oi = series_sb_oi
