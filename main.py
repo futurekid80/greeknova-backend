@@ -1136,6 +1136,54 @@ def positional_intelligence(min_consec: int = 0):
     from api.positional_intelligence import get_positional_intelligence
     return get_positional_intelligence(min_consec=min_consec)
 
+## Add this to main.py — paste after the /positional-intelligence endpoint
+
+@app.get("/stock-signal-history/{symbol}")
+def stock_signal_history(symbol: str, days: int = 20):
+    """
+    Returns day-by-day FUT signal history for a single stock.
+    Used by the Positional Intelligence signal history popup.
+    """
+    from datetime import datetime, timedelta
+    import pytz
+
+    try:
+        ist = pytz.timezone('Asia/Kolkata')
+        today = datetime.now(ist).date().isoformat()
+        start = (datetime.now(ist).date() - timedelta(days=60)).isoformat()
+
+        result = supabase.from_("daily_oi_summary") \
+            .select("trade_date, fut_oi_chg_pct, price_chg_pct, fut_signal, close_price") \
+            .eq("symbol", symbol.upper()) \
+            .gte("trade_date", start) \
+            .lte("trade_date", today) \
+            .order("trade_date", desc=True) \
+            .limit(days) \
+            .execute()
+
+        rows = result.data or []
+
+        history = []
+        for r in rows:
+            history.append({
+                "date":         r["trade_date"],
+                "signal":       r.get("fut_signal") or "NEUTRAL",
+                "fut_oi_chg":   round(float(r.get("fut_oi_chg_pct") or 0), 2),
+                "price_chg":    round(float(r.get("price_chg_pct") or 0), 2),
+                "close_price":  round(float(r.get("close_price") or 0), 2),
+            })
+
+        return {
+            "symbol":  symbol.upper(),
+            "history": history,
+            "total":   len(history),
+        }
+
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return {"symbol": symbol.upper(), "history": [], "total": 0, "error": str(e)}
+
 @app.get("/oi-profile/{symbol}")
 def oi_profile(symbol: str, date: str = None, expiry: str = None):
     from api.oi_profile import get_oi_profile
