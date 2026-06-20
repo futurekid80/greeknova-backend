@@ -78,7 +78,7 @@ def get_positional_intelligence(min_consec: int = 0):
     hist_start = (today - timedelta(days=25)).isoformat()
     try:
         hist_res = supabase.from_("daily_oi_summary")\
-            .select("symbol, trade_date, fut_oi_chg_pct, close_price, fut_signal")\
+            .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct, close_price, fut_signal")\
             .gte("trade_date", hist_start)\
             .lte("trade_date", today_str)\
             .order("trade_date", desc=False)\
@@ -203,7 +203,7 @@ def get_positional_intelligence(min_consec: int = 0):
         # ── Stealth Buildup ───────────────────────────────────────────────
         if len(history) >= 8:
             last_15 = history[-15:]
-            today_data = next((h for h in reversed(last_15) if h["date"] == today_str), None)
+            today_data = next((h for h in reversed(last_15) if h["trade_date"] == today_str), None)
             if today_data:
                 today_oi = float(today_data.get("fut_oi_chg_pct") or 0)
                 today_price = float(today_data.get("price_chg_pct") or 0)
