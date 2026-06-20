@@ -1,5 +1,5 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as date_type
 import math
 import time
 
@@ -58,7 +58,6 @@ def calculate_iv(market_price, S, K, T, r, opt_type, max_iter=100, tol=1e-6):
     if market_price <= intrinsic:
         return None
 
-    # Initial guess using Brenner-Subrahmanyam approximation
     sigma = math.sqrt(2 * math.pi / T) * market_price / S
 
     for _ in range(max_iter):
@@ -73,10 +72,16 @@ def calculate_iv(market_price, S, K, T, r, opt_type, max_iter=100, tol=1e-6):
         if sigma <= 0:
             sigma = 0.001
 
-    return round(sigma * 100, 2) if 0 < sigma < 5 else None  # Return as % capped at 500%
+    return round(sigma * 100, 2) if 0 < sigma < 5 else None
 
 
 RISK_FREE_RATE = 0.065  # 6.5% India 10yr Gsec
+
+# IVR thresholds — market standard (CBOE / tastytrade methodology)
+# IVR 0-25   = Low IV       → options relatively cheap historically
+# IVR 25-50  = Normal IV    → no clear edge
+# IVR 50-75  = Elevated IV  → above average, mild selling edge
+# IVR 75-100 = High IV      → expensive, strong premium selling environment
 
 SYMBOLS = [
     "NIFTY", "BANKNIFTY", "FINNIFTY",
@@ -92,17 +97,70 @@ SYMBOLS = [
     "PAYTM","NYKAA","PERSISTENT","DIXON",
 ]
 
+# How many trading days to look back for IVR/IVP
+# Market standard = 252 (1 year). We use whatever history exists,
+# growing naturally toward 252 as oi_snapshots + iv_history accumulates.
+IV_LOOKBACK_DAYS = 252
+
+
+def _persist_iv_history(supabase, iv_rows: list):
+    """
+    Persist today's computed ATM IV to iv_history table.
+    Upserts on (trade_date, symbol) — safe to call multiple times.
+    """
+    if not iv_rows:
+        return
+    try:
+        supabase.from_("iv_history") \
+            .upsert(iv_rows, on_conflict="trade_date,symbol") \
+            .execute()
+        print(f"[IV] Persisted {len(iv_rows)} IV rows to iv_history")
+    except Exception as e:
+        print(f"[IV] iv_history persist failed: {e}")
+
+
+def _load_iv_history(supabase, symbols: list, lookback_days: int = IV_LOOKBACK_DAYS) -> dict:
+    """
+    Load historical ATM IV from iv_history table.
+    Returns {symbol: [(date_str, iv_pct), ...]} sorted oldest→newest.
+    This is the long-term store — grows toward 252 trading days.
+    """
+    cutoff = (date_type.today() - timedelta(days=lookback_days + 30)).isoformat()
+    try:
+        rows = supabase.from_("iv_history") \
+            .select("trade_date, symbol, atm_iv") \
+            .gte("trade_date", cutoff) \
+            .in_("symbol", symbols) \
+            .order("trade_date", desc=False) \
+            .limit(lookback_days * len(symbols)) \
+            .execute()
+        result = {}
+        for r in (rows.data or []):
+            sym = r["symbol"]
+            iv  = r.get("atm_iv")
+            if iv is not None:
+                result.setdefault(sym, []).append((r["trade_date"], float(iv)))
+        return result
+    except Exception as e:
+        print(f"[IV] iv_history load failed: {e}")
+        return {}
+
 
 def get_iv_analysis(symbol: str = None, date: str = None):
     """
-    Calculate IV, IVR, Expected Move for one symbol or all symbols.
-    Uses ATM options from latest snapshot + historical IV from stored data.
+    Calculate IV, IVR, IVP, Expected Move for one symbol or all symbols.
+
+    IVR/IVP methodology (market standard — CBOE / tastytrade):
+    - Uses up to 252 trading days of ATM IV history
+    - History sourced from: iv_history table (long-term) + oi_snapshots (recent 30d)
+    - IVR = (current IV - period low) / (period high - period low) × 100
+    - IVP = % of days in lookback where IV was BELOW current IV
+    - As history grows toward 252d, IVR/IVP becomes increasingly reliable
     """
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     symbols = [symbol.upper()] if symbol else SYMBOLS
 
-    # Check cache first
     cache_key = f"iv_{','.join(symbols)}_{today}"
     cached = _get_cache(cache_key)
     if cached:
@@ -110,19 +168,18 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         return cached
 
     # ── Latest snapshot timestamp ─────────────────────────────────────────────
-    ts_q = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .order("timestamp", desc=True)\
+    ts_q = supabase.from_("oi_snapshots") \
+        .select("timestamp") \
+        .eq("symbol", "NIFTY") \
+        .gte("timestamp", f"{today}T00:00:00+00:00") \
+        .order("timestamp", desc=True) \
         .limit(1).execute()
 
     if not ts_q.data:
-        # Fallback to last available
-        ts_q = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .order("timestamp", desc=True)\
+        ts_q = supabase.from_("oi_snapshots") \
+            .select("timestamp") \
+            .eq("symbol", "NIFTY") \
+            .order("timestamp", desc=True) \
             .limit(1).execute()
 
     if not ts_q.data:
@@ -133,9 +190,9 @@ def get_iv_analysis(symbol: str = None, date: str = None):
     # ── CMP for all symbols ───────────────────────────────────────────────────
     cmp_raw = []
     for offset in range(0, 10000, 1000):
-        batch = supabase.from_("cmp_prices")\
-            .select("symbol, cmp")\
-            .order("timestamp", desc=True)\
+        batch = supabase.from_("cmp_prices") \
+            .select("symbol, cmp") \
+            .order("timestamp", desc=True) \
             .range(offset, offset + 999).execute()
         if not batch.data:
             break
@@ -153,9 +210,9 @@ def get_iv_analysis(symbol: str = None, date: str = None):
     # ── Latest options snapshot ───────────────────────────────────────────────
     snap_data = []
     for offset in range(0, 200000, 1000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("symbol, strike, option_type, last_price, expiry, oi")\
-            .eq("timestamp", latest_ts)\
+        batch = supabase.from_("oi_snapshots") \
+            .select("symbol, strike, option_type, last_price, expiry, oi") \
+            .eq("timestamp", latest_ts) \
             .range(offset, offset + 999).execute()
         if not batch.data:
             break
@@ -163,41 +220,41 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         if len(batch.data) < 1000:
             break
 
-    # Group by symbol
     from collections import defaultdict
     sym_options: dict = defaultdict(list)
     for row in snap_data:
         sym_options[row["symbol"]].append(row)
 
-    # ── Historical IV — PRE-FETCH ALL DATA UPFRONT (batch approach) ─────────────
-    # Old approach: 66 symbols × 30 days × 2 queries = ~4000 Supabase calls → timeout
-    # New approach: 30 days × 2 queries (all symbols at once) = ~60 queries total
+    # ── Load long-term IV history from iv_history table ───────────────────────
+    # This is the persistent store that grows toward 252 trading days
+    iv_history_store = _load_iv_history(supabase, symbols)
+    print(f"[IV] iv_history loaded: {len(iv_history_store)} symbols, "
+          f"max {max((len(v) for v in iv_history_store.values()), default=0)} days")
 
+    # ── Batch-fetch last 30 days from oi_snapshots ────────────────────────────
+    # Used to fill gaps + compute today's IV
     base_date = datetime.now(timezone.utc).date()
 
-    # Step 1: Get one EOD timestamp per day (30 fast queries)
     hist_dates: dict = {}
     for i in range(1, 31):
         d = (base_date - timedelta(days=i)).isoformat()
-        day_ts = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{d}T00:00:00+00:00")\
-            .lt("timestamp",  f"{d}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
+        day_ts = supabase.from_("oi_snapshots") \
+            .select("timestamp") \
+            .eq("symbol", "NIFTY") \
+            .gte("timestamp", f"{d}T00:00:00+00:00") \
+            .lt("timestamp",  f"{d}T23:59:59+00:00") \
+            .order("timestamp", desc=True) \
             .limit(1).execute()
         if day_ts.data:
             hist_dates[d] = day_ts.data[0]["timestamp"]
 
-    # Step 2: For each day, fetch ALL symbols' CMP in one query
-    # Result: {date -> {symbol -> cmp}}
     hist_cmp_by_date: dict = {}
     for hist_d in list(hist_dates.keys()):
-        cmp_q = supabase.from_("cmp_prices")\
-            .select("symbol, cmp")\
-            .gte("timestamp", f"{hist_d}T00:00:00+00:00")\
-            .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
+        cmp_q = supabase.from_("cmp_prices") \
+            .select("symbol, cmp") \
+            .gte("timestamp", f"{hist_d}T00:00:00+00:00") \
+            .lt("timestamp",  f"{hist_d}T23:59:59+00:00") \
+            .order("timestamp", desc=True) \
             .limit(500).execute().data or []
         day_cmp: dict = {}
         seen_syms: set = set()
@@ -207,15 +264,13 @@ def get_iv_analysis(symbol: str = None, date: str = None):
                 seen_syms.add(r["symbol"])
         hist_cmp_by_date[hist_d] = day_cmp
 
-    # Step 3: For each day, fetch ALL symbols' ATM options in one query
-    # Result: {date -> {symbol -> [option rows]}}
     hist_opts_by_date: dict = {}
     for hist_d in list(hist_dates.keys()):
-        opts_q = supabase.from_("oi_snapshots")\
-            .select("symbol, strike, option_type, last_price, expiry")\
-            .gte("timestamp", f"{hist_d}T09:00:00+00:00")\
-            .lt("timestamp",  f"{hist_d}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
+        opts_q = supabase.from_("oi_snapshots") \
+            .select("symbol, strike, option_type, last_price, expiry") \
+            .gte("timestamp", f"{hist_d}T09:00:00+00:00") \
+            .lt("timestamp",  f"{hist_d}T23:59:59+00:00") \
+            .order("timestamp", desc=True) \
             .limit(5000).execute().data or []
         day_opts: dict = {}
         seen_keys: set = set()
@@ -229,9 +284,9 @@ def get_iv_analysis(symbol: str = None, date: str = None):
                 seen_keys.add(key)
         hist_opts_by_date[hist_d] = day_opts
 
-    hist_timestamps = list(hist_dates.values())  # kept for compatibility
-
     results = []
+    # Collect today's IV for all symbols to persist to iv_history
+    today_iv_rows = []
 
     for sym in symbols:
         cmp = cmp_map.get(sym, 0)
@@ -242,7 +297,6 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         if not options:
             continue
 
-        # ── Find nearest expiry ───────────────────────────────────────────────
         expiries = sorted(set(r["expiry"] for r in options if r["expiry"] and r["expiry"] >= today))
         if not expiries:
             expiries = sorted(set(r["expiry"] for r in options if r["expiry"]))
@@ -251,16 +305,14 @@ def get_iv_analysis(symbol: str = None, date: str = None):
 
         nearest_expiry = expiries[0]
 
-        # Days to expiry
         try:
             exp_dt = datetime.strptime(nearest_expiry, "%Y-%m-%d")
             now_dt = datetime.strptime(today, "%Y-%m-%d")
             dte = (exp_dt - now_dt).days
-            T = max(dte / 365, 1/365)  # minimum 1 day
+            T = max(dte / 365, 1/365)
         except:
             continue
 
-        # ── Find ATM strike ───────────────────────────────────────────────────
         expiry_options = [r for r in options if r["expiry"] == nearest_expiry]
         strikes = sorted(set(r["strike"] for r in expiry_options))
         if not strikes:
@@ -268,7 +320,6 @@ def get_iv_analysis(symbol: str = None, date: str = None):
 
         atm_strike = min(strikes, key=lambda x: abs(x - cmp))
 
-        # ATM CE and PE prices
         atm_ce = next((r["last_price"] for r in expiry_options
                        if r["strike"] == atm_strike and r["option_type"] == "CE"), None)
         atm_pe = next((r["last_price"] for r in expiry_options
@@ -280,49 +331,46 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         atm_ce = float(atm_ce)
         atm_pe = float(atm_pe)
 
-        # ── Calculate IV for ATM CE and PE ────────────────────────────────────
         iv_ce = calculate_iv(atm_ce, cmp, atm_strike, T, RISK_FREE_RATE, 'CE')
         iv_pe = calculate_iv(atm_pe, cmp, atm_strike, T, RISK_FREE_RATE, 'PE')
 
-        # Average IV (use both if available)
         iv_values = [v for v in [iv_ce, iv_pe] if v is not None]
         if not iv_values:
             continue
         current_iv = round(sum(iv_values) / len(iv_values), 2)
 
-        # ── Expected Move ─────────────────────────────────────────────────────
-        # ATM straddle price × 0.68 = 1 standard deviation move
-        atm_straddle = atm_ce + atm_pe
+        atm_straddle      = atm_ce + atm_pe
         expected_move_pts  = round(atm_straddle * 0.68, 1)
         expected_move_pct  = round((expected_move_pts / cmp) * 100, 2)
-        upper_range = round(cmp + expected_move_pts, 1)
-        lower_range = round(cmp - expected_move_pts, 1)
-
-        # 2SD range (95% probability)
+        upper_range        = round(cmp + expected_move_pts, 1)
+        lower_range        = round(cmp - expected_move_pts, 1)
         expected_move_2sd_pts = round(atm_straddle * 1.36, 1)
-        upper_range_2sd = round(cmp + expected_move_2sd_pts, 1)
-        lower_range_2sd = round(cmp - expected_move_2sd_pts, 1)
+        upper_range_2sd    = round(cmp + expected_move_2sd_pts, 1)
+        lower_range_2sd    = round(cmp - expected_move_2sd_pts, 1)
 
-        # ── Historical IV for IVR ─────────────────────────────────────────────
-        # Sample IV from historical EOD snapshots
-        hist_ivs = []
+        # ── Build IV history: iv_history table + recent oi_snapshots ─────────
+        # Strategy:
+        #   1. Start with persistent iv_history (can be up to 252 days)
+        #   2. Fill recent 30 days from oi_snapshots (catches gaps + recent data)
+        #   3. Deduplicate by date — iv_history takes precedence for old dates
+        #   4. Add today's current_iv
 
-        # Use pre-fetched data — no Supabase calls here!
-        # All historical data was fetched upfront in batch queries
+        # From iv_history table (older, persistent)
+        hist_from_store = {d: iv for d, iv in iv_history_store.get(sym, [])}
+
+        # From oi_snapshots (recent 30 days)
         for hist_d in list(hist_dates.keys()):
             if hist_d == today:
                 continue
-
+            # Only recompute if not already in iv_history store
+            if hist_d in hist_from_store:
+                continue
             try:
-                # Get pre-fetched CMP for this symbol on this day
                 h_cmp = hist_cmp_by_date.get(hist_d, {}).get(sym, cmp)
-
-                # Get pre-fetched options for this symbol on this day
                 hist_opts = hist_opts_by_date.get(hist_d, {}).get(sym, [])
                 if not hist_opts:
                     continue
 
-                # Find nearest expiry
                 hist_expiries = sorted(set(
                     r["expiry"] for r in hist_opts
                     if r["expiry"] and r["expiry"] >= hist_d
@@ -333,9 +381,7 @@ def get_iv_analysis(symbol: str = None, date: str = None):
                     continue
 
                 h_expiry = hist_expiries[0]
-                h_exp_dt = datetime.strptime(h_expiry, "%Y-%m-%d")
-                h_now_dt = datetime.strptime(hist_d, "%Y-%m-%d")
-                h_dte    = (h_exp_dt - h_now_dt).days
+                h_dte    = (datetime.strptime(h_expiry, "%Y-%m-%d") - datetime.strptime(hist_d, "%Y-%m-%d")).days
                 h_T      = max(h_dte / 365, 1/365)
 
                 h_expiry_opts = [r for r in hist_opts if r["expiry"] == h_expiry]
@@ -359,62 +405,93 @@ def get_iv_analysis(symbol: str = None, date: str = None):
 
                 if h_iv_vals:
                     avg_iv = round(sum(h_iv_vals) / len(h_iv_vals), 2)
-                    if avg_iv >= 5.0:  # filter bad data
-                        hist_ivs.append(avg_iv)
+                    if avg_iv >= 5.0:
+                        hist_from_store[hist_d] = avg_iv
 
             except Exception:
                 continue
 
-        # ── IVR and IVP calculation ───────────────────────────────────────────
+        # Merge all historical IVs (sorted by date)
+        all_hist_sorted = sorted(hist_from_store.items())  # [(date, iv), ...]
+        hist_ivs = [iv for _, iv in all_hist_sorted]
+
+        # ── IVR and IVP — market standard methodology ─────────────────────────
+        # Include current_iv in the full dataset for percentile calculation
         all_ivs = hist_ivs + [current_iv]
+        n_days = len(all_ivs)
 
-        if len(all_ivs) >= 2:
-            iv_52w_high = max(all_ivs)
-            iv_52w_low  = min(all_ivs)
-            iv_range = iv_52w_high - iv_52w_low
+        if n_days >= 2:
+            iv_period_high = max(all_ivs)
+            iv_period_low  = min(all_ivs)
+            iv_range = iv_period_high - iv_period_low
 
-            ivr = round(((current_iv - iv_52w_low) / iv_range) * 100, 1) if iv_range > 0 else 50.0
-            ivp = round(sum(1 for x in all_ivs if x <= current_iv) / len(all_ivs) * 100, 1)
+            # IVR: where does current IV sit in the period range?
+            # 0 = at period low, 100 = at period high
+            ivr = round(((current_iv - iv_period_low) / iv_range) * 100, 1) if iv_range > 0 else 50.0
+
+            # IVP: what % of historical days had IV BELOW current IV?
+            # Standard: use hist_ivs only (not including today) for cleaner percentile
+            ivp = round(sum(1 for x in hist_ivs if x < current_iv) / len(hist_ivs) * 100, 1) \
+                if hist_ivs else None
         else:
             ivr = None
             ivp = None
-            iv_52w_high = current_iv
-            iv_52w_low  = current_iv
+            iv_period_high = current_iv
+            iv_period_low  = current_iv
 
-        # IVR interpretation
+        # History quality label
+        if n_days >= 200:
+            history_quality = "52W"
+        elif n_days >= 100:
+            history_quality = f"{n_days}d"
+        elif n_days >= 30:
+            history_quality = f"{n_days}d"
+        else:
+            history_quality = f"{n_days}d"
+
+        # ── IV signal labels — market standard thresholds ─────────────────────
         if ivr is None:
             iv_signal = "INSUFFICIENT_DATA"
             iv_label  = "Need more history"
         elif ivr >= 75:
             iv_signal = "HIGH_IV"
-            iv_label  = "IV expensive — consider selling premium"
+            iv_label  = f"High IV — IVR {ivr:.0f}"
         elif ivr >= 50:
             iv_signal = "ELEVATED_IV"
-            iv_label  = "IV above average — neutral to selling bias"
+            iv_label  = f"Elevated IV — IVR {ivr:.0f}"
         elif ivr >= 25:
             iv_signal = "NORMAL_IV"
-            iv_label  = "IV in normal range"
+            iv_label  = f"Normal IV — IVR {ivr:.0f}"
         else:
             iv_signal = "LOW_IV"
-            iv_label  = "IV cheap — consider buying premium"
+            iv_label  = f"Low IV — IVR {ivr:.0f}"
 
-        # Strategy suggestions based on IVR + DTE
+        # Strategy signals — SEBI compliant (descriptive, not prescriptive)
         strategies = []
         if ivr is not None:
             if ivr >= 75 and dte >= 7:
-                strategies.append("Iron Condor")
-                strategies.append("Short Strangle")
+                strategies = ["Iron Condor", "Short Strangle"]
             elif ivr >= 75 and dte < 7:
-                strategies.append("Short Straddle")
-                strategies.append("Credit Spreads")
+                strategies = ["Short Straddle", "Credit Spreads"]
             elif ivr <= 25 and dte >= 14:
-                strategies.append("Long Straddle")
-                strategies.append("Long Strangle")
+                strategies = ["Long Straddle", "Long Strangle"]
             elif ivr <= 25 and dte < 14:
-                strategies.append("Debit Spreads")
+                strategies = ["Debit Spreads"]
             else:
-                strategies.append("Calendar Spread")
-                strategies.append("Directional spreads")
+                strategies = ["Calendar Spread", "Directional spreads"]
+
+        # ── Collect for iv_history persistence ───────────────────────────────
+        today_iv_rows.append({
+            "trade_date": today,
+            "symbol":     sym,
+            "atm_strike": atm_strike,
+            "atm_iv":     current_iv,
+            "atm_ce_iv":  iv_ce,
+            "atm_pe_iv":  iv_pe,
+            "expiry":     nearest_expiry,
+            "dte":        dte,
+            "cmp":        cmp,
+        })
 
         results.append({
             "symbol":              sym,
@@ -428,11 +505,14 @@ def get_iv_analysis(symbol: str = None, date: str = None):
             "iv_ce":               iv_ce,
             "iv_pe":               iv_pe,
             "current_iv":          current_iv,
-            "iv_52w_high":         round(iv_52w_high, 2),
-            "iv_52w_low":          round(iv_52w_low, 2),
+            "iv_period_high":      round(iv_period_high, 2),
+            "iv_period_low":       round(iv_period_low, 2),
+            "iv_52w_high":         round(iv_period_high, 2),  # kept for backward compat
+            "iv_52w_low":          round(iv_period_low, 2),   # kept for backward compat
             "ivr":                 ivr,
             "ivp":                 ivp,
-            "iv_history_days":     len(all_ivs),
+            "iv_history_days":     n_days,
+            "history_quality":     history_quality,
             "iv_signal":           iv_signal,
             "iv_label":            iv_label,
             "strategies":          strategies,
@@ -445,8 +525,14 @@ def get_iv_analysis(symbol: str = None, date: str = None):
             "is_index":            sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
         })
 
-    # Sort by IVR descending (highest IV first — most actionable)
+    # Sort by IVR descending
     results.sort(key=lambda x: (x["ivr"] or 0), reverse=True)
+
+    # ── Persist today's IV to iv_history ─────────────────────────────────────
+    # This runs silently — failures don't affect the response
+    # Over time this builds toward 252-day IVR/IVP
+    if today_iv_rows:
+        _persist_iv_history(supabase, today_iv_rows)
 
     result = {
         "date":      today,
