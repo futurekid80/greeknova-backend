@@ -1143,9 +1143,11 @@ def stock_signal_history(symbol: str, days: int = 20):
     Used by the Positional Intelligence signal history popup.
     """
     from datetime import datetime, timedelta
+    from utils.db import get_supabase
     import pytz
 
     try:
+        supabase = get_supabase()
         ist = pytz.timezone('Asia/Kolkata')
         today = datetime.now(ist).date().isoformat()
         start = (datetime.now(ist).date() - timedelta(days=60)).isoformat()
