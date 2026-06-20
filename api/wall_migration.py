@@ -5,12 +5,15 @@ Experimental feature — Jun 2026.
 
 Fix log:
 - Wall computation: CE/PE wall = highest OI across ALL strikes (no CMP filter)
-  This correctly identifies dominant institutional positions regardless of price location.
-  Example: BAJAJ-AUTO PE 10,000 (1.5L OI) is the dominant wall even if price < 10,000.
 - Coiling detection: catches ce_wall == pe_wall (perfect convergence = 0pt range)
 - Range threshold raised to 2.0% to catch more coiling setups
+- POC added: strike with highest combined CE+PE OI
+- Zone classification: BELOW_SUPPORT / IN_ZONE / ABOVE_RESISTANCE
+- Convergence flag: CE wall + PE wall + POC all within 2% of CMP
+- IV added: ATM IV via Black-Scholes, with strategy suggestion
 """
 
+import math
 from datetime import datetime, timedelta
 import pytz
 
@@ -20,6 +23,66 @@ STRIKE_INTERVALS = {
     "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50,
 }
 DEFAULT_INTERVAL = 5
+
+
+# ── IV Helpers ────────────────────────────────────────────────────────────────
+
+def _black_scholes_iv(option_price: float, S: float, K: float, T: float,
+                      r: float = 0.065, option_type: str = 'CE'):
+    """Bisection IV solver. Returns IV as % or None if failed."""
+    if option_price <= 0 or S <= 0 or K <= 0 or T <= 0:
+        return None
+    try:
+        low, high = 0.001, 5.0
+        mid = 0.3
+        for _ in range(60):
+            mid = (low + high) / 2
+            d1 = (math.log(S / K) + (r + 0.5 * mid ** 2) * T) / (mid * math.sqrt(T))
+            d2 = d1 - mid * math.sqrt(T)
+            nd1 = 0.5 * (1 + math.erf(d1 / math.sqrt(2)))
+            nd2 = 0.5 * (1 + math.erf(d2 / math.sqrt(2)))
+            if option_type == 'CE':
+                price = S * nd1 - K * math.exp(-r * T) * nd2
+            else:
+                price = K * math.exp(-r * T) * (1 - nd2) - S * (1 - nd1)
+            if abs(price - option_price) < 0.01:
+                break
+            if price < option_price:
+                low = mid
+            else:
+                high = mid
+        return round(mid * 100, 1)
+    except Exception:
+        return None
+
+
+def _iv_tag(iv):
+    """Returns IV label, color and strategy suggestion based on IV level."""
+    if iv is None:
+        return {"iv": None, "iv_label": None, "iv_color": None, "strategy": None}
+    if iv < 15:
+        return {
+            "iv": iv,
+            "iv_label": f"Low IV {iv}%",
+            "iv_color": "sky",
+            "strategy": "📈 Buy breakout — options cheap"
+        }
+    if iv < 25:
+        return {
+            "iv": iv,
+            "iv_label": f"Mid IV {iv}%",
+            "iv_color": "amber",
+            "strategy": "⏳ Wait for clarity"
+        }
+    return {
+        "iv": iv,
+        "iv_label": f"High IV {iv}%",
+        "iv_color": "emerald",
+        "strategy": "✍️ Sell premium — straddle / iron condor candidate"
+    }
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 def get_wall_migration(supabase) -> dict:
     try:
@@ -77,15 +140,15 @@ def get_wall_migration(supabase) -> dict:
             .limit(300).execute()
 
         cmp_map: dict[str, float] = {}
-        seen = set()
+        seen_cmp = set()
         for r in (cmp_res.data or []):
-            if r["symbol"] not in seen:
+            if r["symbol"] not in seen_cmp:
                 cmp_map[r["symbol"]] = float(r["cmp"])
-                seen.add(r["symbol"])
+                seen_cmp.add(r["symbol"])
 
         # ── Fetch OI for both timestamps in one bulk query ────────────────
         oi_res = supabase.from_("oi_snapshots") \
-            .select("symbol,strike,option_type,oi,timestamp,expiry") \
+            .select("symbol,strike,option_type,oi,last_price,timestamp,expiry") \
             .in_("timestamp", [ts_latest, ts_prev]) \
             .in_("option_type", ["CE", "PE"]) \
             .limit(15000).execute()
@@ -102,7 +165,11 @@ def get_wall_migration(supabase) -> dict:
             if sym not in nearest_expiry or exp < nearest_expiry[sym]:
                 nearest_expiry[sym] = exp
 
+        # ── Build snap + ATM last_price map in ONE pass ───────────────────
         snap: dict[str, dict] = {ts_latest: {}, ts_prev: {}}
+        # atm_prices[sym] = {"CE": price, "PE": price} from latest snapshot
+        atm_prices: dict[str, dict] = {}
+
         for r in (oi_res.data or []):
             ts  = r["timestamp"]
             sym = r["symbol"]
@@ -112,18 +179,23 @@ def get_wall_migration(supabase) -> dict:
             s   = float(r["strike"])
             ot  = r["option_type"]
             oi  = int(r["oi"] or 0)
+            lp  = float(r.get("last_price") or 0)
+
             if sym not in snap[ts]:
                 snap[ts][sym] = {}
             if s not in snap[ts][sym]:
-                snap[ts][sym][s] = {"ce_oi": 0, "pe_oi": 0}
+                snap[ts][sym][s] = {"ce_oi": 0, "pe_oi": 0, "ce_lp": 0.0, "pe_lp": 0.0}
             snap[ts][sym][s][f"{ot.lower()}_oi"] += oi
+
+            # Store last_price for latest snapshot
+            if ts == ts_latest and lp > 0:
+                snap[ts][sym][s][f"{ot.lower()}_lp"] = lp
 
         # ── Compute walls for a snapshot ──────────────────────────────────
         def get_walls(strike_map: dict, cmp: float, sym: str) -> dict | None:
             if not strike_map or cmp <= 0:
                 return None
 
-            # Auto-detect strike interval
             strikes_sorted = sorted(strike_map.keys())
             if sym in STRIKE_INTERVALS:
                 interval = STRIKE_INTERVALS[sym]
@@ -135,7 +207,6 @@ def get_wall_migration(supabase) -> dict:
             else:
                 interval = DEFAULT_INTERVAL
 
-            # ATM ±10 strike intervals — matches OI Profile exactly
             snapped_atm = round(cmp / interval) * interval
             strike_lower = snapped_atm - (10 * interval)
             strike_upper = snapped_atm + (10 * interval)
@@ -151,19 +222,12 @@ def get_wall_migration(supabase) -> dict:
             if not ce_oi or not pe_oi:
                 return None
 
-            # CE wall = strike with highest CE OI (no CMP filter)
-            # PE wall = strike with highest PE OI (no CMP filter)
-            # This correctly identifies dominant institutional positions
-            # regardless of whether price is above/below the strike.
-            # e.g. BAJAJ-AUTO PE 10,000 (1.5L) is the dominant wall
-            # even when price = 9,900 (below the strike).
             max_ce = max(ce_oi.values(), default=0)
             max_pe = max(pe_oi.values(), default=0)
 
             if max_ce == 0 or max_pe == 0:
                 return None
 
-            # Apply 10% threshold to filter noise strikes
             ce_sig = {s: v for s, v in ce_oi.items() if v >= max_ce * 0.10}
             pe_sig = {s: v for s, v in pe_oi.items() if v >= max_pe * 0.10}
 
@@ -173,14 +237,17 @@ def get_wall_migration(supabase) -> dict:
             ce_wall = max(ce_sig, key=ce_sig.get)
             pe_wall = max(pe_sig, key=pe_sig.get)
 
-            # POC = strike with highest combined CE+PE OI — same as OI Profile
+            # POC = strike with highest combined CE+PE OI
             poc = max(
                 strike_map.keys(),
                 key=lambda s: strike_map[s].get("ce_oi", 0) + strike_map[s].get("pe_oi", 0)
             )
 
-            # Allow ce_wall == pe_wall (perfect convergence)
-            # Only skip if CE wall is strictly BELOW PE wall (impossible structure)
+            # ATM strike for IV computation
+            atm_strike = min(strikes_sorted, key=lambda s: abs(s - cmp))
+            atm_ce_lp = strike_map.get(atm_strike, {}).get("ce_lp", 0.0)
+            atm_pe_lp = strike_map.get(atm_strike, {}).get("pe_lp", 0.0)
+
             if ce_wall < pe_wall:
                 return None
 
@@ -193,11 +260,15 @@ def get_wall_migration(supabase) -> dict:
                 "ce_wall_oi":    ce_sig[ce_wall],
                 "pe_wall_oi":    pe_sig[pe_wall],
                 "poc":           poc,
+                "atm_strike":    atm_strike,
+                "atm_ce_lp":     atm_ce_lp,
+                "atm_pe_lp":     atm_pe_lp,
                 "range":         trade_range,
                 "range_pct":     trade_range_pct,
             }
 
         # ── Analyze each symbol ───────────────────────────────────────────
+        import datetime as _dt
         signals = []
         all_symbols = set(snap[ts_latest].keys()) & set(snap[ts_prev].keys())
 
@@ -307,7 +378,6 @@ def get_wall_migration(supabase) -> dict:
                 })
 
             # 8. Coiling — narrow range or perfect convergence
-            # Catches: range < 2% OR ce_wall == pe_wall (0pt range)
             if latest_walls["range_pct"] < 2.0 and (ce_now == pe_now or (cmp > pe_now and cmp < ce_now)):
                 alerts.append({
                     "type": "NARROW_RANGE_COILING",
@@ -326,7 +396,7 @@ def get_wall_migration(supabase) -> dict:
 
             poc = latest_walls.get("poc", 0)
 
-            # CMP zone classification
+            # ── CMP zone classification ───────────────────────────────────
             if cmp < pe_now:
                 zone = "BELOW_SUPPORT"
                 zone_label = "Below Support"
@@ -340,30 +410,63 @@ def get_wall_migration(supabase) -> dict:
                 zone_label = "In Zone"
                 zone_color = "amber"
 
-            # Convergence flag — CE wall, PE wall, POC all within 2% of each other
+            # ── Convergence flag ──────────────────────────────────────────
             convergence_zone = False
             if poc > 0 and cmp > 0:
                 levels = [ce_now, pe_now, poc]
                 spread = (max(levels) - min(levels)) / cmp * 100
                 convergence_zone = spread <= 2.0
 
+            # ── IV computation from ATM last prices ───────────────────────
+            expiry_str = nearest_expiry.get(sym, "")
+            iv = None
+            try:
+                if expiry_str:
+                    exp_date = _dt.date.fromisoformat(expiry_str)
+                    today_date = _dt.date.fromisoformat(today)
+                    dte = max((exp_date - today_date).days, 1)
+                    T = dte / 365.0
+
+                    atm_ce_lp = latest_walls.get("atm_ce_lp", 0.0)
+                    atm_pe_lp = latest_walls.get("atm_pe_lp", 0.0)
+
+                    # Prefer CE for IV (CE is more liquid ATM)
+                    # Use average of CE+PE if both available for more accuracy
+                    if atm_ce_lp > 0 and atm_pe_lp > 0:
+                        iv_ce = _black_scholes_iv(atm_ce_lp, cmp, latest_walls["atm_strike"], T, option_type='CE')
+                        iv_pe = _black_scholes_iv(atm_pe_lp, cmp, latest_walls["atm_strike"], T, option_type='PE')
+                        valid = [v for v in [iv_ce, iv_pe] if v is not None]
+                        iv = round(sum(valid) / len(valid), 1) if valid else None
+                    elif atm_ce_lp > 0:
+                        iv = _black_scholes_iv(atm_ce_lp, cmp, latest_walls["atm_strike"], T, option_type='CE')
+                    elif atm_pe_lp > 0:
+                        iv = _black_scholes_iv(atm_pe_lp, cmp, latest_walls["atm_strike"], T, option_type='PE')
+            except Exception:
+                iv = None
+
+            iv_data = _iv_tag(iv)
+
             signals.append({
-                "symbol":          sym,
-                "cmp":             cmp,
-                "ce_wall":         ce_now,
-                "pe_wall":         pe_now,
-                "poc":             poc,
-                "ce_wall_prev":    ce_prev,
-                "pe_wall_prev":    pe_prev,
-                "range_pts":       latest_walls["range"],
-                "range_pct":       latest_walls["range_pct"],
-                "zone":            zone,
-                "zone_label":      zone_label,
-                "zone_color":      zone_color,
+                "symbol":           sym,
+                "cmp":              cmp,
+                "ce_wall":          ce_now,
+                "pe_wall":          pe_now,
+                "poc":              poc,
+                "ce_wall_prev":     ce_prev,
+                "pe_wall_prev":     pe_prev,
+                "range_pts":        latest_walls["range"],
+                "range_pct":        latest_walls["range_pct"],
+                "zone":             zone,
+                "zone_label":       zone_label,
+                "zone_color":       zone_color,
                 "convergence_zone": convergence_zone,
-                "alerts":          alerts,
-                "top_alert":       alerts[0],
-                "alert_count":     len(alerts),
+                "iv":               iv_data["iv"],
+                "iv_label":         iv_data["iv_label"],
+                "iv_color":         iv_data["iv_color"],
+                "strategy":         iv_data["strategy"],
+                "alerts":           alerts,
+                "top_alert":        alerts[0],
+                "alert_count":      len(alerts),
             })
 
         signals.sort(key=lambda s: (
@@ -373,11 +476,11 @@ def get_wall_migration(supabase) -> dict:
         ))
 
         return {
-            "signals":    signals,
-            "total":      len(signals),
-            "trade_date": today,
-            "ts_latest":  ts_latest,
-            "ts_prev":    ts_prev,
+            "signals":      signals,
+            "total":        len(signals),
+            "trade_date":   today,
+            "ts_latest":    ts_latest,
+            "ts_prev":      ts_prev,
             "generated_at": ist_now.strftime("%H:%M IST"),
         }
 
