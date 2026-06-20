@@ -1136,8 +1136,6 @@ def positional_intelligence(min_consec: int = 0):
     from api.positional_intelligence import get_positional_intelligence
     return get_positional_intelligence(min_consec=min_consec)
 
-## Add this to main.py — paste after the /positional-intelligence endpoint
-
 @app.get("/stock-signal-history/{symbol}")
 def stock_signal_history(symbol: str, days: int = 20):
     """
