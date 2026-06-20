@@ -160,11 +160,24 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if open_oi > 0:
                 fut_oi_chg_map[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
 
-        # ── Add fut_vol and fut_oi_chg_pct to rows ───────────────────────
+        # ── Add fut_vol, fut_oi_chg_pct and fut_signal to rows ───────────
         for row in rows:
             sym = row["symbol"]
-            row["fut_vol"]         = fut_vol_map.get(sym, 0)
-            row["fut_oi_chg_pct"]  = fut_oi_chg_map.get(sym, 0)
+            fut_oi = fut_oi_chg_map.get(sym, 0)
+            price  = row.get("price_chg_pct") or 0
+            row["fut_vol"]        = fut_vol_map.get(sym, 0)
+            row["fut_oi_chg_pct"] = fut_oi
+            # Classify FUT signal — same logic as OI Buildup chart
+            if fut_oi >= 2.0 and price >= 0.3:
+                row["fut_signal"] = "LONG_BUILDUP"
+            elif fut_oi >= 2.0 and price <= -0.3:
+                row["fut_signal"] = "SHORT_BUILDUP"
+            elif fut_oi <= -2.0 and price >= 0.3:
+                row["fut_signal"] = "SHORT_COVERING"
+            elif fut_oi <= -2.0 and price <= -0.3:
+                row["fut_signal"] = "LONG_UNWINDING"
+            else:
+                row["fut_signal"] = "NEUTRAL"
 
         supabase.from_("daily_oi_summary") \
             .upsert(rows, on_conflict="trade_date,symbol").execute()
