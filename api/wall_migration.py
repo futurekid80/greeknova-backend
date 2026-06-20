@@ -1,7 +1,6 @@
 """
 wall_migration.py
 OI Wall Migration Scanner — detects wall shifts, convergence, and price breaches.
-Experimental feature — Jun 2026.
 
 Fix log:
 - Wall computation: CE/PE wall = highest OI across ALL strikes (no CMP filter)
@@ -10,10 +9,9 @@ Fix log:
 - POC added: strike with highest combined CE+PE OI
 - Zone classification: BELOW_SUPPORT / IN_ZONE / ABOVE_RESISTANCE
 - Convergence flag: CE wall + PE wall + POC all within 2% of CMP
-- IV added: ATM IV via Black-Scholes, with strategy suggestion
+- IV enriched from iv_analysis: proper IVR/IVP using market-standard methodology
 """
 
-import math
 from datetime import datetime, timedelta
 import pytz
 
@@ -24,64 +22,6 @@ STRIKE_INTERVALS = {
 }
 DEFAULT_INTERVAL = 5
 
-
-# ── IV Helpers ────────────────────────────────────────────────────────────────
-
-def _black_scholes_iv(option_price: float, S: float, K: float, T: float,
-                      r: float = 0.065, option_type: str = 'CE'):
-    """Bisection IV solver. Returns IV as % or None if failed."""
-    if option_price <= 0 or S <= 0 or K <= 0 or T <= 0:
-        return None
-    try:
-        low, high = 0.001, 5.0
-        mid = 0.3
-        for _ in range(60):
-            mid = (low + high) / 2
-            d1 = (math.log(S / K) + (r + 0.5 * mid ** 2) * T) / (mid * math.sqrt(T))
-            d2 = d1 - mid * math.sqrt(T)
-            nd1 = 0.5 * (1 + math.erf(d1 / math.sqrt(2)))
-            nd2 = 0.5 * (1 + math.erf(d2 / math.sqrt(2)))
-            if option_type == 'CE':
-                price = S * nd1 - K * math.exp(-r * T) * nd2
-            else:
-                price = K * math.exp(-r * T) * (1 - nd2) - S * (1 - nd1)
-            if abs(price - option_price) < 0.01:
-                break
-            if price < option_price:
-                low = mid
-            else:
-                high = mid
-        return round(mid * 100, 1)
-    except Exception:
-        return None
-
-
-def _iv_tag(iv):
-    if iv is None:
-        return {"iv": None, "iv_label": None, "iv_color": None, "strategy": None}
-    if iv < 15:
-        return {
-            "iv": iv,
-            "iv_label": f"Low IV {iv}%",
-            "iv_color": "sky",
-            "strategy": "📉 Options appear relatively cheap historically"
-        }
-    if iv < 25:
-        return {
-            "iv": iv,
-            "iv_label": f"Mid IV {iv}%",
-            "iv_color": "amber",
-            "strategy": "〰️ IV in mid range — no clear edge either side"
-        }
-    return {
-        "iv": iv,
-        "iv_label": f"High IV {iv}%",
-        "iv_color": "emerald",
-        "strategy": "📊 IV elevated — premium-rich environment observed"
-    }
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 def get_wall_migration(supabase) -> dict:
     try:
@@ -103,7 +43,6 @@ def get_wall_migration(supabase) -> dict:
             .order("timestamp", desc=True) \
             .limit(20).execute()
 
-        # If fewer than 2 snapshots today, look back to last trading day
         if len(ts_res.data or []) < 2:
             for i in range(1, 6):
                 prev_day = (check - timedelta(days=i))
@@ -131,7 +70,7 @@ def get_wall_migration(supabase) -> dict:
         ts_latest = timestamps[0]
         ts_prev   = timestamps[4] if len(timestamps) >= 5 else timestamps[-1]
 
-        # ── Fetch latest CMP for all symbols ─────────────────────────────
+        # ── Fetch latest CMP ──────────────────────────────────────────────
         cmp_res = supabase.from_("cmp_prices") \
             .select("symbol,cmp") \
             .gte("timestamp", f"{today}T03:00:00+00:00") \
@@ -145,14 +84,14 @@ def get_wall_migration(supabase) -> dict:
                 cmp_map[r["symbol"]] = float(r["cmp"])
                 seen_cmp.add(r["symbol"])
 
-        # ── Fetch OI for both timestamps in one bulk query ────────────────
+        # ── Fetch OI for both timestamps + last_price ─────────────────────
         oi_res = supabase.from_("oi_snapshots") \
             .select("symbol,strike,option_type,oi,last_price,timestamp,expiry") \
             .in_("timestamp", [ts_latest, ts_prev]) \
             .in_("option_type", ["CE", "PE"]) \
             .limit(15000).execute()
 
-        # ── Find nearest expiry per symbol from latest snapshot ───────────
+        # ── Find nearest expiry per symbol ────────────────────────────────
         nearest_expiry: dict = {}
         for r in (oi_res.data or []):
             if r["timestamp"] != ts_latest:
@@ -164,10 +103,8 @@ def get_wall_migration(supabase) -> dict:
             if sym not in nearest_expiry or exp < nearest_expiry[sym]:
                 nearest_expiry[sym] = exp
 
-        # ── Build snap + ATM last_price map in ONE pass ───────────────────
+        # ── Build snap with last_price in single pass ─────────────────────
         snap: dict[str, dict] = {ts_latest: {}, ts_prev: {}}
-        # atm_prices[sym] = {"CE": price, "PE": price} from latest snapshot
-        atm_prices: dict[str, dict] = {}
 
         for r in (oi_res.data or []):
             ts  = r["timestamp"]
@@ -185,12 +122,10 @@ def get_wall_migration(supabase) -> dict:
             if s not in snap[ts][sym]:
                 snap[ts][sym][s] = {"ce_oi": 0, "pe_oi": 0, "ce_lp": 0.0, "pe_lp": 0.0}
             snap[ts][sym][s][f"{ot.lower()}_oi"] += oi
-
-            # Store last_price for latest snapshot
             if ts == ts_latest and lp > 0:
                 snap[ts][sym][s][f"{ot.lower()}_lp"] = lp
 
-        # ── Compute walls for a snapshot ──────────────────────────────────
+        # ── Compute walls ─────────────────────────────────────────────────
         def get_walls(strike_map: dict, cmp: float, sym: str) -> dict | None:
             if not strike_map or cmp <= 0:
                 return None
@@ -223,26 +158,23 @@ def get_wall_migration(supabase) -> dict:
 
             max_ce = max(ce_oi.values(), default=0)
             max_pe = max(pe_oi.values(), default=0)
-
             if max_ce == 0 or max_pe == 0:
                 return None
 
             ce_sig = {s: v for s, v in ce_oi.items() if v >= max_ce * 0.10}
             pe_sig = {s: v for s, v in pe_oi.items() if v >= max_pe * 0.10}
-
             if not ce_sig or not pe_sig:
                 return None
 
             ce_wall = max(ce_sig, key=ce_sig.get)
             pe_wall = max(pe_sig, key=pe_sig.get)
 
-            # POC = strike with highest combined CE+PE OI
             poc = max(
                 strike_map.keys(),
                 key=lambda s: strike_map[s].get("ce_oi", 0) + strike_map[s].get("pe_oi", 0)
             )
 
-            # ATM strike for IV computation
+            # ATM last prices for IV (from latest snapshot only)
             atm_strike = min(strikes_sorted, key=lambda s: abs(s - cmp))
             atm_ce_lp = strike_map.get(atm_strike, {}).get("ce_lp", 0.0)
             atm_pe_lp = strike_map.get(atm_strike, {}).get("pe_lp", 0.0)
@@ -254,17 +186,27 @@ def get_wall_migration(supabase) -> dict:
             trade_range_pct = round(trade_range / cmp * 100, 2) if cmp > 0 else 0
 
             return {
-                "ce_wall":       ce_wall,
-                "pe_wall":       pe_wall,
-                "ce_wall_oi":    ce_sig[ce_wall],
-                "pe_wall_oi":    pe_sig[pe_wall],
-                "poc":           poc,
-                "atm_strike":    atm_strike,
-                "atm_ce_lp":     atm_ce_lp,
-                "atm_pe_lp":     atm_pe_lp,
-                "range":         trade_range,
-                "range_pct":     trade_range_pct,
+                "ce_wall":     ce_wall,
+                "pe_wall":     pe_wall,
+                "ce_wall_oi":  ce_sig[ce_wall],
+                "pe_wall_oi":  pe_sig[pe_wall],
+                "poc":         poc,
+                "atm_strike":  atm_strike,
+                "atm_ce_lp":   atm_ce_lp,
+                "atm_pe_lp":   atm_pe_lp,
+                "range":       trade_range,
+                "range_pct":   trade_range_pct,
             }
+
+        # ── Fetch IVR/IVP for all symbols upfront (one batch call) ────────
+        iv_map: dict = {}
+        try:
+            from api.iv_analysis import get_iv_analysis
+            iv_result = get_iv_analysis()
+            iv_map = {r["symbol"]: r for r in (iv_result.get("results") or [])}
+            print(f"[Wall Migration] IV enriched for {len(iv_map)} symbols")
+        except Exception as e:
+            print(f"[Wall Migration] IV enrichment failed (non-fatal): {e}")
 
         # ── Analyze each symbol ───────────────────────────────────────────
         import datetime as _dt
@@ -291,7 +233,6 @@ def get_wall_migration(supabase) -> dict:
 
             alerts = []
 
-            # 1. Price above CE wall — breakout
             if cmp > ce_now:
                 dist = round(cmp - ce_now, 1)
                 alerts.append({
@@ -303,7 +244,6 @@ def get_wall_migration(supabase) -> dict:
                     "color": "red",
                 })
 
-            # 2. Price below PE wall — breakdown
             if cmp < pe_now:
                 dist = round(pe_now - cmp, 1)
                 alerts.append({
@@ -315,7 +255,6 @@ def get_wall_migration(supabase) -> dict:
                     "color": "emerald",
                 })
 
-            # 3. Walls converging
             range_now  = latest_walls["range"]
             range_prev = prev_walls["range"]
             if range_prev > 0:
@@ -330,7 +269,6 @@ def get_wall_migration(supabase) -> dict:
                         "color": "orange",
                     })
 
-            # 4. CE wall shifting up (bullish)
             ce_shift = round(ce_now - ce_prev, 1)
             if ce_shift >= interval:
                 alerts.append({
@@ -342,7 +280,6 @@ def get_wall_migration(supabase) -> dict:
                     "color": "emerald",
                 })
 
-            # 5. CE wall shifting down (bearish pressure)
             if ce_shift <= -interval:
                 alerts.append({
                     "type": "CE_WALL_SHIFT_DOWN",
@@ -353,7 +290,6 @@ def get_wall_migration(supabase) -> dict:
                     "color": "red",
                 })
 
-            # 6. PE wall shifting down (bearish — support abandoned)
             pe_shift = round(pe_now - pe_prev, 1)
             if pe_shift <= -interval:
                 alerts.append({
@@ -365,7 +301,6 @@ def get_wall_migration(supabase) -> dict:
                     "color": "red",
                 })
 
-            # 7. PE wall shifting up (bullish — support building)
             if pe_shift >= interval:
                 alerts.append({
                     "type": "PE_WALL_SHIFT_UP",
@@ -376,7 +311,6 @@ def get_wall_migration(supabase) -> dict:
                     "color": "emerald",
                 })
 
-            # 8. Coiling — narrow range or perfect convergence
             if latest_walls["range_pct"] < 2.0 and (ce_now == pe_now or (cmp > pe_now and cmp < ce_now)):
                 alerts.append({
                     "type": "NARROW_RANGE_COILING",
@@ -395,7 +329,7 @@ def get_wall_migration(supabase) -> dict:
 
             poc = latest_walls.get("poc", 0)
 
-            # ── CMP zone classification ───────────────────────────────────
+            # Zone classification
             if cmp < pe_now:
                 zone = "BELOW_SUPPORT"
                 zone_label = "Below Support"
@@ -409,41 +343,47 @@ def get_wall_migration(supabase) -> dict:
                 zone_label = "In Zone"
                 zone_color = "amber"
 
-            # ── Convergence flag ──────────────────────────────────────────
+            # Convergence flag
             convergence_zone = False
             if poc > 0 and cmp > 0:
                 levels = [ce_now, pe_now, poc]
                 spread = (max(levels) - min(levels)) / cmp * 100
                 convergence_zone = spread <= 2.0
 
-            # ── IV computation from ATM last prices ───────────────────────
-            expiry_str = nearest_expiry.get(sym, "")
-            iv = None
-            try:
-                if expiry_str:
-                    exp_date = _dt.date.fromisoformat(expiry_str)
-                    today_date = _dt.date.fromisoformat(today)
-                    dte = max((exp_date - today_date).days, 1)
-                    T = dte / 365.0
+            # ── IV enrichment — use IVR/IVP from iv_analysis ─────────────
+            iv_data = iv_map.get(sym, {})
+            ivr = iv_data.get("ivr")
+            ivp = iv_data.get("ivp")
+            current_iv = iv_data.get("current_iv")
+            iv_history_days = iv_data.get("iv_history_days", 0)
 
-                    atm_ce_lp = latest_walls.get("atm_ce_lp", 0.0)
-                    atm_pe_lp = latest_walls.get("atm_pe_lp", 0.0)
-
-                    # Prefer CE for IV (CE is more liquid ATM)
-                    # Use average of CE+PE if both available for more accuracy
-                    if atm_ce_lp > 0 and atm_pe_lp > 0:
-                        iv_ce = _black_scholes_iv(atm_ce_lp, cmp, latest_walls["atm_strike"], T, option_type='CE')
-                        iv_pe = _black_scholes_iv(atm_pe_lp, cmp, latest_walls["atm_strike"], T, option_type='PE')
-                        valid = [v for v in [iv_ce, iv_pe] if v is not None]
-                        iv = round(sum(valid) / len(valid), 1) if valid else None
-                    elif atm_ce_lp > 0:
-                        iv = _black_scholes_iv(atm_ce_lp, cmp, latest_walls["atm_strike"], T, option_type='CE')
-                    elif atm_pe_lp > 0:
-                        iv = _black_scholes_iv(atm_pe_lp, cmp, latest_walls["atm_strike"], T, option_type='PE')
-            except Exception:
-                iv = None
-
-            iv_data = _iv_tag(iv)
+            # IVR-based label — market standard thresholds
+            # Falls back to raw IV if not enough history yet
+            if ivr is not None:
+                if ivr >= 75:
+                    iv_label = f"High IVR {ivr:.0f}"
+                    iv_color = "emerald"
+                    iv_note  = f"IVR {ivr:.0f} — IV elevated vs {iv_history_days}d history"
+                elif ivr >= 50:
+                    iv_label = f"Elevated IVR {ivr:.0f}"
+                    iv_color = "amber"
+                    iv_note  = f"IVR {ivr:.0f} — IV above average historically"
+                elif ivr >= 25:
+                    iv_label = f"Normal IVR {ivr:.0f}"
+                    iv_color = "gray"
+                    iv_note  = f"IVR {ivr:.0f} — IV in normal range"
+                else:
+                    iv_label = f"Low IVR {ivr:.0f}"
+                    iv_color = "sky"
+                    iv_note  = f"IVR {ivr:.0f} — IV relatively low vs {iv_history_days}d history"
+            elif current_iv:
+                iv_label = f"IV {current_iv}%"
+                iv_color = "emerald" if current_iv >= 25 else "amber" if current_iv >= 15 else "sky"
+                iv_note  = "Building IVR history..."
+            else:
+                iv_label = None
+                iv_color = None
+                iv_note  = None
 
             signals.append({
                 "symbol":           sym,
@@ -459,10 +399,14 @@ def get_wall_migration(supabase) -> dict:
                 "zone_label":       zone_label,
                 "zone_color":       zone_color,
                 "convergence_zone": convergence_zone,
-                "iv":               iv_data["iv"],
-                "iv_label":         iv_data["iv_label"],
-                "iv_color":         iv_data["iv_color"],
-                "strategy":         iv_data["strategy"],
+                # IV fields — IVR/IVP (market standard) when available
+                "iv":               current_iv,
+                "ivr":              ivr,
+                "ivp":              ivp,
+                "iv_history_days":  iv_history_days,
+                "iv_label":         iv_label,
+                "iv_color":         iv_color,
+                "strategy":         iv_note,
                 "alerts":           alerts,
                 "top_alert":        alerts[0],
                 "alert_count":      len(alerts),
