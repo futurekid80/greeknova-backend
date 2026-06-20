@@ -173,6 +173,12 @@ def get_wall_migration(supabase) -> dict:
             ce_wall = max(ce_sig, key=ce_sig.get)
             pe_wall = max(pe_sig, key=pe_sig.get)
 
+            # POC = strike with highest combined CE+PE OI — same as OI Profile
+            poc = max(
+                strike_map.keys(),
+                key=lambda s: strike_map[s].get("ce_oi", 0) + strike_map[s].get("pe_oi", 0)
+            )
+
             # Allow ce_wall == pe_wall (perfect convergence)
             # Only skip if CE wall is strictly BELOW PE wall (impossible structure)
             if ce_wall < pe_wall:
@@ -186,6 +192,7 @@ def get_wall_migration(supabase) -> dict:
                 "pe_wall":       pe_wall,
                 "ce_wall_oi":    ce_sig[ce_wall],
                 "pe_wall_oi":    pe_sig[pe_wall],
+                "poc":           poc,
                 "range":         trade_range,
                 "range_pct":     trade_range_pct,
             }
@@ -317,18 +324,46 @@ def get_wall_migration(supabase) -> dict:
             sev_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
             alerts.sort(key=lambda a: sev_order.get(a["severity"], 3))
 
+            poc = latest_walls.get("poc", 0)
+
+            # CMP zone classification
+            if cmp < pe_now:
+                zone = "BELOW_SUPPORT"
+                zone_label = "Below Support"
+                zone_color = "red"
+            elif cmp > ce_now:
+                zone = "ABOVE_RESISTANCE"
+                zone_label = "Above Resistance"
+                zone_color = "emerald"
+            else:
+                zone = "IN_ZONE"
+                zone_label = "In Zone"
+                zone_color = "amber"
+
+            # Convergence flag — CE wall, PE wall, POC all within 2% of each other
+            convergence_zone = False
+            if poc > 0 and cmp > 0:
+                levels = [ce_now, pe_now, poc]
+                spread = (max(levels) - min(levels)) / cmp * 100
+                convergence_zone = spread <= 2.0
+
             signals.append({
-                "symbol":       sym,
-                "cmp":          cmp,
-                "ce_wall":      ce_now,
-                "pe_wall":      pe_now,
-                "ce_wall_prev": ce_prev,
-                "pe_wall_prev": pe_prev,
-                "range_pts":    latest_walls["range"],
-                "range_pct":    latest_walls["range_pct"],
-                "alerts":       alerts,
-                "top_alert":    alerts[0],
-                "alert_count":  len(alerts),
+                "symbol":          sym,
+                "cmp":             cmp,
+                "ce_wall":         ce_now,
+                "pe_wall":         pe_now,
+                "poc":             poc,
+                "ce_wall_prev":    ce_prev,
+                "pe_wall_prev":    pe_prev,
+                "range_pts":       latest_walls["range"],
+                "range_pct":       latest_walls["range_pct"],
+                "zone":            zone,
+                "zone_label":      zone_label,
+                "zone_color":      zone_color,
+                "convergence_zone": convergence_zone,
+                "alerts":          alerts,
+                "top_alert":       alerts[0],
+                "alert_count":     len(alerts),
             })
 
         signals.sort(key=lambda s: (
