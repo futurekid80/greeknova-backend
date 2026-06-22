@@ -265,8 +265,9 @@ def get_positional_intelligence(min_consec: int = 0):
                             "tier": tier,
                             "tier_label": tier_label,
                             "rank": rank,
-                            "fut_oi_chg_pct": round(today_oi, 2),
-                            "price_chg_pct": round(today_price, 2),
+                            "today_oi_chg": round(today_oi, 2),
+                            "price_chg": round(today_price, 2),
+                            "net_delta": 0,
                             "oi_history": [round(float(h.get("fut_oi_chg_pct") or 0), 2) for h in last_15],
                         })
 
