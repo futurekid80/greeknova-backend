@@ -14,7 +14,7 @@ from collections import defaultdict
 
 _cache: dict = {}
 _cache_time: float = 0.0
-_CACHE_TTL = 30  # 5 min during market, 3600 post-market
+_CACHE_TTL = 300  # 5 min during market, 3600 post-market
 
 
 def _get_expiry_and_series(today):
@@ -186,6 +186,48 @@ def get_positional_intelligence(min_consec: int = 0):
         except Exception as e:
             print(f"[PI] Live OI fetch failed: {e}")
 
+    # ── 5c. Get Net Delta for stealth stocks (ATM±5 CE/PE OI) ────────────
+    # Fetch latest options snapshot for all symbols, compute PE OI - CE OI
+    net_delta_map = {}
+    try:
+        # Get latest timestamp in today's snapshots
+        latest_snap = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .gte("timestamp", f"{today_str}T03:45:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        if latest_snap.data:
+            latest_ts = latest_snap.data[0]["timestamp"]
+            # Fetch CE/PE OI for all symbols at latest snapshot
+            options_res = supabase.from_("oi_snapshots")\
+                .select("symbol, option_type, strike, oi, last_price")\
+                .eq("timestamp", latest_ts)\
+                .in_("option_type", ["CE", "PE"])\
+                .limit(10000)\
+                .execute()
+            # Group by symbol
+            sym_options: dict = defaultdict(list)
+            for r in (options_res.data or []):
+                sym_options[r["symbol"]].append(r)
+            # Compute net delta per symbol using ATM±5 strikes
+            for sym, opts in sym_options.items():
+                cmp_price = cmp_map.get(sym, 0)
+                if cmp_price <= 0:
+                    continue
+                # Find ATM strike
+                strikes = sorted(set(float(r["strike"]) for r in opts if r.get("strike")))
+                if not strikes:
+                    continue
+                atm = min(strikes, key=lambda x: abs(x - cmp_price))
+                atm_idx = strikes.index(atm)
+                atm_range = strikes[max(0, atm_idx-5): atm_idx+6]
+                pe_oi = sum(int(r.get("oi") or 0) for r in opts if float(r.get("strike") or 0) in atm_range and r["option_type"] == "PE")
+                ce_oi = sum(int(r.get("oi") or 0) for r in opts if float(r.get("strike") or 0) in atm_range and r["option_type"] == "CE")
+                net_delta_map[sym] = pe_oi - ce_oi
+    except Exception as e:
+        print(f"[PI] Net delta fetch failed: {e}")
+
     # ── Build results ─────────────────────────────────────────────────────
     active_conviction = []
     stealth_buildup = []
@@ -279,7 +321,7 @@ def get_positional_intelligence(min_consec: int = 0):
                             "rank": 0,
                             "today_oi_chg": round(today_oi, 2),
                             "price_chg": round(today_price, 2),
-                            "net_delta": 0,
+                            "net_delta": net_delta_map.get(sym, 0),
                             "oi_history": [round(float(h.get("fut_oi_chg_pct") or 0), 2) for h in last_15],
                         })
 
