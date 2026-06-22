@@ -147,18 +147,34 @@ def get_positional_intelligence(min_consec: int = 0):
         try:
             snap_start = f"{today_str}T03:45:00+00:00"  # 9:15 IST
             snap_res = supabase.from_("oi_snapshots")\
-                .select("symbol, instrument_type, open_interest, last_price, timestamp")\
-                .eq("instrument_type", "FUT")\
+                .select("symbol, oi, last_price, timestamp")\
+                .eq("option_type", "FUT")\
                 .gte("timestamp", snap_start)\
                 .order("timestamp", desc=False)\
                 .limit(10000)\
                 .execute()
-            # Build: first snapshot OI and latest snapshot OI per symbol
             first_oi = {}
             latest_oi = {}
             latest_price = {}
             open_price = {}
-            # Group by symbol+timestamp, keep only highest OI row (= current month expiry)
+            snap_by_ts: dict = {}
+            for r in (snap_res.data or []):
+                s = r["symbol"]
+                oi = int(r.get("oi") or 0)
+                ts = r.get("timestamp", "")
+                key = f"{s}_{ts}"
+                if oi > snap_by_ts.get(key, {}).get("oi", 0):
+                    snap_by_ts[key] = {"symbol": s, "oi": oi, "lp": float(r.get("last_price") or 0)}
+            for row in snap_by_ts.values():
+                s = row["symbol"]
+                oi = row["oi"]
+                lp = row["lp"]
+                if s not in first_oi and oi > 0:
+                    first_oi[s] = oi
+                    open_price[s] = lp
+                if oi > 0:
+                    latest_oi[s] = oi
+                    latest_price[s] = lp
             snap_by_ts: dict = {}
             for r in (snap_res.data or []):
                 s = r["symbol"]
