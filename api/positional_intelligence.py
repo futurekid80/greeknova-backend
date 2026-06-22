@@ -141,6 +141,44 @@ def get_positional_intelligence(min_consec: int = 0):
     except:
         cpr_map = {}
 
+  # ── 5b. Get live intraday FUT OI change (market hours only) ──────────
+    live_oi_map = {}
+    if is_market:
+        try:
+            snap_start = f"{today_str}T03:45:00+00:00"  # 9:15 IST
+            snap_res = supabase.from_("oi_snapshots")\
+                .select("symbol, instrument_type, open_interest, last_price, timestamp")\
+                .eq("instrument_type", "FUT")\
+                .gte("timestamp", snap_start)\
+                .order("timestamp", desc=False)\
+                .limit(10000)\
+                .execute()
+            # Build: first snapshot OI and latest snapshot OI per symbol
+            first_oi = {}
+            latest_oi = {}
+            latest_price = {}
+            open_price = {}
+            for r in (snap_res.data or []):
+                s = r["symbol"]
+                oi = int(r.get("open_interest") or 0)
+                lp = float(r.get("last_price") or 0)
+                if s not in first_oi and oi > 0:
+                    first_oi[s] = oi
+                    open_price[s] = lp
+                if oi > 0:
+                    latest_oi[s] = oi
+                    latest_price[s] = lp
+            for s in first_oi:
+                if first_oi[s] > 0:
+                    oi_chg = ((latest_oi[s] - first_oi[s]) / first_oi[s]) * 100
+                    price_chg = ((latest_price[s] - open_price[s]) / open_price[s]) * 100 if open_price[s] > 0 else 0
+                    live_oi_map[s] = {
+                        "fut_oi_chg_pct": round(oi_chg, 2),
+                        "price_chg_pct": round(price_chg, 2),
+                    }
+        except Exception as e:
+            print(f"[PI] Live OI fetch failed: {e}")
+
     # ── Build results ─────────────────────────────────────────────────────
     active_conviction = []
     stealth_buildup = []
@@ -205,13 +243,20 @@ def get_positional_intelligence(min_consec: int = 0):
         # ── Stealth Buildup ───────────────────────────────────────────────
         if len(history) >= 8:
             last_15 = history[-15:]
-            today_data = next((h for h in reversed(last_15) if h["trade_date"] == today_str), None)
-            if today_data:
-                today_oi = float(today_data.get("fut_oi_chg_pct") or 0)
-                today_price = float(today_data.get("price_chg_pct") or 0)
-                if today_oi > 0 and today_price > -0.3:
+            # During market hours use live snapshot data, else use daily_oi_summary
+            if is_market and sym in live_oi_map:
+                today_oi = live_oi_map[sym].get("fut_oi_chg_pct", 0)
+                today_price = live_oi_map[sym].get("price_chg_pct", 0)
+            else:
+                today_data = next((h for h in reversed(last_15) if h["trade_date"] == today_str), None)
+                if not today_data:
+                    today_data = history[-1] if history else None
+                today_oi = float((today_data or {}).get("fut_oi_chg_pct") or 0)
+                today_price = float((today_data or {}).get("price_chg_pct") or 0)
+            if today_oi > 0 and today_price > -0.3:
+                if True:
                     all_oi = sorted([float(h.get("fut_oi_chg_pct") or 0) for h in last_15 if float(h.get("fut_oi_chg_pct") or 0) > 0], reverse=True)
-                    rank = all_oi.index(today_oi) + 1 if today_oi in all_oi else 99
+                    rank = next((i + 1 for i, v in enumerate(all_oi) if today_oi >= v), len(all_oi) + 1)
                     tier, tier_label = _classify_stealth_tier(rank, abs(today_price), True)
                     if tier:
                         stealth_buildup.append({
