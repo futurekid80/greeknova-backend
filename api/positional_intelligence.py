@@ -284,20 +284,14 @@ def get_positional_intelligence(min_consec: int = 0):
                 today_price = float((today_data or {}).get("price_chg_pct") or 0)
             if today_oi > 0 and today_price > -0.3:
                 if True:
-                    if is_market:
-                        # Intraday: use absolute OI threshold (EOD rank comparison doesn't apply)
-                        if today_oi >= 2.0 and abs(today_price) <= 0.5:
-                            tier, tier_label = "ELITE", "Elite"
-                        elif today_oi >= 1.5 and abs(today_price) <= 1.0:
-                            tier, tier_label = "STRONG", "Strong"
-                        elif today_oi >= 1.0 and abs(today_price) <= 1.5:
-                            tier, tier_label = "WATCH", "Watch"
-                        else:
-                            tier, tier_label = None, None
+                    if today_oi >= 2.0 and abs(today_price) <= 0.5:
+                        tier, tier_label = "ELITE", "Elite"
+                    elif today_oi >= 1.5 and abs(today_price) <= 1.0:
+                        tier, tier_label = "STRONG", "Strong"
+                    elif today_oi >= 1.0 and abs(today_price) <= 1.5:
+                        tier, tier_label = "WATCH", "Watch"
                     else:
-                        all_oi = sorted([float(h.get("fut_oi_chg_pct") or 0) for h in last_15 if float(h.get("fut_oi_chg_pct") or 0) > 0], reverse=True)
-                        rank = next((i + 1 for i, v in enumerate(all_oi) if today_oi >= v), len(all_oi) + 1)
-                        tier, tier_label = _classify_stealth_tier(rank, abs(today_price), True)
+                        tier, tier_label = None, None
                     if tier:
                         stealth_buildup.append({
                             **base,
