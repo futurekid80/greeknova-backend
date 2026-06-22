@@ -2,8 +2,10 @@ from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
 
 # Persistence tracking — survives across calls within same process
-_oi_persistence: dict = {}   # tradingsymbol -> {"first_seen": ts, "count": int, "last_date": str}
+_oi_persistence: dict = {}   # tradingsymbol -> {"first_seen": ts, "snapshots": set, "all_snapshots": set, "last_date": str}
 _vol_persistence: dict = {}
+_all_snapshots_today: set = set()  # all timestamps seen today
+_all_snapshots_date: str = ""
 
 def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
     global _oi_persistence, _vol_persistence
@@ -48,6 +50,13 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             return {"error": "Need at least 2 snapshots", "oi_spikes": [], "vol_spikes": []}
 
     ts_new = timestamps[-1]
+
+    # Track all snapshots seen today for gap computation
+    global _all_snapshots_today, _all_snapshots_date
+    if _all_snapshots_date != today:
+        _all_snapshots_today = set()
+        _all_snapshots_date = today
+    _all_snapshots_today.update(timestamps)
     ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
     target_old = ts_new_dt - timedelta(minutes=5)
     ts_old = min(timestamps[:-1], key=lambda t: abs(
@@ -215,6 +224,11 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             _oi_persistence[ts_key]["snapshots"].add(ts_new)
             persist = _oi_persistence[ts_key]
 
+            # Gaps = snapshots since first_seen where signal was absent
+            first_seen_ts = persist["first_seen"]
+            possible = {t for t in _all_snapshots_today if t >= first_seen_ts}
+            gaps = len(possible) - len(persist["snapshots"])
+
             oi_spikes.append({
                 **base,
                 "old_oi":          old_oi,
@@ -226,6 +240,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
                 "interpretation":  interp,
                 "first_seen":      to_ist(persist["first_seen"]),
                 "snapshot_count":  len(persist["snapshots"]),
+                "gaps":            max(0, gaps),
             })
 
         # ── Volume Spike ──────────────────────────────────────────────────────
@@ -243,6 +258,10 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             _vol_persistence[ts_key]["snapshots"].add(ts_new)
             vpersist = _vol_persistence[ts_key]
 
+            first_seen_ts = vpersist["first_seen"]
+            possible = {t for t in _all_snapshots_today if t >= first_seen_ts}
+            vgaps = len(possible) - len(vpersist["snapshots"])
+
             vol_spikes.append({
                 **base,
                 "old_volume":      old_vol,
@@ -252,6 +271,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
                 "vol_signal":      vol_signal,
                 "first_seen":      to_ist(vpersist["first_seen"]),
                 "snapshot_count":  len(vpersist["snapshots"]),
+                "gaps":            max(0, vgaps),
             })
 
     oi_spikes.sort(key=lambda x: abs(x["oi_pct"]), reverse=True)
