@@ -14,7 +14,7 @@ from collections import defaultdict
 
 _cache: dict = {}
 _cache_time: float = 0.0
-_CACHE_TTL = 300  # 5 min during market, 3600 post-market
+_CACHE_TTL = 30  # 5 min during market, 3600 post-market
 
 
 def _get_expiry_and_series(today):
