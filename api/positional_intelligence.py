@@ -304,7 +304,7 @@ def get_positional_intelligence(min_consec: int = 0):
                             "signal": "STEALTH",
                             "tier": tier,
                             "tier_label": tier_label,
-                            "rank": rank,
+                            "rank": 0,
                             "today_oi_chg": round(today_oi, 2),
                             "price_chg": round(today_price, 2),
                             "net_delta": 0,
