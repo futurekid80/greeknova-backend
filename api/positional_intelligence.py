@@ -159,8 +159,7 @@ def get_positional_intelligence(min_consec: int = 0):
             latest_price = {}
             open_price = {}
             # Group by symbol+timestamp, keep only highest OI row (= current month expiry)
-            from collections import defaultdict
-            snap_by_ts: dict = defaultdict(dict)
+            snap_by_ts: dict = {}
             for r in (snap_res.data or []):
                 s = r["symbol"]
                 oi = int(r.get("oi") or 0)
