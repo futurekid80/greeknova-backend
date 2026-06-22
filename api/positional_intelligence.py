@@ -158,13 +158,27 @@ def get_positional_intelligence(min_consec: int = 0):
             latest_oi = {}
             latest_price = {}
             open_price = {}
+            # Group by symbol+timestamp, keep only highest OI row (= current month expiry)
+            from collections import defaultdict
+            snap_by_ts: dict = defaultdict(dict)
             for r in (snap_res.data or []):
                 s = r["symbol"]
-                oi = int(r.get("open_interest") or 0)
-                lp = float(r.get("last_price") or 0)
+                oi = int(r.get("oi") or 0)
+                ts = r.get("timestamp", "")
+                key = f"{s}_{ts}"
+                if oi > snap_by_ts.get(key, {}).get("oi", 0):
+                    snap_by_ts[key] = {"symbol": s, "oi": oi, "lp": float(r.get("last_price") or 0), "ts": ts}
+
+            for row in snap_by_ts.values():
+                s = row["symbol"]
+                oi = row["oi"]
+                lp = row["lp"]
                 if s not in first_oi and oi > 0:
                     first_oi[s] = oi
                     open_price[s] = lp
+                if oi > 0:
+                    latest_oi[s] = oi
+                    latest_price[s] = lp
                 if oi > 0:
                     latest_oi[s] = oi
                     latest_price[s] = lp
