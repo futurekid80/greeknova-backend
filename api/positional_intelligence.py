@@ -175,28 +175,6 @@ def get_positional_intelligence(min_consec: int = 0):
                 if oi > 0:
                     latest_oi[s] = oi
                     latest_price[s] = lp
-            snap_by_ts: dict = {}
-            for r in (snap_res.data or []):
-                s = r["symbol"]
-                oi = int(r.get("oi") or 0)
-                ts = r.get("timestamp", "")
-                key = f"{s}_{ts}"
-                if oi > snap_by_ts.get(key, {}).get("oi", 0):
-                    snap_by_ts[key] = {"symbol": s, "oi": oi, "lp": float(r.get("last_price") or 0), "ts": ts}
-
-            for row in snap_by_ts.values():
-                s = row["symbol"]
-                oi = row["oi"]
-                lp = row["lp"]
-                if s not in first_oi and oi > 0:
-                    first_oi[s] = oi
-                    open_price[s] = lp
-                if oi > 0:
-                    latest_oi[s] = oi
-                    latest_price[s] = lp
-                if oi > 0:
-                    latest_oi[s] = oi
-                    latest_price[s] = lp
             for s in first_oi:
                 if first_oi[s] > 0:
                     oi_chg = ((latest_oi[s] - first_oi[s]) / first_oi[s]) * 100
