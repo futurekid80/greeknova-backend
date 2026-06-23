@@ -291,30 +291,27 @@ def get_vol_oi_breakout(supabase):
             sym_data[sym]["volume"].append(vol)
             sym_data[sym]["prices"].append(price)
 
-        # ── Step 3: 5-day historical volume ───────────────────────────────
-        hist_start = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%d')
-        hist_rows = supabase.from_("oi_snapshots")\
-            .select("symbol, volume, timestamp")\
-            .eq("option_type", "FUT")\
-            .gte("timestamp", f"{hist_start}T00:00:00+00:00")\
-            .lt("timestamp",  f"{today}T00:00:00+00:00")\
-            .gte("volume", 1000)\
-            .limit(50000)\
+       # ── Step 3: 5-day historical volume from daily_oi_summary ─────────
+        hist_start = (datetime.now(timezone.utc) - timedelta(days=10)).strftime('%Y-%m-%d')
+        hist_rows = supabase.from_("daily_oi_summary")\
+            .select("symbol, trade_date, fut_vol")\
+            .gte("trade_date", hist_start)\
+            .lt("trade_date", today)\
+            .gt("fut_vol", 0)\
+            .limit(1000)\
             .execute()
 
-        sym_date_vol = {}
+        from collections import defaultdict
+        sym_date_vol = defaultdict(list)
         for r in (hist_rows.data or []):
-            sym      = r["symbol"]
-            date_str = str(r["timestamp"])[:10]
-            vol      = int(r.get("volume") or 0)
-            if sym not in sym_date_vol:
-                sym_date_vol[sym] = {}
-            if vol > sym_date_vol[sym].get(date_str, 0):
-                sym_date_vol[sym][date_str] = vol
+            sym = r["symbol"]
+            vol = int(r.get("fut_vol") or 0)
+            if vol > 0:
+                sym_date_vol[sym].append(vol)
 
         hist_avg_vol = {}
-        for sym, date_vols in sym_date_vol.items():
-            sorted_vols = sorted(date_vols.values(), reverse=True)[:5]
+        for sym, vols in sym_date_vol.items():
+            sorted_vols = sorted(vols, reverse=True)[:5]
             if sorted_vols:
                 hist_avg_vol[sym] = sum(sorted_vols) / len(sorted_vols)
 
