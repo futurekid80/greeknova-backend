@@ -169,10 +169,36 @@ def get_eod_report(supabase, date: str = None):
                     elif "DII" in cat:
                         cash_data["DII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
                 print(f"[EOD] Cash: FII={cash_data.get('FII',{}).get('net')} DII={cash_data.get('DII',{}).get('net')}")
+                # Save to Supabase for historical access
+                if cash_data.get('FII') or cash_data.get('DII'):
+                    try:
+                        supabase.from_("fii_dii_cash").upsert({
+                            "trade_date": date,
+                            "fii_buy":  cash_data.get('FII', {}).get('buy'),
+                            "fii_sell": cash_data.get('FII', {}).get('sell'),
+                            "fii_net":  cash_data.get('FII', {}).get('net'),
+                            "dii_buy":  cash_data.get('DII', {}).get('buy'),
+                            "dii_sell": cash_data.get('DII', {}).get('sell'),
+                            "dii_net":  cash_data.get('DII', {}).get('net'),
+                        }).execute()
+                        print(f"[EOD] Cash saved to Supabase for {date}")
+                    except Exception as se:
+                        print(f"[EOD] Cash save failed: {se}")
         except Exception as e:
             print(f"[EOD] Cash fetch failed: {e}")
     else:
-        print(f"[EOD] Skipping NSE cash for historical date {date}")
+        # Try loading from Supabase for historical dates
+        try:
+            saved = supabase.from_("fii_dii_cash").select("*").eq("trade_date", date).limit(1).execute()
+            if saved.data:
+                r = saved.data[0]
+                if r.get("fii_net") is not None:
+                    cash_data["FII"] = {"buy": float(r["fii_buy"] or 0), "sell": float(r["fii_sell"] or 0), "net": float(r["fii_net"] or 0)}
+                if r.get("dii_net") is not None:
+                    cash_data["DII"] = {"buy": float(r["dii_buy"] or 0), "sell": float(r["dii_sell"] or 0), "net": float(r["dii_net"] or 0)}
+                print(f"[EOD] Cash loaded from Supabase for {date}")
+        except Exception as e:
+            print(f"[EOD] Cash load failed: {e}")
 
     # ── 7. Available dates for date picker ────────────────────────────────────
 
