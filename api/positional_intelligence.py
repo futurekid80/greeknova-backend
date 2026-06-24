@@ -321,7 +321,7 @@ def get_positional_intelligence(min_consec: int = 0):
                             "rank": 0,
                             "today_oi_chg": round(today_oi, 2),
                             "price_chg": round(today_price, 2),
-                            "net_delta": net_delta_map.get(sym, 0),
+                            "net_delta": net_delta_map.get(sym, None),
                             "oi_history": [round(float(h.get("fut_oi_chg_pct") or 0), 2) for h in last_15],
                         })
 
