@@ -1131,6 +1131,12 @@ def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
 
+@app.get("/rollover")
+def rollover():
+    from api.rollover import get_rollover
+    from utils.db import get_supabase
+    return get_rollover(get_supabase())
+
 @app.get("/eod-report")
 def eod_report(date: str = None):
     from api.eod_report import get_eod_report
