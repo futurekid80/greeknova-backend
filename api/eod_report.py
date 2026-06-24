@@ -147,50 +147,25 @@ def get_eod_report(supabase, date: str = None):
     cash_data = {}
     try:
         import requests
-        import time
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "Connection": "keep-alive",
-            "DNT": "1",
-            "Referer": "https://www.nseindia.com/reports/fii-dii",
-        }
-        session = requests.Session()
-        # First visit homepage to get cookies
-        session.get("https://www.nseindia.com", headers=headers, timeout=8)
-        time.sleep(1)
-        # Then hit the reports page
-        session.get("https://www.nseindia.com/reports/fii-dii", headers=headers, timeout=8)
-        time.sleep(1)
-        # Now fetch the API
-        res = session.get(
+        res = requests.get(
             "https://www.nseindia.com/api/fiidiiTradeReact",
-            headers=headers,
-            timeout=8
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Accept": "application/json",
+                "Referer": "https://www.nseindia.com/",
+            },
+            timeout=4
         )
-        print(f"[EOD] NSE cash API status: {res.status_code}")
+        print(f"[EOD] NSE cash status: {res.status_code}")
         if res.status_code == 200:
-            nse_data = res.json()
-            for row in nse_data:
+            for row in res.json():
                 if row.get("category") == "FII/FPI *":
-                    cash_data["FII"] = {
-                        "buy": float(row.get("buyValue", 0)),
-                        "sell": float(row.get("sellValue", 0)),
-                        "net": float(row.get("netValue", 0)),
-                    }
+                    cash_data["FII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
                 elif row.get("category") == "DII":
-                    cash_data["DII"] = {
-                        "buy": float(row.get("buyValue", 0)),
-                        "sell": float(row.get("sellValue", 0)),
-                        "net": float(row.get("netValue", 0)),
-                    }
-            print(f"[EOD] Cash data: FII={cash_data.get('FII', {}).get('net')} DII={cash_data.get('DII', {}).get('net')}")
-        else:
-            print(f"[EOD] NSE cash API failed: {res.text[:200]}")
+                    cash_data["DII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
+            print(f"[EOD] Cash: FII={cash_data.get('FII',{}).get('net')} DII={cash_data.get('DII',{}).get('net')}")
     except Exception as e:
-        print(f"[EOD] Cash data fetch failed: {e}")
+        print(f"[EOD] Cash fetch failed: {e}")
 
     # ── 7. Available dates for date picker ────────────────────────────────────
 
