@@ -172,27 +172,7 @@ def get_eod_report(supabase, date: str = None):
         except Exception as e:
             print(f"[EOD] Cash fetch failed: {e}")
     else:
-        print(f"[EOD] Skipping NSE cash fetch for historical date {date}")
-            "https://www.nseindia.com/api/fiidiiTradeReact",
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                "Accept": "application/json",
-                "Referer": "https://www.nseindia.com/",
-            },
-            timeout=4
-        )
-        print(f"[EOD] NSE cash status: {res.status_code}")
-        if res.status_code == 200:
-            for row in res.json():
-                cat = str(row.get("category") or "").strip()
-                print(f"[EOD] Category found: '{cat}'")
-                if "FII" in cat or "FPI" in cat:
-                    cash_data["FII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
-                elif "DII" in cat:
-                    cash_data["DII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
-            print(f"[EOD] Cash: FII={cash_data.get('FII',{}).get('net')} DII={cash_data.get('DII',{}).get('net')}")
-    except Exception as e:
-        print(f"[EOD] Cash fetch failed: {e}")
+        print(f"[EOD] Skipping NSE cash for historical date {date}")
 
     # ── 7. Available dates for date picker ────────────────────────────────────
 
