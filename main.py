@@ -1131,6 +1131,12 @@ def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
 
+@app.get("/eod-report")
+def eod_report(date: str = None):
+    from api.eod_report import get_eod_report
+    from utils.db import get_supabase
+    return get_eod_report(get_supabase(), date)
+
 @app.get("/positional-intelligence")
 def positional_intelligence(min_consec: int = 0):
     from api.positional_intelligence import get_positional_intelligence
