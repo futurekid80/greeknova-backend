@@ -21,15 +21,30 @@ def get_rollover(supabase):
 
     # ── 1. Today's OI for both expiries ───────────────────────────────────────
     try:
-        today_res = supabase.from_("oi_snapshots")\
-            .select("symbol, expiry, oi, last_price, timestamp")\
+        # Get latest timestamp first
+        ts_res = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
             .eq("option_type", "FUT")\
+            .eq("symbol", "NIFTY")\
             .in_("expiry", [curr_expiry, next_expiry])\
             .gte("timestamp", f"{today}T03:45:00+00:00")\
             .order("timestamp", desc=True)\
-            .limit(5000)\
+            .limit(1)\
             .execute()
-        today_rows = today_res.data or []
+        latest_ts = ts_res.data[0]["timestamp"] if ts_res.data else None
+
+        if not latest_ts:
+            today_rows = []
+        else:
+            today_res = supabase.from_("oi_snapshots")\
+                .select("symbol, expiry, oi, last_price")\
+                .eq("option_type", "FUT")\
+                .in_("expiry", [curr_expiry, next_expiry])\
+                .eq("timestamp", latest_ts)\
+                .limit(1000)\
+                .execute()
+            today_rows = today_res.data or []
+            print(f"[ROLLOVER] Today rows: {len(today_rows)} at {latest_ts}")
     except Exception as e:
         print(f"[ROLLOVER] Today fetch failed: {e}")
         today_rows = []
@@ -55,16 +70,31 @@ def get_rollover(supabase):
 
     # ── 2. Previous series benchmark OI ───────────────────────────────────────
     try:
-        prev_res = supabase.from_("oi_snapshots")\
-            .select("symbol, expiry, oi")\
+        # Get one snapshot from prev bench date
+        prev_ts_res = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
             .eq("option_type", "FUT")\
+            .eq("symbol", "NIFTY")\
             .in_("expiry", [prev_curr_expiry, prev_next_expiry])\
             .gte("timestamp", f"{prev_bench_date}T03:45:00+00:00")\
             .lt("timestamp",  f"{prev_bench_date}T12:00:00+00:00")\
             .order("timestamp", desc=True)\
-            .limit(3000)\
+            .limit(1)\
             .execute()
-        prev_rows = prev_res.data or []
+        prev_ts = prev_ts_res.data[0]["timestamp"] if prev_ts_res.data else None
+
+        if not prev_ts:
+            prev_rows = []
+        else:
+            prev_res = supabase.from_("oi_snapshots")\
+                .select("symbol, expiry, oi")\
+                .eq("option_type", "FUT")\
+                .in_("expiry", [prev_curr_expiry, prev_next_expiry])\
+                .eq("timestamp", prev_ts)\
+                .limit(1000)\
+                .execute()
+            prev_rows = prev_res.data or []
+            print(f"[ROLLOVER] Prev rows: {len(prev_rows)} at {prev_ts}")
     except Exception as e:
         print(f"[ROLLOVER] Prev fetch failed: {e}")
         prev_rows = []
