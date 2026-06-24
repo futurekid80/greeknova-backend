@@ -143,6 +143,38 @@ def get_eod_report(supabase, date: str = None):
     except:
         top_signals = []
 
+    # ── 6b. FII/DII Cash market data from NSE ────────────────────────────────
+    cash_data = {}
+    try:
+        import requests
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Referer": "https://www.nseindia.com/",
+        }
+        session = requests.Session()
+        session.get("https://www.nseindia.com", headers=headers, timeout=5)
+        res = session.get("https://www.nseindia.com/api/fiidiiTradeReact", headers=headers, timeout=5)
+        if res.status_code == 200:
+            nse_data = res.json()
+            for row in nse_data:
+                if row.get("category") == "FII/FPI *":
+                    cash_data["FII"] = {
+                        "buy": float(row.get("buyValue", 0)),
+                        "sell": float(row.get("sellValue", 0)),
+                        "net": float(row.get("netValue", 0)),
+                    }
+                elif row.get("category") == "DII":
+                    cash_data["DII"] = {
+                        "buy": float(row.get("buyValue", 0)),
+                        "sell": float(row.get("sellValue", 0)),
+                        "net": float(row.get("netValue", 0)),
+                    }
+    except Exception as e:
+        print(f"[EOD] Cash data fetch failed: {e}")
+
+    # ── 7. Available dates for date picker ────────────────────────────────────
+
     # ── 7. Available dates for date picker ────────────────────────────────────
     try:
         dates_res = supabase.from_("daily_oi_summary")\
@@ -188,4 +220,5 @@ def get_eod_report(supabase, date: str = None):
         "iv_data": iv_data,
         "participant_flow": pf_data,
         "top_signals": [fmt_signal(r) for r in top_signals],
+        "cash_flow": cash_data,
     }
