@@ -147,14 +147,30 @@ def get_eod_report(supabase, date: str = None):
     cash_data = {}
     try:
         import requests
+        import time
         headers = {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Accept": "application/json",
-            "Referer": "https://www.nseindia.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "DNT": "1",
+            "Referer": "https://www.nseindia.com/reports/fii-dii",
         }
         session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=5)
-        res = session.get("https://www.nseindia.com/api/fiidiiTradeReact", headers=headers, timeout=5)
+        # First visit homepage to get cookies
+        session.get("https://www.nseindia.com", headers=headers, timeout=8)
+        time.sleep(1)
+        # Then hit the reports page
+        session.get("https://www.nseindia.com/reports/fii-dii", headers=headers, timeout=8)
+        time.sleep(1)
+        # Now fetch the API
+        res = session.get(
+            "https://www.nseindia.com/api/fiidiiTradeReact",
+            headers=headers,
+            timeout=8
+        )
+        print(f"[EOD] NSE cash API status: {res.status_code}")
         if res.status_code == 200:
             nse_data = res.json()
             for row in nse_data:
@@ -170,6 +186,9 @@ def get_eod_report(supabase, date: str = None):
                         "sell": float(row.get("sellValue", 0)),
                         "net": float(row.get("netValue", 0)),
                     }
+            print(f"[EOD] Cash data: FII={cash_data.get('FII', {}).get('net')} DII={cash_data.get('DII', {}).get('net')}")
+        else:
+            print(f"[EOD] NSE cash API failed: {res.text[:200]}")
     except Exception as e:
         print(f"[EOD] Cash data fetch failed: {e}")
 
