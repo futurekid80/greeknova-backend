@@ -143,11 +143,36 @@ def get_eod_report(supabase, date: str = None):
     except:
         top_signals = []
 
-    # ── 6b. FII/DII Cash market data from NSE ────────────────────────────────
+   # ── 6b. FII/DII Cash market data from NSE (today only) ───────────────────
     cash_data = {}
-    try:
-        import requests
-        res = requests.get(
+    import pytz as _pytz
+    _ist = _pytz.timezone("Asia/Kolkata")
+    _today = datetime.now(_ist).strftime('%Y-%m-%d')
+    if date == _today:
+        try:
+            import requests
+            res = requests.get(
+                "https://www.nseindia.com/api/fiidiiTradeReact",
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Accept": "application/json",
+                    "Referer": "https://www.nseindia.com/",
+                },
+                timeout=4
+            )
+            print(f"[EOD] NSE cash status: {res.status_code}")
+            if res.status_code == 200:
+                for row in res.json():
+                    cat = str(row.get("category") or "").strip()
+                    if "FII" in cat or "FPI" in cat:
+                        cash_data["FII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
+                    elif "DII" in cat:
+                        cash_data["DII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
+                print(f"[EOD] Cash: FII={cash_data.get('FII',{}).get('net')} DII={cash_data.get('DII',{}).get('net')}")
+        except Exception as e:
+            print(f"[EOD] Cash fetch failed: {e}")
+    else:
+        print(f"[EOD] Skipping NSE cash fetch for historical date {date}")
             "https://www.nseindia.com/api/fiidiiTradeReact",
             headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
