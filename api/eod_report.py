@@ -200,6 +200,35 @@ def get_eod_report(supabase, date: str = None):
         except Exception as e:
             print(f"[EOD] Cash load failed: {e}")
 
+    # ── 7. Delivery data ─────────────────────────────────────────────────────
+    try:
+        del_res = supabase.from_("delivery_data")\
+            .select("symbol, delivery_pct, deliverable_qty")\
+            .eq("trade_date", date)\
+            .order("delivery_pct", desc=True)\
+            .execute()
+        delivery_rows = del_res.data or []
+        # Enrich stealth with delivery %
+        delivery_map = {r["symbol"]: float(r["delivery_pct"] or 0) for r in delivery_rows}
+        for s in stealth:
+            s["delivery_pct"] = delivery_map.get(s["symbol"], None)
+        # High delivery stocks (≥60%) for EOD section
+        high_delivery = [
+            {
+                "symbol": r["symbol"],
+                "delivery_pct": float(r["delivery_pct"] or 0),
+                "deliverable_L": round(int(r["deliverable_qty"] or 0) / 100000, 1),
+            }
+            for r in delivery_rows if float(r["delivery_pct"] or 0) >= 60
+        ][:10]
+        avg_delivery = round(sum(float(r["delivery_pct"] or 0) for r in delivery_rows) / len(delivery_rows), 1) if delivery_rows else None
+    except Exception as e:
+        print(f"[EOD] Delivery fetch failed: {e}")
+        high_delivery = []
+        avg_delivery = None
+        for s in stealth:
+            s["delivery_pct"] = None
+
     # ── 7. Available dates for date picker ────────────────────────────────────
 
     # ── 7. Available dates for date picker ────────────────────────────────────
@@ -248,4 +277,8 @@ def get_eod_report(supabase, date: str = None):
         "participant_flow": pf_data,
         "top_signals": [fmt_signal(r) for r in top_signals],
         "cash_flow": cash_data,
+        "delivery": {
+            "high_delivery": high_delivery,
+            "avg_delivery_pct": avg_delivery,
+        },
     }
