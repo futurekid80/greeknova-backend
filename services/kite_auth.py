@@ -112,11 +112,13 @@ def _do_login() -> object:
     for _ in range(5):
         if 'request_token' in redirect_url:
             break
+        if not redirect_url:
+            raise Exception(f"Empty redirect URL — Kite may be blocking Railway IP. Use Mac login instead.")
         res = session.get(redirect_url, allow_redirects=False)
         redirect_url = res.headers.get('Location', '')
 
     if 'request_token' not in redirect_url:
-        raise Exception(f"Could not get request_token from redirect: {redirect_url}")
+        raise Exception(f"Could not get request_token from redirect. Railway IP may be blocked by Kite. Token will load from Supabase instead.")
 
     from urllib.parse import urlparse, parse_qs
     parsed = urlparse(redirect_url)
