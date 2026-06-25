@@ -1208,6 +1208,12 @@ def market_status():
     from utils.market_calendar import get_market_status
     return get_market_status()
 
+@app.get("/delivery-confluence")
+def delivery_confluence():
+    from api.delivery_confluence import get_delivery_confluence
+    from utils.db import get_supabase
+    return get_delivery_confluence(get_supabase())
+
 @app.get("/rollover")
 def rollover():
     from api.rollover import get_rollover
