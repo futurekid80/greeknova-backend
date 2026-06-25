@@ -208,6 +208,68 @@ def keepalive_ping():
     except Exception as e:
         print(f"⚠️ Keepalive failed: {e}")
 
+def fetch_delivery_data():
+    """Fetch today's delivery data from NSE bhav copy after market close."""
+    import pytz, zipfile, io, requests
+    from datetime import datetime
+    ist = pytz.timezone('Asia/Kolkata')
+    today = datetime.now(ist).date()
+    if today.weekday() >= 5:
+        return
+    from utils.market_calendar import is_trading_day
+    if not is_trading_day(today):
+        return
+    try:
+        from utils.db import get_supabase
+        supabase = get_supabase()
+        # Check if already fetched
+        existing = supabase.from_("delivery_data").select("symbol").eq("trade_date", today.isoformat()).limit(1).execute()
+        if existing.data:
+            print(f"[Delivery] Already have data for {today}")
+            return
+        SYMBOLS = ["RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN","BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","TITAN","SUNPHARMA","ULTRACEMCO","BAJFINANCE","WIPRO","HCLTECH","TATACONSUM","TATASTEEL","ADANIENT","POWERGRID","NTPC","ONGC","JSWSTEEL","COALINDIA","BAJAJFINSV","TECHM","APOLLOHOSP","BAJAJ-AUTO","BPCL","BRITANNIA","CIPLA","DRREDDY","EICHERMOT","GRASIM","HEROMOTOCO","HINDALCO","HDFCLIFE","INDUSINDBK","JIOFIN","M&M","NESTLEIND","SBILIFE","SHRIRAMFIN","TRENT","ADANIPORTS","BANKBARODA","BEL","CANBK","CHOLAFIN","DLF","GAIL","HAVELLS","HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL","PAYTM","NYKAA","PERSISTENT","DIXON"]
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "*/*",
+            "Referer": "https://www.nseindia.com/",
+        }
+        date_str = today.strftime('%Y%m%d')
+        url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date_str}_F_0000.csv.zip"
+        res = requests.get(url, headers=headers, timeout=15)
+        if res.status_code != 200:
+            print(f"[Delivery] HTTP {res.status_code} for {today}")
+            return
+        z = zipfile.ZipFile(io.BytesIO(res.content))
+        content = z.read(z.namelist()[0]).decode('utf-8')
+        lines = content.strip().split('\n')
+        header = [h.strip() for h in lines[0].split(',')]
+        sym_idx = next(i for i,h in enumerate(header) if 'TckrSymb' in h)
+        trd_idx = next(i for i,h in enumerate(header) if 'TtlTradgVol' in h)
+        del_idx = next(i for i,h in enumerate(header) if 'DlvrblQty' in h)
+        del_pct_idx = next((i for i,h in enumerate(header) if 'DlvrblPct' in h), None)
+        series_idx = next((i for i,h in enumerate(header) if 'SctySrs' in h), None)
+        records = []
+        for line in lines[1:]:
+            parts = [p.strip().strip('"') for p in line.split(',')]
+            if len(parts) <= max(sym_idx, trd_idx, del_idx): continue
+            sym = parts[sym_idx].upper()
+            if sym not in SYMBOLS: continue
+            if series_idx and parts[series_idx].strip() not in ('EQ','BE','BZ'): continue
+            try:
+                traded = int(float(parts[trd_idx] or 0))
+                deliv = int(float(parts[del_idx] or 0))
+                pct = float(parts[del_pct_idx] or 0) if del_pct_idx else (round(deliv/traded*100,2) if traded>0 else 0)
+                records.append({"trade_date": today.isoformat(), "symbol": sym, "traded_qty": traded, "deliverable_qty": deliv, "delivery_pct": pct})
+            except: continue
+        if records:
+            for i in range(0, len(records), 100):
+                supabase.from_("delivery_data").upsert(records[i:i+100]).execute()
+            print(f"[Delivery] ✅ {today} — {len(records)} stocks saved")
+        else:
+            print(f"[Delivery] ⚠️ {today} — no matching symbols")
+    except Exception as e:
+        print(f"[Delivery] ❌ {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Login on startup ───────────────────────────────────────────────────
@@ -302,6 +364,12 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         watchdog_participant_flow,
         "cron", hour=20, minute=0, timezone="Asia/Kolkata", id="participant_flow_watchdog",
+        misfire_grace_time=600
+    )
+
+    scheduler.add_job(
+        fetch_delivery_data,
+        "cron", hour=18, minute=30, timezone="Asia/Kolkata", id="delivery_data_fetch",
         misfire_grace_time=600
     )
 
