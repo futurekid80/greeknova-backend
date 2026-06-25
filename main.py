@@ -1135,6 +1135,11 @@ def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
 
+@app.get("/market-status")
+def market_status():
+    from utils.market_calendar import get_market_status
+    return get_market_status()
+
 @app.get("/rollover")
 def rollover():
     from api.rollover import get_rollover
