@@ -306,11 +306,15 @@ async def lifespan(app: FastAPI):
     )
 
     # ── CommodityNova scheduler ────────────────────────────────────────────
-    from services.kite_auth import get_kite_client
-    from utils.db import get_supabase
-    kite = get_kite_client()
-    supabase = get_supabase()
-    start_mcx_scheduler(kite, supabase)
+    try:
+        from services.kite_auth import get_kite_client
+        from utils.db import get_supabase
+        kite = get_kite_client()
+        supabase = get_supabase()
+        start_mcx_scheduler(kite, supabase)
+    except Exception as e:
+        print(f"⚠️ CommodityNova scheduler skipped — no Kite token: {e}")
+        print("⚠️ Will retry captures using Supabase token once available")
     # ──────────────────────────────────────────────────────────────────────
 
     print("✅ GreekNova backend started")
