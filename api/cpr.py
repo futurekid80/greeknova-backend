@@ -387,9 +387,10 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
     prev_week_friday = this_week_monday - timedelta(days=3)
     prev_week_monday = prev_week_friday - timedelta(days=4)
     
-    # Use current week for weekly CPR (what traders need for next week)
-    week_start = this_week_monday
-    week_end = this_week_end
+    # Weekly CPR convention: use PREVIOUS week's H/L/C for CURRENT week's CPR
+    # Same as daily: previous day's candle → today's CPR
+    week_start = prev_week_monday
+    week_end = prev_week_friday
 
     first_of_month = today.replace(day=1)
     prev_month_end = first_of_month - timedelta(days=1)
