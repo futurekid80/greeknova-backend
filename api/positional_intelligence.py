@@ -228,6 +228,17 @@ def get_positional_intelligence(min_consec: int = 0):
     except Exception as e:
         print(f"[PI] Net delta fetch failed: {e}")
 
+  # ── 6. Delivery data ─────────────────────────────────────────────────
+    try:
+        del_res = supabase.from_("delivery_data")\
+            .select("symbol, delivery_pct")\
+            .eq("trade_date", today_str)\
+            .execute()
+        delivery_map = {r["symbol"]: float(r["delivery_pct"] or 0) for r in (del_res.data or [])}
+    except Exception as e:
+        print(f"[PI] Delivery fetch failed: {e}")
+        delivery_map = {}
+
     # ── Build results ─────────────────────────────────────────────────────
     active_conviction = []
     stealth_buildup = []
@@ -269,6 +280,7 @@ def get_positional_intelligence(min_consec: int = 0):
             "cpr_width_emoji": cpr.get("width_emoji"),
             "cpr_trend": cpr.get("cpr_trend"),
             "total_days": total_days,
+            "delivery_pct": delivery_map.get(sym, None),
         }
 
         # ── Active Conviction ─────────────────────────────────────────────
@@ -313,17 +325,18 @@ def get_positional_intelligence(min_consec: int = 0):
                     else:
                         tier, tier_label = None, None
                     if tier:
-                        stealth_buildup.append({
-                            **base,
-                            "signal": "STEALTH",
-                            "tier": tier,
-                            "tier_label": tier_label,
-                            "rank": 0,
-                            "today_oi_chg": round(today_oi, 2),
-                            "price_chg": round(today_price, 2),
-                            "net_delta": net_delta_map.get(sym, None),
-                            "oi_history": [round(float(h.get("fut_oi_chg_pct") or 0), 2) for h in last_15],
-                        })
+                            stealth_buildup.append({
+                                **base,
+                                "signal": "STEALTH",
+                                "tier": tier,
+                                "tier_label": tier_label,
+                                "rank": 0,
+                                "today_oi_chg": round(today_oi, 2),
+                                "price_chg": round(today_price, 2),
+                                "net_delta": net_delta_map.get(sym, None),
+                                "delivery_pct": delivery_map.get(sym, None),
+                                "oi_history": [round(float(h.get("fut_oi_chg_pct") or 0), 2) for h in last_15],
+                            })
 
         # ── Volume Breakout ───────────────────────────────────────────────
         vol_data = vol_sym_data.get(sym, [])
