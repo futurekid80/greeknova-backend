@@ -1,21 +1,25 @@
 """
 delivery_confluence.py
 Delivery + FUT OI confluence scoring for all 70 F&O stocks.
-Combines:
-  - Today's delivery %
-  - 5-day delivery trend (rising = accumulation)
-  - FUT signal alignment
-  - FUT OI change strength
 """
 from datetime import datetime, timedelta
 from collections import defaultdict
+import time as _time
+
+_confluence_cache: dict = {}
+_confluence_cache_time: float = 0
+_CONFLUENCE_TTL = 3600  # 1 hour post-market
 
 def get_delivery_confluence(supabase):
+    global _confluence_cache, _confluence_cache_time
+
+    if _confluence_cache and (_time.time() - _confluence_cache_time) < _CONFLUENCE_TTL:
+        return _confluence_cache
+
     import pytz
     ist = pytz.timezone("Asia/Kolkata")
     today = datetime.now(ist).date()
 
-    # Get last trading day
     check = today
     for _ in range(7):
         if check.weekday() < 5:
@@ -23,7 +27,11 @@ def get_delivery_confluence(supabase):
         check -= timedelta(days=1)
     last_trading_day = check.isoformat()
 
-    # ── Fetch last 10 days delivery data ─────────────────────────────────────
+    # Invalidate cache if date changed
+    if _confluence_cache.get("date") and _confluence_cache["date"] != last_trading_day:
+        _confluence_cache = {}
+        _confluence_cache_time = 0
+
     hist_start = (check - timedelta(days=20)).isoformat()
     try:
         del_res = supabase.from_("delivery_data")\
@@ -37,7 +45,6 @@ def get_delivery_confluence(supabase):
         print(f"[DelivConf] Delivery fetch failed: {e}")
         return {"error": str(e), "results": []}
 
-    # Group by symbol
     sym_delivery = defaultdict(list)
     for r in del_rows:
         sym_delivery[r["symbol"]].append({
@@ -45,7 +52,6 @@ def get_delivery_confluence(supabase):
             "pct": float(r["delivery_pct"] or 0)
         })
 
-    # ── Fetch today's FUT signals ─────────────────────────────────────────────
     try:
         fut_res = supabase.from_("daily_oi_summary")\
             .select("symbol, fut_signal, fut_oi_chg_pct, price_chg_pct, close_price")\
@@ -56,7 +62,6 @@ def get_delivery_confluence(supabase):
         print(f"[DelivConf] FUT fetch failed: {e}")
         fut_map = {}
 
-    # ── Score each symbol ─────────────────────────────────────────────────────
     results = []
 
     for sym, history in sym_delivery.items():
@@ -74,115 +79,62 @@ def get_delivery_confluence(supabase):
         price_chg = float(fut.get("price_chg_pct") or 0)
         close_price = float(fut.get("close_price") or 0)
 
-        # ── Component 1: Delivery % today (0-30) ─────────────────────────────
-        if today_pct >= 70:
-            del_score = 30
-        elif today_pct >= 60:
-            del_score = 20
-        elif today_pct >= 50:
-            del_score = 10
-        elif today_pct >= 40:
-            del_score = 5
-        else:
-            del_score = 0
+        if today_pct >= 70:      del_score = 30
+        elif today_pct >= 60:    del_score = 20
+        elif today_pct >= 50:    del_score = 10
+        elif today_pct >= 40:    del_score = 5
+        else:                    del_score = 0
 
-        # ── Component 2: 5-day delivery trend (0-25) ─────────────────────────
         last_5 = [h["pct"] for h in history[-5:]]
         if len(last_5) >= 3:
-            # Linear regression slope via simple diff
-            avg_first_half = sum(last_5[:len(last_5)//2]) / (len(last_5)//2)
+            avg_first_half  = sum(last_5[:len(last_5)//2]) / (len(last_5)//2)
             avg_second_half = sum(last_5[len(last_5)//2:]) / (len(last_5) - len(last_5)//2)
             trend_diff = avg_second_half - avg_first_half
-            if trend_diff >= 5:
-                trend_score = 25
-                trend_label = "Rising ↑"
-            elif trend_diff >= 2:
-                trend_score = 15
-                trend_label = "Mild Rise ↗"
-            elif trend_diff <= -5:
-                trend_score = 0
-                trend_label = "Falling ↓"
-            elif trend_diff <= -2:
-                trend_score = 5
-                trend_label = "Mild Fall ↘"
-            else:
-                trend_score = 10
-                trend_label = "Stable →"
+            if trend_diff >= 5:     trend_score, trend_label = 25, "Rising ↑"
+            elif trend_diff >= 2:   trend_score, trend_label = 15, "Mild Rise ↗"
+            elif trend_diff <= -5:  trend_score, trend_label = 0,  "Falling ↓"
+            elif trend_diff <= -2:  trend_score, trend_label = 5,  "Mild Fall ↘"
+            else:                   trend_score, trend_label = 10, "Stable →"
         else:
-            trend_score = 10
-            trend_label = "Stable →"
+            trend_score, trend_label = 10, "Stable →"
 
-        # ── Component 3: FUT + Delivery alignment (0-30) ─────────────────────
         bullish_signals = {"LONG_BUILDUP", "SHORT_COVERING"}
         bearish_signals = {"SHORT_BUILDUP", "LONG_UNWINDING"}
 
         if fut_signal in bullish_signals and today_pct >= 55:
-            align_score = 30
-            confluence_type = "BULLISH"
-            confluence_label = "🐂 Bullish Confluence"
+            align_score, confluence_type, confluence_label = 30, "BULLISH", "🐂 Bullish Confluence"
         elif fut_signal in bearish_signals and today_pct >= 55:
-            align_score = 30
-            confluence_type = "BEARISH"
-            confluence_label = "🐻 Bearish Conviction"
+            align_score, confluence_type, confluence_label = 30, "BEARISH", "🐻 Bearish Conviction"
         elif fut_signal in bullish_signals and today_pct >= 40:
-            align_score = 15
-            confluence_type = "MILD_BULLISH"
-            confluence_label = "📈 Mild Bullish"
+            align_score, confluence_type, confluence_label = 15, "MILD_BULLISH", "📈 Mild Bullish"
         elif fut_signal in bearish_signals and today_pct >= 40:
-            align_score = 15
-            confluence_type = "MILD_BEARISH"
-            confluence_label = "📉 Mild Bearish"
+            align_score, confluence_type, confluence_label = 15, "MILD_BEARISH", "📉 Mild Bearish"
         elif fut_signal == "NEUTRAL" and today_pct >= 65:
-            align_score = 20  # High delivery with no price move = stealth
-            confluence_type = "STEALTH"
-            confluence_label = "🕵️ Stealth Accumulation"
+            align_score, confluence_type, confluence_label = 20, "STEALTH", "🕵️ Stealth Accumulation"
         elif fut_signal == "NEUTRAL":
-            align_score = 5
-            confluence_type = "NEUTRAL"
-            confluence_label = "⚪ Neutral"
+            align_score, confluence_type, confluence_label = 5, "NEUTRAL", "⚪ Neutral"
         else:
-            align_score = 0
-            confluence_type = "WEAK"
-            confluence_label = "⚠️ Weak Signal"
+            align_score, confluence_type, confluence_label = 0, "WEAK", "⚠️ Weak Signal"
 
-        # ── Component 4: FUT OI strength (0-15) ──────────────────────────────
         abs_oi = abs(fut_oi_chg)
-        if abs_oi >= 15:
-            oi_score = 15
-        elif abs_oi >= 10:
-            oi_score = 12
-        elif abs_oi >= 5:
-            oi_score = 8
-        elif abs_oi >= 2:
-            oi_score = 4
-        else:
-            oi_score = 0
+        if abs_oi >= 15:      oi_score = 15
+        elif abs_oi >= 10:    oi_score = 12
+        elif abs_oi >= 5:     oi_score = 8
+        elif abs_oi >= 2:     oi_score = 4
+        else:                 oi_score = 0
 
         total_score = del_score + trend_score + align_score + oi_score
 
-        # ── Grade ─────────────────────────────────────────────────────────────
-        if total_score >= 85:
-            grade = "A+"
-            grade_color = "GOLD"
-        elif total_score >= 70:
-            grade = "A"
-            grade_color = "EMERALD"
-        elif total_score >= 55:
-            grade = "B"
-            grade_color = "AMBER"
-        elif total_score >= 40:
-            grade = "C"
-            grade_color = "GRAY"
-        else:
-            grade = "D"
-            grade_color = "RED"
+        if total_score >= 85:    grade, grade_color = "A+", "GOLD"
+        elif total_score >= 70:  grade, grade_color = "A",  "EMERALD"
+        elif total_score >= 55:  grade, grade_color = "B",  "AMBER"
+        elif total_score >= 40:  grade, grade_color = "C",  "GRAY"
+        else:                    grade, grade_color = "D",  "RED"
 
-        # Include NEUTRAL if delivery is very high (≥65%) — stealth accumulation
         if fut_signal == "NEUTRAL" and today_pct < 65:
             continue
         if total_score < 40:
             continue
-        # For NEUTRAL signals, flag as stealth
         if fut_signal == "NEUTRAL":
             confluence_type = "STEALTH"
             confluence_label = "🕵️ Stealth Accumulation"
@@ -209,25 +161,25 @@ def get_delivery_confluence(supabase):
             }
         })
 
-    # Sort by score desc, bullish first within same score
-    results.sort(key=lambda x: (
-        -x["score"],
-        0 if "BULLISH" in x["confluence_type"] else 1
-    ))
+    results.sort(key=lambda x: (-x["score"], 0 if "BULLISH" in x["confluence_type"] else 1))
 
     bullish = [r for r in results if "BULLISH" in r["confluence_type"]]
     bearish = [r for r in results if "BEARISH" in r["confluence_type"]]
     stealth = [r for r in results if r["confluence_type"] == "STEALTH"]
-
     top_bullish_combined = sorted(bullish + stealth, key=lambda x: -x["score"])
 
-    return {
-        "date":     last_trading_day,
-        "total":    len(results),
-        "bullish":  len(bullish),
-        "bearish":  len(bearish),
-        "stealth":  len(stealth),
-        "results":  results,
+    result = {
+        "date":        last_trading_day,
+        "total":       len(results),
+        "bullish":     len(bullish),
+        "bearish":     len(bearish),
+        "stealth":     len(stealth),
+        "results":     results,
         "top_bullish": top_bullish_combined[:5],
         "top_bearish": bearish[:5],
     }
+
+    _confluence_cache = result
+    _confluence_cache_time = _time.time()
+    print(f"[DelivConf] Computed and cached {len(results)} signals for {last_trading_day}")
+    return result
