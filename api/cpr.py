@@ -376,8 +376,20 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
 
     all_symbols = INDICES + STOCKS
 
-    prev_week_friday = today - timedelta(days=today.weekday() + 3)
+    # Current week CPR — use this week's candles (Mon to today)
+    # For next trading day's CPR, we need the week that just completed
+    # If today is Friday or after market, use this week (Mon-Fri)
+    # Otherwise use this week up to today's close
+    this_week_monday = today - timedelta(days=today.weekday())  # Mon of current week
+    this_week_end = today  # Up to today (Thu Jun 25 in this case)
+    
+    # Previous week as fallback reference
+    prev_week_friday = this_week_monday - timedelta(days=3)
     prev_week_monday = prev_week_friday - timedelta(days=4)
+    
+    # Use current week for weekly CPR (what traders need for next week)
+    week_start = this_week_monday
+    week_end = this_week_end
 
     first_of_month = today.replace(day=1)
     prev_month_end = first_of_month - timedelta(days=1)
@@ -386,7 +398,7 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
     from_date = prev_month_start.isoformat()
     to_date   = today.isoformat()
 
-    print(f"[CPR Weekly] Week range: {prev_week_monday} to {prev_week_friday}")
+    print(f"[CPR Weekly] Week range: {week_start} to {week_end}")
     print(f"[CPR Weekly] Month range: {prev_month_start} to {prev_month_end}")
 
     weekly_ohlc  = {}
@@ -410,7 +422,7 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
 
             week_candles = [
                 c for c in candles
-                if prev_week_monday.isoformat() <= str(c["date"])[:10] <= prev_week_friday.isoformat()
+                if week_start.isoformat() <= str(c["date"])[:10] <= week_end.isoformat()
             ]
             if week_candles:
                 weekly_ohlc[sym] = {
