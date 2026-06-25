@@ -132,6 +132,10 @@ def get_delivery_confluence(supabase):
             align_score = 15
             confluence_type = "MILD_BEARISH"
             confluence_label = "📉 Mild Bearish"
+        elif fut_signal == "NEUTRAL" and today_pct >= 65:
+            align_score = 20  # High delivery with no price move = stealth
+            confluence_type = "STEALTH"
+            confluence_label = "🕵️ Stealth Accumulation"
         elif fut_signal == "NEUTRAL":
             align_score = 5
             confluence_type = "NEUTRAL"
@@ -173,9 +177,15 @@ def get_delivery_confluence(supabase):
             grade = "D"
             grade_color = "RED"
 
-        # Only include meaningful signals
-        if total_score < 40 or fut_signal == "NEUTRAL":
+        # Include NEUTRAL if delivery is very high (≥65%) — stealth accumulation
+        if fut_signal == "NEUTRAL" and today_pct < 65:
             continue
+        if total_score < 40:
+            continue
+        # For NEUTRAL signals, flag as stealth
+        if fut_signal == "NEUTRAL":
+            confluence_type = "STEALTH"
+            confluence_label = "🕵️ Stealth Accumulation"
 
         results.append({
             "symbol":           sym,
