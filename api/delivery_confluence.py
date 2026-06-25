@@ -20,9 +20,10 @@ def get_delivery_confluence(supabase):
     ist = pytz.timezone("Asia/Kolkata")
     today = datetime.now(ist).date()
 
+    from utils.market_calendar import is_trading_day
     check = today
     for _ in range(7):
-        if check.weekday() < 5:
+        if is_trading_day(check):
             break
         check -= timedelta(days=1)
     last_trading_day = check.isoformat()
