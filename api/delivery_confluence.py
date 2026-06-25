@@ -219,6 +219,8 @@ def get_delivery_confluence(supabase):
     bearish = [r for r in results if "BEARISH" in r["confluence_type"]]
     stealth = [r for r in results if r["confluence_type"] == "STEALTH"]
 
+    top_bullish_combined = sorted(bullish + stealth, key=lambda x: -x["score"])
+
     return {
         "date":     last_trading_day,
         "total":    len(results),
@@ -226,6 +228,6 @@ def get_delivery_confluence(supabase):
         "bearish":  len(bearish),
         "stealth":  len(stealth),
         "results":  results,
-        "top_bullish": (bullish + stealth)[:5],
+        "top_bullish": top_bullish_combined[:5],
         "top_bearish": bearish[:5],
     }
