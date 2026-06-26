@@ -74,6 +74,8 @@ def run_full_capture():
     ist = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(ist)
     if now.weekday() >= 5: return
+    from utils.market_calendar import is_trading_day
+    if not is_trading_day(now.date()): return
     if not (9 <= now.hour <= 15): return
     if now.hour == 9 and now.minute < 15: return
     if now.hour == 15 and now.minute > 30: return
@@ -871,6 +873,8 @@ def auto_refresh_token():
     ist = pytz.timezone('Asia/Kolkata')
     now = datetime.now(ist)
     if now.weekday() >= 5: return
+    from utils.market_calendar import is_trading_day
+    if not is_trading_day(now.date()): return
     print(f"🔐 Railway auto-login at {now.strftime('%H:%M IST')}...")
     try:
         from services.kite_auth import auto_login
