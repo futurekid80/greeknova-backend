@@ -1,3 +1,4 @@
+from typing import Optional
 import os
 import json
 import time
@@ -39,7 +40,7 @@ def save_token_to_supabase(access_token: str):
         print(f"  ⚠️ Could not save token to Supabase: {e}")
 
 
-def get_token_from_supabase() -> str | None:
+def get_token_from_supabase() -> Optional[str]:
     """Read today's token from Supabase — Railway's source of truth"""
     try:
         from utils.db import get_supabase

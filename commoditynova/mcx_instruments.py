@@ -1,3 +1,4 @@
+from typing import Optional
 import logging
 from datetime import datetime, date
 import pytz
@@ -38,7 +39,7 @@ MCX_COMMODITIES = {
 }
 
 
-def get_nearest_expiry_futures_symbol(commodity: str, kite: KiteConnect) -> dict | None:
+def get_nearest_expiry_futures_symbol(commodity: str, kite: KiteConnect) -> Optional[dict]:
     """Search for the nearest active futures contract for a commodity."""
     try:
         results = kite.instruments("MCX")
