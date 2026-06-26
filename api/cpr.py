@@ -192,7 +192,12 @@ def compute_and_store_cpr(trade_date: str = None):
     today = datetime.now(ist).date()
 
     if not trade_date:
-        trade_date = _get_next_trading_day(today).isoformat()
+        from utils.market_calendar import is_trading_day
+        next_day = _get_next_trading_day(today)
+        # Skip holidays
+        while not is_trading_day(next_day):
+            next_day = _get_next_trading_day(next_day)
+        trade_date = next_day.isoformat()
 
     print(f"[CPR] Computing for trade_date: {trade_date}")
 
@@ -358,7 +363,11 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
     today = datetime.now(ist).date()
 
     if not trade_date:
-        trade_date = _get_next_trading_day(today).isoformat()
+        from utils.market_calendar import is_trading_day
+        next_day = _get_next_trading_day(today)
+        while not is_trading_day(next_day):
+            next_day = _get_next_trading_day(next_day)
+        trade_date = next_day.isoformat()
 
     INDEX_TOKENS = {
         "NIFTY":     256265,
