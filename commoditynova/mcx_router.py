@@ -17,6 +17,7 @@ def get_ignition_signals():
         result = supabase.table("mcx_ignition_signals") \
             .select("*") \
             .order("scanned_at", desc=True) \
+            .limit(10) \
             .execute()
 
         if not result.data:
