@@ -788,6 +788,20 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             except Exception as e:
                 logger.error(f"{commodity} OI history write error: {e}")
 
+            # Stealth buildup — AFTER oi_history saved so current scan is visible
+            try:
+                stealth = compute_mcx_stealth(commodity, supabase)
+                supabase.table("mcx_ignition_signals").update({
+                    "stealth_tier":               stealth["stealth_tier"],
+                    "stealth_phase":              stealth["stealth_phase"],
+                    "stealth_consecutive_scans":  stealth["stealth_consecutive_scans"],
+                    "stealth_cum_oi_pct":         stealth["stealth_cum_oi_pct"],
+                    "stealth_hourly_rate":         stealth["stealth_hourly_rate"],
+                }).eq("commodity", commodity).execute()
+                logger.info(f"{commodity}: stealth={stealth['stealth_tier']} cum={stealth['stealth_cum_oi_pct']}%")
+            except Exception as stealth_err:
+                logger.error(f"Stealth update failed [{commodity}]: {stealth_err}")
+
             if signal["status"] == "fired":
                 supabase.table("mcx_ignition_history").insert({
                     "commodity":     commodity,
@@ -818,3 +832,81 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
         logger.info(f"IGNITION FIRED: {', '.join(fired_commodities)}")
     else:
         logger.info(f"Scan complete — no ignitions. {now_ist.strftime('%H:%M')} IST")
+
+
+# ── MCX Stealth Buildup ──────────────────────────────────────────
+def _stealth_empty() -> dict:
+    return {
+        "stealth_tier": None,
+        "stealth_phase": None,
+        "stealth_consecutive_scans": 0,
+        "stealth_cum_oi_pct": 0.0,
+        "stealth_hourly_rate": 0.0,
+    }
+
+
+def compute_mcx_stealth(commodity: str, supabase) -> dict:
+    import pytz
+    from datetime import datetime, date
+    try:
+        result = supabase.table("mcx_oi_history") \
+            .select("scanned_at, oi_change_pct, cumulative_oi_pct") \
+            .eq("commodity", commodity) \
+            .eq("session_date", str(date.today())) \
+            .order("scanned_at", desc=False) \
+            .execute()
+        rows = result.data or []
+    except Exception as e:
+        logger.error(f"Stealth fetch failed [{commodity}]: {e}")
+        return _stealth_empty()
+
+    if len(rows) < 3:
+        return _stealth_empty()
+
+    IST = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.now(IST)
+    hours_into_session = max(0, (now_ist.hour - 17) + now_ist.minute / 60)
+    if hours_into_session < 2:
+        phase = "early"
+    elif hours_into_session < 5:
+        phase = "build"
+    else:
+        phase = "late"
+
+    cum_oi_pct = float(rows[-1].get("cumulative_oi_pct") or 0)
+
+    last_12 = rows[-12:]
+    hourly_rate = sum(float(r.get("oi_change_pct") or 0) for r in last_12) / len(last_12)
+
+    prior_12 = rows[-24:-12] if len(rows) >= 24 else []
+    prior_rate = (
+        sum(float(r.get("oi_change_pct") or 0) for r in prior_12) / len(prior_12)
+        if prior_12 else 0
+    )
+    rate_slowing = prior_rate > 0 and hourly_rate < prior_rate * 0.6
+
+    consecutive = 0
+    for r in reversed(rows):
+        if float(r.get("oi_change_pct") or 0) > -0.2:
+            consecutive += 1
+        else:
+            break
+
+    tier = None
+    if cum_oi_pct >= 30:
+        tier = "Elite"   # cum OI alone sufficient — one bad scan shouldn't reset
+    elif cum_oi_pct >= 20 and consecutive >= 3:
+        tier = "Strong"
+    elif cum_oi_pct >= 8 and consecutive >= 2:
+        tier = "Watch"
+
+    if tier == "Elite" and not rate_slowing and phase == "build":
+        tier = "Strong"
+
+    return {
+        "stealth_tier": tier,
+        "stealth_phase": phase,
+        "stealth_consecutive_scans": consecutive,
+        "stealth_cum_oi_pct": round(cum_oi_pct, 1),
+        "stealth_hourly_rate": round(hourly_rate, 3),
+    }
