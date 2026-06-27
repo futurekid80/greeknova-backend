@@ -233,8 +233,6 @@ def _get_eod_pulse(supabase):
 
     cmp_res = supabase.from_("cmp_prices")\
         .select("symbol, cmp")\
-        .gte("timestamp", f"{last_trading_day}T00:00:00+00:00")\
-        .lte("timestamp", f"{last_trading_day}T23:59:59+00:00")\
         .order("timestamp", desc=True)\
         .limit(500)\
         .execute()
