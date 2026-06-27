@@ -20,16 +20,15 @@ def get_rollover(supabase):
             .limit(1)\
             .execute()
         if last_date_res.data:
-            from datetime import datetime as _dt
             last_ts = last_date_res.data[0]["timestamp"]
-            last_trading_date = _dt.fromisoformat(last_ts.replace("Z", "+00:00"))\
-                .astimezone(ist).strftime('%Y-%m-%d')
+            last_trading_date = datetime.fromisoformat(last_ts.replace("Z", "+00:00")).astimezone(ist).strftime('%Y-%m-%d')
         else:
             last_trading_date = today
-    except:
+    except Exception as _e:
+        print(f"[ROLLOVER] last_trading_date fallback: {_e}")
         last_trading_date = today
 
-    # Current expiries
+    print(f"[ROLLOVER] Using trading date: {last_trading_date} (today={today})")
 
     # Current expiries
     curr_expiry = '2026-06-30'
@@ -48,9 +47,7 @@ def get_rollover(supabase):
             .eq("option_type", "FUT")\
             .eq("symbol", "NIFTY")\
             .in_("expiry", [curr_expiry, next_expiry])\
-            sig_res = supabase.from_("daily_oi_summary")\
-                .select("symbol, fut_signal, price_chg_pct, close_price")\
-                .eq("trade_date", last_trading_date)\
+            .gte("timestamp", f"{last_trading_date}T03:45:00+00:00")\
             .order("timestamp", desc=True)\
             .limit(1)\
             .execute()
@@ -142,8 +139,7 @@ def get_rollover(supabase):
     try:
         sig_res = supabase.from_("daily_oi_summary")\
             .select("symbol, fut_signal, price_chg_pct, close_price")\
-            .eq("trade_date", today if datetime.now(ist).hour >= 16 else
-                (datetime.now(ist) - timedelta(days=1)).strftime('%Y-%m-%d'))\
+            .eq("trade_date", last_trading_date)\
             .limit(200)\
             .execute()
         sig_map = {r["symbol"]: r for r in (sig_res.data or [])}
@@ -183,7 +179,6 @@ def get_rollover(supabase):
         price_chg  = float(sig_data.get("price_chg_pct") or 0)
 
         # Rollover signal logic
-        # High rollover % + price signal determines direction
         if rollover_pct >= 15:
             if fut_signal in ("LONG_BUILDUP", "SHORT_COVERING") or price_chg >= 0.3:
                 roll_signal = "BULLISH_ROLL"
