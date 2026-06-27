@@ -9,15 +9,17 @@ def get_eod_report(supabase, date: str = None):
     ist = pytz.timezone("Asia/Kolkata")
     now_ist = datetime.now(ist)
 
-    # Default to most recent trading day
+    # Default to most recent available report date
     if not date:
-        d = now_ist.date()
-        # If before 4:30 PM, use previous trading day
-        if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 30):
-            d -= timedelta(days=1)
-        while d.weekday() >= 5:
-            d -= timedelta(days=1)
-        date = d.isoformat()
+        try:
+            last_res = supabase.from_("daily_oi_summary")\
+                .select("trade_date")\
+                .order("trade_date", desc=True)\
+                .limit(1)\
+                .execute()
+            date = last_res.data[0]["trade_date"] if last_res.data else now_ist.date().isoformat()
+        except:
+            date = now_ist.date().isoformat()
 
     # ── 1. FUT OI Movers ─────────────────────────────────────────────────────
     try:
