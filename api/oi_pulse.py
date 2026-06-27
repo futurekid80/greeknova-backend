@@ -211,13 +211,16 @@ def _get_eod_pulse(supabase):
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
-    check = now_ist.date()
-    # Before 4:46 PM IST (when daily_oi_summary is computed), treat today as not yet available
-    if now_ist.hour < 16 or (now_ist.hour == 16 and now_ist.minute < 46):
-        check -= timedelta(days=1)
-    while check.weekday() >= 5:
-        check -= timedelta(days=1)
-    last_trading_day = check.isoformat()
+    # Use last available date from DB (handles holidays + weekends correctly)
+    try:
+        last_res = supabase.from_("daily_oi_summary")\
+            .select("trade_date")\
+            .order("trade_date", desc=True)\
+            .limit(1)\
+            .execute()
+        last_trading_day = last_res.data[0]["trade_date"] if last_res.data else now_ist.date().isoformat()
+    except:
+        last_trading_day = now_ist.date().isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
         .select("symbol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol")\
