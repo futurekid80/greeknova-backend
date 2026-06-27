@@ -10,6 +10,27 @@ def get_rollover(supabase):
     ist = pytz.timezone('Asia/Kolkata')
     today = datetime.now(ist).strftime('%Y-%m-%d')
 
+    # Find last available trading date (handles holidays/weekends)
+    try:
+        last_date_res = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("option_type", "FUT")\
+            .eq("symbol", "NIFTY")\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        if last_date_res.data:
+            from datetime import datetime as _dt
+            last_ts = last_date_res.data[0]["timestamp"]
+            last_trading_date = _dt.fromisoformat(last_ts.replace("Z", "+00:00"))\
+                .astimezone(ist).strftime('%Y-%m-%d')
+        else:
+            last_trading_date = today
+    except:
+        last_trading_date = today
+
+    # Current expiries
+
     # Current expiries
     curr_expiry = '2026-06-30'
     next_expiry = '2026-07-28'
@@ -27,7 +48,9 @@ def get_rollover(supabase):
             .eq("option_type", "FUT")\
             .eq("symbol", "NIFTY")\
             .in_("expiry", [curr_expiry, next_expiry])\
-            .gte("timestamp", f"{today}T03:45:00+00:00")\
+            sig_res = supabase.from_("daily_oi_summary")\
+                .select("symbol, fut_signal, price_chg_pct, close_price")\
+                .eq("trade_date", last_trading_date)\
             .order("timestamp", desc=True)\
             .limit(1)\
             .execute()
