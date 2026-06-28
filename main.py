@@ -914,6 +914,59 @@ def oi_pulse():
     from api.oi_pulse import get_oi_pulse
     return get_oi_pulse()
 
+@app.get("/index-data")
+def index_data():
+    import time
+    cache = getattr(index_data, '_cache', None)
+    cache_time = getattr(index_data, '_cache_time', 0)
+    if cache and (time.time() - cache_time) < 60:
+        return cache
+
+    supabase = get_supabase()
+    try:
+        # Get last available trading timestamp for NIFTY FUT
+        ts_res = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .eq("option_type", "FUT")\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        if not ts_res.data:
+            return {"timestamp": None, "rows": [], "cmps": []}
+        ts = ts_res.data[0]["timestamp"]
+
+        # Fetch index OI data + CMP in parallel
+        from concurrent.futures import ThreadPoolExecutor
+        def fetch_oi_batch(rng):
+            return supabase.from_("oi_snapshots")\
+                .select("symbol,strike,option_type,oi,volume,last_price,expiry")\
+                .eq("timestamp", ts)\
+                .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY"])\
+                .range(rng[0], rng[1])\
+                .execute()
+        def fetch_cmps():
+            return supabase.from_("cmp_prices")\
+                .select("symbol,cmp")\
+                .order("timestamp", desc=True)\
+                .limit(200)\
+                .execute()
+
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            f1 = ex.submit(fetch_oi_batch, (0, 999))
+            f2 = ex.submit(fetch_oi_batch, (1000, 1999))
+            f3 = ex.submit(fetch_cmps)
+            b1, b2, cmps = f1.result(), f2.result(), f3.result()
+
+        rows = (b1.data or []) + (b2.data or [])
+        result = {"timestamp": ts, "rows": rows, "cmps": cmps.data or []}
+        index_data._cache = result
+        index_data._cache_time = time.time()
+        return result
+    except Exception as e:
+        print(f"[INDEX-DATA] Error: {e}")
+        return {"timestamp": None, "rows": [], "cmps": []}
+
 @app.get("/options-jungle")
 def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
     from api.options_jungle import get_options_jungle
