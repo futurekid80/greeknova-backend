@@ -385,21 +385,14 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
 
     all_symbols = INDICES + STOCKS
 
-    # Current week CPR — use this week's candles (Mon to today)
-    # For next trading day's CPR, we need the week that just completed
-    # If today is Friday or after market, use this week (Mon-Fri)
-    # Otherwise use this week up to today's close
+    # Weekly CPR always uses the PREVIOUS completed week (Mon-Fri)
+    # GoCharting convention: prev week H/L/C → current/next week's CPR
     this_week_monday = today - timedelta(days=today.weekday())  # Mon of current week
-    this_week_end = today  # Up to today (Thu Jun 25 in this case)
-    
-    # Previous week as fallback reference
+    prev_week_monday = this_week_monday - timedelta(days=7)
     prev_week_friday = this_week_monday - timedelta(days=3)
-    prev_week_monday = prev_week_friday - timedelta(days=4)
-    
-    # Weekly CPR: use CURRENT week's candles (Mon to today/Thu)
-    # GoCharting convention: current week H/L/C → next week's CPR
-    week_start = this_week_monday
-    week_end = this_week_end
+
+    week_start = prev_week_monday
+    week_end   = prev_week_friday
 
     first_of_month = today.replace(day=1)
     prev_month_end = first_of_month - timedelta(days=1)
