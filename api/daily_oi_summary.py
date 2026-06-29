@@ -41,19 +41,26 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             .limit(500).execute()
 
         # Get previous trading day's close — use last available date from DB (handles holidays)
-        prev_res = supabase.from_("cmp_prices")\
-            .select("symbol")\
-            .lt("timestamp", f"{trade_date}T00:00:00+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-        if prev_res.data:
-            prev_date = prev_res.data[0].get("timestamp", "")[:10]
-        else:
+        try:
+            prev_res = supabase.from_("cmp_prices")\
+                .select("timestamp")\
+                .lt("timestamp", f"{trade_date}T00:00:00+00:00")\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
+            if prev_res.data:
+                import pytz as _pytz
+                _ist = _pytz.timezone('Asia/Kolkata')
+                from datetime import datetime as _dt2
+                _raw_ts = prev_res.data[0]["timestamp"]
+                _dt_obj = _dt2.fromisoformat(_raw_ts.replace("Z", "+00:00")).astimezone(_ist)
+                prev_date = _dt_obj.strftime('%Y-%m-%d')
+            else:
+                raise Exception("no prev data")
+        except:
             from datetime import datetime as _dt2
             trade_dt = _dt2.strptime(trade_date, '%Y-%m-%d')
-            prev_day = trade_dt - timedelta(days=1)
-            prev_date = prev_day.strftime('%Y-%m-%d')
+            prev_date = (trade_dt - timedelta(days=3)).strftime('%Y-%m-%d')
 
         prev_cmp_res = supabase.from_("cmp_prices")\
             .select("symbol, cmp")\
