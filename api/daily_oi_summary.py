@@ -40,15 +40,20 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             .order("timestamp", desc=True) \
             .limit(500).execute()
 
-        # Get previous trading day's close for price change calculation
-        from datetime import datetime as _dt2
-        trade_dt = _dt2.strptime(trade_date, '%Y-%m-%d')
-        prev_day = trade_dt
-        for _ in range(5):
-            prev_day = prev_day - timedelta(days=1)
-            if prev_day.weekday() < 5:
-                break
-        prev_date = prev_day.strftime('%Y-%m-%d')
+        # Get previous trading day's close — use last available date from DB (handles holidays)
+        prev_res = supabase.from_("cmp_prices")\
+            .select("symbol")\
+            .lt("timestamp", f"{trade_date}T00:00:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        if prev_res.data:
+            prev_date = prev_res.data[0].get("timestamp", "")[:10]
+        else:
+            from datetime import datetime as _dt2
+            trade_dt = _dt2.strptime(trade_date, '%Y-%m-%d')
+            prev_day = trade_dt - timedelta(days=1)
+            prev_date = prev_day.strftime('%Y-%m-%d')
 
         prev_cmp_res = supabase.from_("cmp_prices")\
             .select("symbol, cmp")\
