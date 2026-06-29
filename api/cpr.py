@@ -697,9 +697,16 @@ def get_cpr_scanner():
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
 
-    # CPR compute job stores CPR for NEXT trading day always
-    # So always query next trading day during market hours
-    query_date = _get_next_trading_day(now_ist.date()).isoformat()
+    # CPR is stored for the trade_date we're trading on.
+    # During market hours (before 4:30 PM) → query today's date
+    # Post market (after 4:30 PM) → query next trading day (tomorrow's CPR just computed)
+    # Weekend → query next trading day
+    if now_ist.weekday() >= 5:
+        query_date = _get_next_trading_day(now_ist.date()).isoformat()
+    elif now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
+        query_date = _get_next_trading_day(now_ist.date()).isoformat()
+    else:
+        query_date = now_ist.date().isoformat()
 
     cpr_rows = supabase.from_("cpr_levels")\
         .select("*")\
@@ -708,15 +715,19 @@ def get_cpr_scanner():
         .execute()
 
     if not cpr_rows.data:
-        # Next day not computed yet — use previous trading day's CPR
-        # This is correct: yesterday's CPR is what we trade with today
-        prev_day = _get_prev_trading_day(now_ist.date())
-        print(f"[CPR] No data for {query_date}, falling back to {prev_day.isoformat()}")
-        cpr_rows = supabase.from_("cpr_levels")\
-            .select("*")\
-            .eq("trade_date", prev_day.isoformat())\
-            .limit(500)\
-            .execute()
+        # Query not found — get last available date from DB
+        last_res = supabase.from_("cpr_levels")\
+            .select("trade_date")\
+            .order("trade_date", desc=True)\
+            .limit(1).execute()
+        fallback_date = last_res.data[0]["trade_date"] if last_res.data else None
+        print(f"[CPR] No data for {query_date}, falling back to {fallback_date}")
+        if fallback_date:
+            cpr_rows = supabase.from_("cpr_levels")\
+                .select("*")\
+                .eq("trade_date", fallback_date)\
+                .limit(500)\
+                .execute()
         if not cpr_rows.data:
             # Absolute last resort — should never happen in normal operation
             print(f"[CPR] No table data at all — falling back to live OHLC")
