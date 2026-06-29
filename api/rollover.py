@@ -37,7 +37,7 @@ def get_rollover(supabase):
     # Previous series benchmark dates
     prev_curr_expiry = '2026-05-26'
     prev_next_expiry = '2026-06-30'
-    prev_bench_date  = '2026-05-25'  # 2 days before May expiry
+    prev_bench_date  = '2026-05-26'  # May expiry day — data in archive
 
     # ── 1. Today's OI for both expiries ───────────────────────────────────────
     try:
@@ -91,7 +91,7 @@ def get_rollover(supabase):
     # ── 2. Previous series benchmark OI ───────────────────────────────────────
     try:
         # Get one snapshot from prev bench date
-        prev_ts_res = supabase.from_("oi_snapshots")\
+        prev_ts_res = supabase.from_("oi_snapshots_archive")\
             .select("timestamp")\
             .eq("option_type", "FUT")\
             .eq("symbol", "NIFTY")\
@@ -106,7 +106,7 @@ def get_rollover(supabase):
         if not prev_ts:
             prev_rows = []
         else:
-            prev_res = supabase.from_("oi_snapshots")\
+            prev_res = supabase.from_("oi_snapshots_archive")\
                 .select("symbol, expiry, oi")\
                 .eq("option_type", "FUT")\
                 .in_("expiry", [prev_curr_expiry, prev_next_expiry])\
