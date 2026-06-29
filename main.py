@@ -1868,6 +1868,14 @@ def oi_walls_detail(symbol: str):
         "intraday_range_pct":  intraday_range_pct,
     }
 
+@app.get("/fetch-delivery")
+def fetch_delivery():
+    try:
+        fetch_delivery_data()
+        return {"status": "triggered"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @app.get("/run-archive")
 def run_archive():
     try:
