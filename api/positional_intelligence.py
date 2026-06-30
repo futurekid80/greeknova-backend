@@ -269,6 +269,18 @@ def get_positional_intelligence(min_consec: int = 0):
         series_sb_oi = float(pi.get("series_sb_oi") or 0)
         total_days = int(pi.get("total_days") or 0)
 
+        # Volume context — today's FUT vol vs 5-day avg (reuses vol_sym_data already fetched)
+        vol_data_for_sym = vol_sym_data.get(sym, [])
+        today_vol_amt = None
+        vol_ratio_ctx = None
+        if vol_data_for_sym:
+            today_row = next((r for r in reversed(vol_data_for_sym) if r["trade_date"] == today_str), None)
+            if today_row:
+                today_vol_amt = int(today_row.get("fut_vol") or 0)
+                hist_vols_ctx = sorted([int(r.get("fut_vol") or 0) for r in vol_data_for_sym[:-1] if int(r.get("fut_vol") or 0) > 0], reverse=True)[:5]
+                avg_5d_ctx = sum(hist_vols_ctx) / len(hist_vols_ctx) if hist_vols_ctx else 0
+                vol_ratio_ctx = round(today_vol_amt / avg_5d_ctx, 2) if avg_5d_ctx > 0 else None
+
         base = {
             "symbol": sym,
             "cmp": round(cmp, 2),
@@ -281,6 +293,8 @@ def get_positional_intelligence(min_consec: int = 0):
             "cpr_trend": cpr.get("cpr_trend"),
             "total_days": total_days,
             "delivery_pct": delivery_map.get(sym, None),
+            "volume": today_vol_amt,
+            "vol_ratio": vol_ratio_ctx,
         }
 
         # ── Active Conviction ─────────────────────────────────────────────
