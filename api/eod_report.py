@@ -150,7 +150,20 @@ def get_eod_report(supabase, date: str = None):
     import pytz as _pytz
     _ist = _pytz.timezone("Asia/Kolkata")
     _today = datetime.now(_ist).strftime('%Y-%m-%d')
-    if date == _today:
+    _existing_cash = None
+    try:
+        _existing_res = supabase.from_("fii_dii_cash").select("*").eq("trade_date", date).limit(1).execute()
+        if _existing_res.data and _existing_res.data[0].get("fii_net") is not None:
+            _existing_cash = _existing_res.data[0]
+    except:
+        pass
+
+    if date == _today and _existing_cash:
+        # Already have manually-verified or previously-scraped data — don't overwrite
+        r = _existing_cash
+        cash_data["FII"] = {"buy": float(r["fii_buy"] or 0), "sell": float(r["fii_sell"] or 0), "net": float(r["fii_net"] or 0)}
+        cash_data["DII"] = {"buy": float(r["dii_buy"] or 0), "sell": float(r["dii_sell"] or 0), "net": float(r["dii_net"] or 0)}
+    elif date == _today:
         try:
             import requests
             res = requests.get(
