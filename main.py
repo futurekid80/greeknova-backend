@@ -368,6 +368,13 @@ async def lifespan(app: FastAPI):
         "cron", hour=20, minute=0, timezone="Asia/Kolkata", id="participant_flow_watchdog",
         misfire_grace_time=600
     )
+    for retry_hour in [21, 22, 23, 0]:
+        scheduler.add_job(
+            watchdog_participant_flow,
+            "cron", hour=retry_hour, minute=0, timezone="Asia/Kolkata",
+            id=f"participant_flow_retry_{retry_hour}",
+            misfire_grace_time=600
+        )
 
     scheduler.add_job(
         fetch_delivery_data,
