@@ -1452,13 +1452,27 @@ def stealth_buildup():
             "close_price": float(r.get("close_price") or 0),
         })
 
-    # ── Get today's price change (open-to-close candle body) ──────────────
+    # ── Get today's price change (open-to-close candle body) + volume ─────
     price_res = supabase.from_("daily_oi_summary")\
-        .select("symbol, close_price")\
+        .select("symbol, close_price, fut_vol")\
         .eq("trade_date", last_trading_day)\
         .limit(200)\
         .execute()
     price_map = {r["symbol"]: r for r in (price_res.data or [])}
+
+    # ── 5-day avg volume per symbol for context ────────────────────────────
+    vol_hist_res = supabase.from_("daily_oi_summary")\
+        .select("symbol, trade_date, fut_vol")\
+        .gte("trade_date", (check - _dt.timedelta(days=10)).isoformat())\
+        .lt("trade_date", last_trading_day)\
+        .order("trade_date", desc=True)\
+        .limit(2000)\
+        .execute()
+    vol_hist_map = defaultdict(list)
+    for r in (vol_hist_res.data or []):
+        if r.get("fut_vol"):
+            vol_hist_map[r["symbol"]].append(int(r["fut_vol"]))
+    avg_vol_map = {sym: sum(v[:5]) / len(v[:5]) for sym, v in vol_hist_map.items() if v}
 
 
     # ── Get CMP for ATM calculation ───────────────────────────────────────
@@ -1609,6 +1623,10 @@ def stealth_buildup():
         else:
             continue
 
+        today_vol = int(price_data.get("fut_vol") or 0)
+        avg_vol = avg_vol_map.get(sym, 0)
+        vol_ratio = round(today_vol / avg_vol, 2) if avg_vol > 0 else None
+
         results.append({
             "symbol":           sym,
             "tier":             tier,
@@ -1625,6 +1643,8 @@ def stealth_buildup():
             "pe_oi_L":          round(pe_oi / 100000, 2),
             "ce_oi_L":          round(ce_oi / 100000, 2),
             "oi_history":       [round(h["fut_oi_chg_pct"], 2) for h in last_15],
+            "volume":           today_vol,
+            "vol_ratio":        vol_ratio,
         })
 
     # Sort: Elite first, then Strong, then Watch, then by OI rank
