@@ -1305,7 +1305,7 @@ def stock_signal_history(symbol: str, days: int = 20):
         start = (datetime.now(ist).date() - timedelta(days=60)).isoformat()
 
         result = supabase.from_("daily_oi_summary") \
-            .select("trade_date, fut_oi_chg_pct, price_chg_pct, fut_signal, close_price") \
+            .select("trade_date, fut_oi_chg_pct, price_chg_pct, fut_signal, close_price, fut_vol") \
             .eq("symbol", symbol.upper()) \
             .gte("trade_date", start) \
             .lte("trade_date", today) \
@@ -1315,14 +1315,22 @@ def stock_signal_history(symbol: str, days: int = 20):
 
         rows = result.data or []
 
+        # Compute 5-day avg volume for context (is today's volume high or low vs recent norm)
+        vols = [int(r.get("fut_vol") or 0) for r in rows if r.get("fut_vol")]
+        avg_vol = sum(vols[1:6]) / len(vols[1:6]) if len(vols) > 1 else 0
+
         history = []
         for r in rows:
+            vol = int(r.get("fut_vol") or 0)
+            vol_ratio = round(vol / avg_vol, 2) if avg_vol > 0 else None
             history.append({
                 "date":         r["trade_date"],
                 "signal":       r.get("fut_signal") or "NEUTRAL",
                 "fut_oi_chg":   round(float(r.get("fut_oi_chg_pct") or 0), 2),
                 "price_chg":    round(float(r.get("price_chg_pct") or 0), 2),
                 "close_price":  round(float(r.get("close_price") or 0), 2),
+                "volume":       vol,
+                "vol_ratio":    vol_ratio,
             })
 
         return {
