@@ -228,6 +228,25 @@ def _get_eod_pulse(supabase):
         .limit(200)\
         .execute()
 
+    # Fetch 5-day avg volume for vol_ratio computation
+    from datetime import timedelta
+    vol_hist_start = (now_ist.date() - timedelta(days=10)).isoformat()
+    vol_hist_res = supabase.from_("daily_oi_summary")\
+        .select("symbol, trade_date, fut_vol")\
+        .gte("trade_date", vol_hist_start)\
+        .lt("trade_date", last_trading_day)\
+        .gt("fut_vol", 0)\
+        .order("trade_date", desc=True)\
+        .limit(1000)\
+        .execute()
+    vol_hist_map = {}
+    for r in (vol_hist_res.data or []):
+        s = r["symbol"]
+        if s not in vol_hist_map:
+            vol_hist_map[s] = []
+        vol_hist_map[s].append(int(r["fut_vol"]))
+    avg_vol_map = {s: sum(v[:5])/len(v[:5]) for s, v in vol_hist_map.items() if v}
+
     if not rows.data:
         return {"items": [], "count": 0, "message": "No EOD data available"}
 
@@ -252,6 +271,11 @@ def _get_eod_pulse(supabase):
         ltp = cmp_map.get(sym, 0)
         is_index = sym in INDEX_NSE_MAP
         signal, label, color, bg, border = classify(oi_chg, price_chg)
+        today_vol = int(r.get("fut_vol") or 0)
+        avg_vol = avg_vol_map.get(sym, 0)
+        vol_ratio = round(today_vol / avg_vol, 2) if avg_vol > 0 else None
+        vol_surge = vol_ratio is not None and vol_ratio >= 1.5
+
         items.append({
             "symbol":        sym,
             "is_index":      is_index,
@@ -268,7 +292,9 @@ def _get_eod_pulse(supabase):
             "oi_prev":       0,
             "fut_oi_now":    0,
             "fut_oi_prev":   0,
-            "vol_surge":     False,
+            "vol_surge":     vol_surge,
+            "vol_ratio":     vol_ratio,
+            "vol_today":     today_vol,
         })
 
     items.sort(key=lambda x: abs(x["oi_chg_pct"]), reverse=True)
