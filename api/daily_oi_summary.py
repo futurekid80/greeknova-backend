@@ -92,6 +92,12 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
 
         # ── Build upsert rows ─────────────────────────────────────────────
         rows = []
+        def cap_pct(val, limit=9999.99):
+            """Cap percentage values to avoid numeric overflow on new series day."""
+            if val is None: return None
+            try: return max(-limit, min(limit, float(val)))
+            except: return None
+
         for r in rpc_res.data:
             sym = r["r_symbol"]
             cmp_data = cmp_map.get(sym, {})
@@ -100,12 +106,12 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
                 "symbol":        sym,
                 "total_oi":      r["r_total_oi"],
                 "oi_chg_abs":    r["r_oi_chg_abs"],
-                "oi_chg_pct":    r["r_oi_chg_pct"],
+                "oi_chg_pct":    cap_pct(r["r_oi_chg_pct"]),
                 "total_volume":  r["r_total_volume"],
                 "vol_chg_abs":   r["r_vol_chg_abs"],
-                "vol_chg_pct":   r["r_vol_chg_pct"],
+                "vol_chg_pct":   cap_pct(r["r_vol_chg_pct"]),
                 "close_price":   cmp_data.get("cmp"),
-                "price_chg_pct": cmp_data.get("price_chg_pct"),
+                "price_chg_pct": cap_pct(cmp_data.get("price_chg_pct")),
             })
 
         if not rows:
