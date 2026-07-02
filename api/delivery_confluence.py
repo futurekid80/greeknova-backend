@@ -21,11 +21,29 @@ def get_delivery_confluence(supabase):
     today = datetime.now(ist).date()
 
     from utils.market_calendar import is_trading_day
-    check = today
+    # Delivery data is always from the PREVIOUS completed trading day
+    # (NSE publishes bhav copy after market close, sometimes late evening)
+    # So always look for last available date in delivery_data table
+    check = today - timedelta(days=1)
     for _ in range(7):
         if is_trading_day(check):
             break
         check -= timedelta(days=1)
+
+    # Further verify by checking what's actually in DB — avoids showing empty if NSE delayed
+    try:
+        last_available = supabase.from_("delivery_data")\
+            .select("trade_date")\
+            .order("trade_date", desc=True)\
+            .limit(1).execute()
+        if last_available.data:
+            db_date = last_available.data[0]["trade_date"]
+            # Use DB date if it's more recent than our weekday calculation
+            if db_date >= check.isoformat():
+                check = datetime.strptime(db_date, "%Y-%m-%d").date()
+    except:
+        pass
+
     last_trading_day = check.isoformat()
 
     # Invalidate cache if date changed
