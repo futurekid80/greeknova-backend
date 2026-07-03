@@ -333,7 +333,7 @@ def get_positional_intelligence(min_consec: int = 0):
                 if _raw_price_chg is None:
                     continue  # Skip new stocks with no previous day close
                 today_price = float(_raw_price_chg)
-            if today_oi > 0 and today_price > -0.3:
+            if today_oi > 0 and abs(today_price) <= 1.0:
                 if True:
                     if today_oi >= 2.0 and abs(today_price) <= 0.5:
                         tier, tier_label = "ELITE", "Elite"
