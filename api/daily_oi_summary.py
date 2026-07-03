@@ -24,8 +24,44 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         print(f"[DAILY_OI_SUMMARY] Computing for {trade_date}")
 
         # ── Server-side aggregation via RPC ───────────────────────────────
-        rpc_res = supabase.rpc(
-            "compute_daily_oi_summary",
+        # ── Fetch official NSE settlement close via Kite historical_data ──
+        official_close_map = {}
+        try:
+            from services.kite_auth import get_kite_client
+            kite = get_kite_client()
+            instruments = kite.instruments("NSE")
+            token_map = {}
+            INDEX_TOKENS = {"NIFTY": 256265, "BANKNIFTY": 260105, "FINNIFTY": 257801}
+            token_map.update(INDEX_TOKENS)
+            for inst in instruments:
+                if inst["tradingsymbol"] in SYMBOLS:
+                    token_map[inst["tradingsymbol"]] = inst["instrument_token"]
+
+            import time as _time
+            for sym in SYMBOLS:
+                token = token_map.get(sym)
+                if not token:
+                    continue
+                try:
+                    candles = kite.historical_data(
+                        instrument_token=token,
+                        from_date=trade_date,
+                        to_date=trade_date,
+                        interval="day",
+                        continuous=False,
+                        oi=False,
+                    )
+                    for c in candles:
+                        if str(c["date"])[:10] == trade_date:
+                            official_close_map[sym] = float(c["close"])
+                            break
+                    _time.sleep(0.05)
+                except Exception as e:
+                    print(f"[DailyOI] Kite close {sym}: {e}")
+        except Exception as e:
+            print(f"[DailyOI] Kite init failed: {e}")
+
+        rpc_res = supabase.rpc("compute_daily_oi_summary", {
             {"p_trade_date": trade_date}
         ).execute()
 
@@ -110,7 +146,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
                 "total_volume":  r["r_total_volume"],
                 "vol_chg_abs":   r["r_vol_chg_abs"],
                 "vol_chg_pct":   cap_pct(r["r_vol_chg_pct"]),
-                "close_price":   cmp_data.get("cmp"),
+                "close_price":   official_close_map.get(sym) or cmp_data.get("cmp"),
                 "price_chg_pct": cap_pct(cmp_data.get("price_chg_pct")),
             })
 
