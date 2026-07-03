@@ -92,6 +92,8 @@ def get_eod_report(supabase, date: str = None):
     stealth = []
     for r in stealth_raw:
         oi = float(r.get("fut_oi_chg_pct") or 0)
+        if r.get("price_chg_pct") is None:
+            continue  # Skip new stocks with no previous day close
         price = float(r.get("price_chg_pct") or 0)
         if oi >= 2.0 and abs(price) <= 0.5:
             tier = "ELITE"
