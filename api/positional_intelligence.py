@@ -329,7 +329,10 @@ def get_positional_intelligence(min_consec: int = 0):
                 if not today_data:
                     today_data = history[-1] if history else None
                 today_oi = float((today_data or {}).get("fut_oi_chg_pct") or 0)
-                today_price = float((today_data or {}).get("price_chg_pct") or 0)
+                _raw_price_chg = (today_data or {}).get("price_chg_pct")
+                if _raw_price_chg is None:
+                    continue  # Skip new stocks with no previous day close
+                today_price = float(_raw_price_chg)
             if today_oi > 0 and today_price > -0.3:
                 if True:
                     if today_oi >= 2.0 and abs(today_price) <= 0.5:
