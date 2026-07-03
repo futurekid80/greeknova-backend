@@ -61,9 +61,43 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         except Exception as e:
             print(f"[DailyOI] Kite init failed: {e}")
 
+       # ── Fetch official NSE settlement close via Kite ──────────────────
+        official_close_map = {}
+        try:
+            from services.kite_auth import get_kite_client
+            import time as _time
+            kite = get_kite_client()
+            instruments = kite.instruments("NSE")
+            token_map = {**{"NIFTY": 256265, "BANKNIFTY": 260105, "FINNIFTY": 257801}}
+            for inst in instruments:
+                if inst["tradingsymbol"] in SYMBOLS:
+                    token_map[inst["tradingsymbol"]] = inst["instrument_token"]
+            for sym in SYMBOLS:
+                token = token_map.get(sym)
+                if not token:
+                    continue
+                try:
+                    candles = kite.historical_data(
+                        instrument_token=token,
+                        from_date=trade_date,
+                        to_date=trade_date,
+                        interval="day",
+                        continuous=False,
+                        oi=False,
+                    )
+                    for c in candles:
+                        if str(c["date"])[:10] == trade_date:
+                            official_close_map[sym] = float(c["close"])
+                            break
+                    _time.sleep(0.05)
+                except Exception as e:
+                    print(f"[DailyOI] Kite close {sym}: {e}")
+        except Exception as e:
+            print(f"[DailyOI] Kite init failed: {e}")
+
         rpc_res = supabase.rpc("compute_daily_oi_summary", {
-            {"p_trade_date": trade_date}
-        ).execute()
+            "p_trade_date": trade_date,
+        }).execute()
 
         if not rpc_res.data:
             return {"error": f"No data for {trade_date}", "rows_written": 0}
