@@ -96,6 +96,7 @@ SYMBOLS = [
     "HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL",
     "PAYTM","NYKAA","PERSISTENT","DIXON",
     "BSE","MCX","TMPV","LTIM","GODREJPROP","DIVISLAB","COFORGE","ANGELONE","CDSL","OIL",
+]
 
 # How many trading days to look back for IVR/IVP
 # Market standard = 252 (1 year). We use whatever history exists,
