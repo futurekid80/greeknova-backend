@@ -1605,6 +1605,9 @@ def stealth_buildup():
         close_price = float(price_data.get("close_price") or 0)
         cmp = cmp_map.get(sym, close_price)
         # Get price change directly from daily_oi_summary (most accurate — uses official EOD)
+        # Skip if price_chg_pct is null — means no previous day data (new stock)
+        if price_data.get("price_chg_pct") is None:
+            continue
         price_chg = round(float(price_data.get("price_chg_pct") or 0), 2)
 
         # Skip if price moved too much either way — stealth = quiet accumulation
