@@ -260,8 +260,10 @@ def get_positional_intelligence(min_consec: int = 0):
             if tc and bc:
                 cpr_position = "Above CPR" if cmp > tc else "Below CPR" if cmp < bc else "Inside CPR"
 
-        consec_lb = int(pi.get("consec_lb") or 0)
-        consec_sb = int(pi.get("consec_sb") or 0)
+        # Cap consecutive days to current series length (prevents cross-series streaks)
+        series_days = len([h for h in sym_history.get(sym, []) if h["date"] >= series_start])
+        consec_lb = min(int(pi.get("consec_lb") or 0), series_days)
+        consec_sb = min(int(pi.get("consec_sb") or 0), series_days)
         lb_consistency = int(pi.get("lb_consistency_pct") or 0)
         sb_consistency = int(pi.get("sb_consistency_pct") or 0)
         latest_signal = pi.get("latest_fut_signal", "NEUTRAL")
