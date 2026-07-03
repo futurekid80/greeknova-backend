@@ -1604,20 +1604,11 @@ def stealth_buildup():
         price_data = price_map.get(sym, {})
         close_price = float(price_data.get("close_price") or 0)
         cmp = cmp_map.get(sym, close_price)
-        # Get prev day close from daily_oi_summary history
-        price_chg = 0  # default — overwritten if prev day found
-        today_idx = next((i for i, h in enumerate(history) if h["date"] == last_trading_day), -1)
-        if today_idx > 0:
-            prev_close = history[today_idx - 1].get("close_price", 0)
-            if prev_close > 0 and close_price > 0:
-                price_chg = round((close_price - prev_close) / prev_close * 100, 2)
-            else:
-                price_chg = 0
-        else:
-                price_chg = 0
+        # Get price change directly from daily_oi_summary (most accurate — uses official EOD)
+        price_chg = round(float(price_data.get("price_chg_pct") or 0), 2)
 
-        # Skip bearish days — stealth buildup must be accumulation without price reaction
-        if price_chg < -0.3:
+        # Skip if price moved too much either way — stealth = quiet accumulation
+        if price_chg < -0.3 or price_chg > 1.0:
             continue
 
         # Net Delta (ATM±5)
