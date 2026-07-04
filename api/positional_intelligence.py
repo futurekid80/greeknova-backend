@@ -193,7 +193,8 @@ def get_positional_intelligence(min_consec: int = 0):
         # Get latest timestamp in today's snapshots
         latest_snap = supabase.from_("oi_snapshots")\
             .select("timestamp")\
-            .gte("timestamp", f"{today_str}T03:45:00+00:00")\
+            .gte("timestamp", f"{last_trading_day}T03:45:00+00:00")\
+            .lt("timestamp", f"{last_trading_day}T11:00:00+00:00")\
             .order("timestamp", desc=True)\
             .limit(1)\
             .execute()
@@ -232,7 +233,7 @@ def get_positional_intelligence(min_consec: int = 0):
     try:
         del_res = supabase.from_("delivery_data")\
             .select("symbol, delivery_pct")\
-            .eq("trade_date", today_str)\
+            .eq("trade_date", last_trading_day)\
             .execute()
         delivery_map = {r["symbol"]: float(r["delivery_pct"] or 0) for r in (del_res.data or [])}
     except Exception as e:
