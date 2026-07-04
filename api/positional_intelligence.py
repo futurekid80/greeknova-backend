@@ -56,6 +56,18 @@ def get_positional_intelligence(min_consec: int = 0):
     today = now_ist.date()
     today_str = today.isoformat()
 
+    # Get last trading day (handles weekends/holidays)
+    try:
+        from utils.market_calendar import is_trading_day
+        _check = today
+        if not is_trading_day(_check):
+            _check = _check - timedelta(days=1)
+            while not is_trading_day(_check):
+                _check = _check - timedelta(days=1)
+        last_trading_day = _check.isoformat()
+    except:
+        last_trading_day = today_str
+
     # Get expiry and series dates
     try:
         expiry, series_start = _get_expiry_and_series(today)
