@@ -1290,6 +1290,107 @@ def delivery_confluence():
     from utils.db import get_supabase
     return get_delivery_confluence(get_supabase())
 
+@app.get("/stock-intel/{symbol}")
+def stock_intel(symbol: str):
+    """Unified stock intelligence — aggregates all signals for one symbol."""
+    from utils.db import get_supabase
+    import pytz
+    from datetime import datetime, timedelta
+    supabase = get_supabase()
+    sym = symbol.upper()
+    ist = pytz.timezone("Asia/Kolkata")
+    today = datetime.now(ist).date()
+
+    # Last trading day
+    try:
+        from utils.market_calendar import is_trading_day
+        check = today
+        if not is_trading_day(check):
+            check -= timedelta(days=1)
+            while not is_trading_day(check):
+                check -= timedelta(days=1)
+        last_trading_day = check.isoformat()
+    except:
+        last_trading_day = today.isoformat()
+
+    result = {"symbol": sym, "last_trading_day": last_trading_day}
+
+    # ── 1. FUT Signal (today) ─────────────────────────────────────────
+    try:
+        fut_res = supabase.from_("daily_oi_summary")\
+            .select("trade_date, fut_signal, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol")\
+            .eq("symbol", sym)\
+            .eq("trade_date", last_trading_day)\
+            .limit(1).execute()
+        result["fut_signal"] = fut_res.data[0] if fut_res.data else None
+    except:
+        result["fut_signal"] = None
+
+    # ── 2. Signal History (last 20 days) ──────────────────────────────
+    try:
+        hist_res = supabase.from_("daily_oi_summary")\
+            .select("trade_date, fut_signal, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol")\
+            .eq("symbol", sym)\
+            .order("trade_date", desc=True)\
+            .limit(20).execute()
+        vols = [int(r.get("fut_vol") or 0) for r in (hist_res.data or [])[1:6] if r.get("fut_vol")]
+        avg_vol = sum(vols) / len(vols) if vols else 0
+        history = []
+        for r in (hist_res.data or []):
+            vol = int(r.get("fut_vol") or 0)
+            history.append({
+                "date": r["trade_date"],
+                "signal": r.get("fut_signal") or "NEUTRAL",
+                "fut_oi_chg": round(float(r.get("fut_oi_chg_pct") or 0), 2),
+                "price_chg": round(float(r.get("price_chg_pct") or 0), 2),
+                "close_price": round(float(r.get("close_price") or 0), 2),
+                "volume": vol,
+                "vol_ratio": round(vol / avg_vol, 2) if avg_vol > 0 else None,
+            })
+        result["signal_history"] = history
+    except:
+        result["signal_history"] = []
+
+    # ── 3. Delivery ───────────────────────────────────────────────────
+    try:
+        del_res = supabase.from_("delivery_data")\
+            .select("trade_date, delivery_pct")\
+            .eq("symbol", sym)\
+            .order("trade_date", desc=True)\
+            .limit(5).execute()
+        result["delivery"] = del_res.data or []
+    except:
+        result["delivery"] = []
+
+    # ── 4. CPR ────────────────────────────────────────────────────────
+    try:
+        cpr_res = supabase.from_("cpr_levels")\
+            .select("trade_date, tc, bc, pivot, width_pct, cpr_trend, cpr_status")\
+            .eq("symbol", sym)\
+            .order("trade_date", desc=True)\
+            .limit(1).execute()
+        result["cpr"] = cpr_res.data[0] if cpr_res.data else None
+    except:
+        result["cpr"] = None
+
+    # ── 5. UOA ────────────────────────────────────────────────────────
+    try:
+        from api.uoa import get_uoa
+        uoa_data = get_uoa()
+        result["uoa"] = [s for s in (uoa_data.get("signals") or []) if s.get("symbol") == sym]
+    except:
+        result["uoa"] = []
+
+    # ── 6. Options Jungle ─────────────────────────────────────────────
+    try:
+        from api.options_jungle import get_options_jungle
+        jungle = get_options_jungle()
+        result["jungle"] = [s for s in (jungle.get("oi_spikes") or []) if s.get("symbol") == sym]
+    except:
+        result["jungle"] = []
+
+    return result
+
 @app.get("/rollover")
 def rollover():
     from api.rollover import get_rollover
