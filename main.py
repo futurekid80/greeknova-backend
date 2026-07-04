@@ -386,7 +386,7 @@ async def lifespan(app: FastAPI):
         "cron", hour=18, minute=30, timezone="Asia/Kolkata", id="delivery_data_fetch",
         misfire_grace_time=600
     )
-    for _delivery_hour in [19, 20, 21]:
+    for _delivery_hour in [19, 20, 21, 22, 23]:
         scheduler.add_job(
             fetch_delivery_data,
             "cron", hour=_delivery_hour, minute=0, timezone="Asia/Kolkata",
