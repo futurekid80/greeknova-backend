@@ -1373,7 +1373,7 @@ def stock_intel(symbol: str):
     except:
         result["cpr"] = None
 
-    # ── 5. UOA ────────────────────────────────────────────────────────
+    # ── 5. UOA ────────────────────────────────────────────────────────────
     try:
         from api.uoa import get_uoa
         uoa_data = get_uoa()
@@ -1381,13 +1381,27 @@ def stock_intel(symbol: str):
     except:
         result["uoa"] = []
 
-    # ── 6. Options Jungle ─────────────────────────────────────────────
+    # ── 6. Options Jungle — writing signals ───────────────────────────────
     try:
         from api.options_jungle import get_options_jungle
         jungle = get_options_jungle()
-        result["jungle"] = [s for s in (jungle.get("oi_spikes") or []) if s.get("symbol") == sym]
+        sym_jungle = [s for s in (jungle.get("oi_spikes") or []) if s.get("symbol") == sym]
+        result["jungle"] = sym_jungle
+        result["put_writing"] = [s for s in sym_jungle if s.get("interpretation") == "PUT_WRITING"]
+        result["call_writing"] = [s for s in sym_jungle if s.get("interpretation") == "CALL_WRITING"]
     except:
         result["jungle"] = []
+        result["put_writing"] = []
+        result["call_writing"] = []
+
+    # ── 7. Max Pain ───────────────────────────────────────────────────────
+    try:
+        from api.max_pain import get_max_pain
+        mp_data = get_max_pain()
+        mp_item = next((s for s in (mp_data.get("symbols") or []) if s.get("symbol") == sym), None)
+        result["max_pain"] = mp_item
+    except:
+        result["max_pain"] = None
 
     return result
 
