@@ -289,7 +289,7 @@ def get_positional_intelligence(min_consec: int = 0):
         today_vol_amt = None
         vol_ratio_ctx = None
         if vol_data_for_sym:
-            today_row = next((r for r in reversed(vol_data_for_sym) if r["trade_date"] == today_str), None)
+            today_row = next((r for r in reversed(vol_data_for_sym) if r["trade_date"] == last_trading_day), None)
             if today_row:
                 today_vol_amt = int(today_row.get("fut_vol") or 0)
                 hist_vols_ctx = sorted([int(r.get("fut_vol") or 0) for r in vol_data_for_sym[:-1] if int(r.get("fut_vol") or 0) > 0], reverse=True)[:5]
