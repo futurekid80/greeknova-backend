@@ -421,7 +421,7 @@ def get_positional_intelligence(min_consec: int = 0):
             dominant_consistency = sb_consistency
             dominant_series_oi = series_sb_oi
 
-        if dominant_signal and total_days >= 8:
+        if dominant_signal and total_days >= 5:
             series_buildup.append({
                 **base,
                 "signal": dominant_signal,
