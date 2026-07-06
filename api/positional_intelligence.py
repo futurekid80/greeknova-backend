@@ -190,7 +190,11 @@ def get_positional_intelligence(min_consec: int = 0):
             for s in first_oi:
                 if first_oi[s] > 0:
                     oi_chg = ((latest_oi[s] - first_oi[s]) / first_oi[s]) * 100
-                    price_chg = ((latest_price[s] - open_price[s]) / open_price[s]) * 100 if open_price[s] > 0 else 0
+                    prev_close = cmp_map.get(s, 0)
+                    if prev_close > 0:
+                        price_chg = ((latest_price[s] - prev_close) / prev_close) * 100
+                    else:
+                        price_chg = ((latest_price[s] - open_price[s]) / open_price[s]) * 100 if open_price[s] > 0 else 0
                     live_oi_map[s] = {
                         "fut_oi_chg_pct": round(oi_chg, 2),
                         "price_chg_pct": round(price_chg, 2),
