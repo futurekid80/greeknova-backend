@@ -230,10 +230,8 @@ def fetch_delivery_data():
         from utils.db import get_supabase
         supabase = get_supabase()
         # Check if already fetched
-        existing = supabase.from_("delivery_data").select("symbol").eq("trade_date", today.isoformat()).limit(1).execute()
-        if existing.data:
-            print(f"[Delivery] Already have data for {today}")
-            return
+        # Note: removed early-exit-if-exists check — upsert is safe to re-run,
+        # and this was blocking legitimate refetches when a partial/stale row existed.
         SYMBOLS = ["RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN","BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","TITAN","SUNPHARMA","ULTRACEMCO","BAJFINANCE","WIPRO","HCLTECH","TATACONSUM","TATASTEEL","ADANIENT","POWERGRID","NTPC","ONGC","JSWSTEEL","COALINDIA","BAJAJFINSV","TECHM","APOLLOHOSP","BAJAJ-AUTO","BPCL","BRITANNIA","CIPLA","DRREDDY","EICHERMOT","GRASIM","HEROMOTOCO","HINDALCO","HDFCLIFE","INDUSINDBK","JIOFIN","M&M","NESTLEIND","SBILIFE","SHRIRAMFIN","TRENT","ADANIPORTS","BANKBARODA","BEL","CANBK","CHOLAFIN","DLF","GAIL","HAVELLS","HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL","PAYTM","NYKAA","PERSISTENT","DIXON","BSE","MCX","TMPV","LTIM","GODREJPROP","DIVISLAB","COFORGE","ANGELONE","CDSL","OIL"]
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
