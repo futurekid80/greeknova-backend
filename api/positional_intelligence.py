@@ -187,10 +187,36 @@ def get_positional_intelligence(min_consec: int = 0):
                 if oi > 0:
                     latest_oi[s] = oi
                     latest_price[s] = lp
+            # Fetch genuine previous trading day close — NOT last_trading_day,
+            # which equals today during market hours. Mirrors vol_oi_breakout.py.
+            prev_close_map = {}
+            try:
+                _prev_day = datetime.strptime(today_str, '%Y-%m-%d')
+                for _ in range(10):
+                    _prev_day = _prev_day - timedelta(days=1)
+                    if _prev_day.weekday() < 5:
+                        break
+                _prev_date = _prev_day.strftime('%Y-%m-%d')
+                _prev_cmp_res = supabase.from_("cmp_prices")\
+                    .select("symbol, cmp")\
+                    .gte("timestamp", f"{_prev_date}T00:00:00+00:00")\
+                    .lte("timestamp", f"{_prev_date}T23:59:59+00:00")\
+                    .order("timestamp", desc=True)\
+                    .limit(500)\
+                    .execute()
+                _seen_prev = set()
+                for _row in (_prev_cmp_res.data or []):
+                    _sym = _row["symbol"]
+                    if _sym not in _seen_prev:
+                        prev_close_map[_sym] = float(_row["cmp"])
+                        _seen_prev.add(_sym)
+            except Exception as e:
+                print(f"[PI] Prev close fetch failed: {e}")
+
             for s in first_oi:
                 if first_oi[s] > 0:
                     oi_chg = ((latest_oi[s] - first_oi[s]) / first_oi[s]) * 100
-                    prev_close = cmp_map.get(s, 0)
+                    prev_close = prev_close_map.get(s, 0)
                     if prev_close > 0:
                         price_chg = ((latest_price[s] - prev_close) / prev_close) * 100
                     else:
