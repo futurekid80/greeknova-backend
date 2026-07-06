@@ -143,13 +143,14 @@ def _get_eod_from_summary(supabase, now_ist):
 
     sym_hist = defaultdict(list)
     for r in (hist.data or []):
-        sym_hist[r["symbol"]].append(int(r.get("fut_vol") or 0))
+        sym_hist[r["symbol"]].append((r.get("trade_date"), int(r.get("fut_vol") or 0)))
 
     signals = []
     for r in (rows.data or []):
         sym = r["symbol"]
         vol_today = int(r.get("fut_vol") or 0)
-        hist_vols = sorted(sym_hist[sym], reverse=True)[:5]
+        recent5 = sorted(sym_hist[sym], key=lambda x: x[0], reverse=True)[:5]
+        hist_vols = [v for _, v in recent5]
         avg_5d = sum(hist_vols) / len(hist_vols) if hist_vols else 0
         vol_ratio = round(vol_today / avg_5d, 2) if avg_5d > 0 else 0
         if vol_ratio < 1.5:
@@ -307,13 +308,14 @@ def get_vol_oi_breakout(supabase):
             sym = r["symbol"]
             vol = int(r.get("fut_vol") or 0)
             if vol > 0:
-                sym_date_vol[sym].append(vol)
+                sym_date_vol[sym].append((r.get("trade_date"), vol))
 
         hist_avg_vol = {}
-        for sym, vols in sym_date_vol.items():
-            sorted_vols = sorted(vols, reverse=True)[:5]
-            if sorted_vols:
-                hist_avg_vol[sym] = sum(sorted_vols) / len(sorted_vols)
+        for sym, entries in sym_date_vol.items():
+            recent5 = sorted(entries, key=lambda x: x[0], reverse=True)[:5]
+            vols = [v for _, v in recent5]
+            if vols:
+                hist_avg_vol[sym] = sum(vols) / len(vols)
 
         # ── Step 4: CPR levels ────────────────────────────────────────────
         cpr_rows = supabase.from_("cpr_levels")\
