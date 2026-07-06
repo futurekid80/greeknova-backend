@@ -160,8 +160,11 @@ def get_eod_report(supabase, date: str = None):
     except:
         pass
 
-    if date == _today and _existing_cash:
+    _is_settled_time = datetime.now(_ist).hour >= 19
+    if date == _today and _existing_cash and not _is_settled_time:
         # Already have manually-verified or previously-scraped data — don't overwrite
+        # (unless it's past 7 PM IST, when NSE's official cash figures are settled —
+        # refetch once to replace any early/provisional numbers)
         r = _existing_cash
         cash_data["FII"] = {"buy": float(r["fii_buy"] or 0), "sell": float(r["fii_sell"] or 0), "net": float(r["fii_net"] or 0)}
         cash_data["DII"] = {"buy": float(r["dii_buy"] or 0), "sell": float(r["dii_sell"] or 0), "net": float(r["dii_net"] or 0)}
