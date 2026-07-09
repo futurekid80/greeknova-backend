@@ -49,15 +49,32 @@ def remove_subscription(supabase, endpoint: str):
 
 def _send_one(subscription: dict, payload: dict) -> bool:
     """Send push to a single subscription. Returns False if the subscription is dead."""
+    from urllib.parse import urlparse
+    import time as _time
+
+    endpoint = subscription["endpoint"]
+    parsed = urlparse(endpoint)
+    aud = f"{parsed.scheme}://{parsed.netloc}"
+
+    # Set every claim explicitly ourselves rather than relying on pywebpush's
+    # auto-fill, which has been intermittently unreliable under rapid
+    # sequential calls (each send needs its own fresh, correctly-scoped
+    # 'aud' matching the push service's own origin, plus a real expiry).
+    claims = {
+        "sub": VAPID_CONTACT_EMAIL,
+        "aud": aud,
+        "exp": int(_time.time()) + 12 * 60 * 60,
+    }
+
     try:
         webpush(
             subscription_info={
-                "endpoint": subscription["endpoint"],
+                "endpoint": endpoint,
                 "keys": {"p256dh": subscription["p256dh"], "auth": subscription["auth"]},
             },
             data=json.dumps(payload),
             vapid_private_key=VAPID_PRIVATE_KEY,
-            vapid_claims={"sub": VAPID_CONTACT_EMAIL},
+            vapid_claims=claims,
         )
         return True
     except WebPushException as e:
