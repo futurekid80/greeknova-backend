@@ -360,8 +360,10 @@ def get_positional_intelligence(min_consec: int = 0):
                     "sb_days": int(pi.get("sb_days") or 0),
                 })
 
-        # ── Stealth Buildup ───────────────────────────────────────────────
-        if len(history) >= 8:
+        # ── Stealth Buildup ─────────────────────────────────────────────
+        # No minimum-history requirement by design — fires on ANY day with
+        # a small price candle + large OI change, standalone per-day check.
+        if len(history) >= 1:
             last_15 = history[-15:]
             # During market hours use live snapshot data, else use daily_oi_summary
             if is_market and sym in live_oi_map:
