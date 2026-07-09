@@ -1,7 +1,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
@@ -317,6 +317,20 @@ async def lifespan(app: FastAPI):
 
     # ── GreekNova jobs (unchanged) ─────────────────────────────────────────
     scheduler.add_job(run_full_capture, "interval", minutes=5, id="full_capture")
+    def _run_push_checks_job():
+        try:
+            from services.push_checker import run_push_checks
+            from utils.db import get_supabase
+            from datetime import datetime as _dt
+            import pytz as _pytz
+            _ist = _pytz.timezone("Asia/Kolkata")
+            _now = _dt.now(_ist)
+            _is_mkt = _now.weekday() < 5 and (9*60+15) <= (_now.hour*60+_now.minute) <= (15*60+30)
+            if _is_mkt:
+                run_push_checks(get_supabase())
+        except Exception as e:
+            print(f"[Push] Scheduled check failed: {e}")
+    scheduler.add_job(_run_push_checks_job, "interval", minutes=5, id="push_checks")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
     scheduler.add_job(
         lambda: __import__('api.cpr', fromlist=['compute_and_store_cpr']).compute_and_store_cpr(),
@@ -2027,6 +2041,27 @@ def oi_walls_detail(symbol: str):
         "intraday_range":      intraday_range,
         "intraday_range_pct":  intraday_range_pct,
     }
+
+@app.post("/push-subscribe")
+async def push_subscribe(request: Request):
+    from api.push_notifications import save_subscription
+    body = await request.json()
+    subscription = body.get("subscription")
+    threshold = body.get("spikeThreshold", 10)
+    if not subscription:
+        return {"error": "Missing subscription"}
+    supabase = get_supabase()
+    return save_subscription(supabase, subscription, threshold)
+
+@app.post("/push-unsubscribe")
+async def push_unsubscribe(request: Request):
+    from api.push_notifications import remove_subscription
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    if not endpoint:
+        return {"error": "Missing endpoint"}
+    supabase = get_supabase()
+    return remove_subscription(supabase, endpoint)
 
 @app.get("/fetch-delivery")
 def fetch_delivery():
