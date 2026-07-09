@@ -2042,6 +2042,15 @@ def oi_walls_detail(symbol: str):
         "intraday_range_pct":  intraday_range_pct,
     }
 
+@app.get("/push-check-now")
+def push_check_now():
+    try:
+        from services.push_checker import run_push_checks
+        run_push_checks(get_supabase())
+        return {"status": "triggered"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @app.post("/push-subscribe")
 async def push_subscribe(request: Request):
     from api.push_notifications import save_subscription
