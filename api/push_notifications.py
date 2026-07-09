@@ -9,7 +9,7 @@ import json
 from pywebpush import webpush, WebPushException
 
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
-VAPID_CONTACT_EMAIL = os.environ.get("VAPID_CONTACT_EMAIL", "mailto:support@greeknova.app")
+VAPID_CONTACT_EMAIL = os.environ.get("VAPID_CONTACT_EMAIL") or "mailto:support@greeknova.app"
 
 
 def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10):
