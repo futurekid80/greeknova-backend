@@ -238,21 +238,27 @@ def fetch_delivery_data():
             "Accept": "*/*",
             "Referer": "https://www.nseindia.com/",
         }
-        date_str = today.strftime('%Y%m%d')
-        url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date_str}_F_0000.csv.zip"
+        date_str = today.strftime('%d%m%Y')
+        # Correct NSE report: "Full Bhav Data" — the older CM bhavcopy URL had NO
+        # delivery columns at all (it's the F&O-style unified file), which caused
+        # every fetch to silently fail via a blank StopIteration error. This URL
+        # is the genuine cash-market report that actually contains DELIV_QTY/DELIV_PER.
+        url = f"https://nsearchives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
         res = requests.get(url, headers=headers, timeout=15)
         if res.status_code != 200:
             print(f"[Delivery] HTTP {res.status_code} for {today}")
             return
-        z = zipfile.ZipFile(io.BytesIO(res.content))
-        content = z.read(z.namelist()[0]).decode('utf-8')
+        content = res.text
         lines = content.strip().split('\n')
         header = [h.strip() for h in lines[0].split(',')]
-        sym_idx = next(i for i,h in enumerate(header) if 'TckrSymb' in h)
-        trd_idx = next(i for i,h in enumerate(header) if 'TtlTradgVol' in h)
-        del_idx = next(i for i,h in enumerate(header) if 'DlvrblQty' in h)
-        del_pct_idx = next((i for i,h in enumerate(header) if 'DlvrblPct' in h), None)
-        series_idx = next((i for i,h in enumerate(header) if 'SctySrs' in h), None)
+        sym_idx = next((i for i,h in enumerate(header) if h == 'SYMBOL'), None)
+        trd_idx = next((i for i,h in enumerate(header) if h == 'TTL_TRD_QNTY'), None)
+        del_idx = next((i for i,h in enumerate(header) if h == 'DELIV_QTY'), None)
+        del_pct_idx = next((i for i,h in enumerate(header) if h == 'DELIV_PER'), None)
+        series_idx = next((i for i,h in enumerate(header) if h == 'SERIES'), None)
+        if sym_idx is None or trd_idx is None or del_idx is None:
+            print(f"[Delivery] Column not found in header: {header}")
+            return
         records = []
         for line in lines[1:]:
             parts = [p.strip().strip('"') for p in line.split(',')]
