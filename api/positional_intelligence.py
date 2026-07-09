@@ -465,7 +465,13 @@ def get_positional_intelligence(min_consec: int = 0):
 
     # Sort each section
     active_conviction.sort(key=lambda x: (-x["consec_days"], -x["consistency_pct"]))
-    stealth_buildup.sort(key=lambda x: ({"ELITE": 0, "STRONG": 1, "WATCH": 2}.get(x["tier"], 3), x["rank"]))
+    # Was sorting by x["rank"] as tiebreaker, but that field is always 0 for
+    # every entry — never actually computed — so within a tier the order was
+    # arbitrary, not by signal strength. This meant strong signals could get
+    # silently cut off by the top-10 cap while weaker ones stayed visible.
+    # Sort by today's OI change magnitude within each tier instead, so the
+    # genuinely strongest signals always surface first.
+    stealth_buildup.sort(key=lambda x: ({"ELITE": 0, "STRONG": 1, "WATCH": 2}.get(x["tier"], 3), -abs(x.get("today_oi_chg", 0))))
     vol_breakout.sort(key=lambda x: -x["vol_ratio"])
     series_buildup.sort(key=lambda x: -x["consistency_pct"])
 
