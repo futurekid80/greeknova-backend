@@ -27,7 +27,23 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     days = PERIOD_DAYS.get(period, 5)
 
     today = datetime.now().date()
-    lookback_start = (today - timedelta(days=int(days * 2.2) + 5)).isoformat()
+
+    # "Monthly" means "since the current F&O series started", NOT a blind
+    # rolling 20-day window — a rolling window can cross a monthly rollover,
+    # where FUT OI resets to a new contract. That produces one artificially
+    # huge daily % change (comparing fresh low OI against the old expiring
+    # contract) which then wrecks the whole cumulative figure once compounded.
+    # Weekly stays a simple rolling window since a week rarely crosses rollover.
+    series_start = None
+    if period == "monthly":
+        try:
+            from api.positional_radar import get_monthly_expiry, get_series_start
+            expiry = get_monthly_expiry(today.year, today.month)
+            series_start = get_series_start(expiry)
+        except Exception as e:
+            print(f"[OIBuildup] Series start lookup failed, falling back to rolling window: {e}")
+
+    lookback_start = series_start if series_start else (today - timedelta(days=int(days * 2.2) + 5)).isoformat()
 
     try:
         rows_res = supabase.from_("daily_oi_summary") \
@@ -45,8 +61,9 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     results = []
     for sym, rows in by_symbol.items():
         rows_sorted = sorted(rows, key=lambda r: r["trade_date"])
-        window = rows_sorted[-days:]
-        if len(window) < days:
+        window = rows_sorted if series_start else rows_sorted[-days:]
+        min_days = 3 if series_start else days
+        if len(window) < min_days:
             continue
 
         oi_factor = 1.0
@@ -69,16 +86,17 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         if sig_type == "NEUTRAL":
             continue
 
+        actual_days = len(window)
         results.append({
             "symbol": sym,
             "period": period,
-            "trading_days": days,
+            "trading_days": actual_days,
             "start_date": window[0]["trade_date"],
             "end_date": window[-1]["trade_date"],
             "cumulative_oi_pct": cumulative_oi_pct,
             "cumulative_price_pct": cumulative_price_pct,
             "close_price": float(window[-1].get("close_price") or 0),
-            "avg_daily_fut_vol": round(vol_total / days) if days else 0,
+            "avg_daily_fut_vol": round(vol_total / actual_days) if actual_days else 0,
             "signal_type": sig_type,
             "signal_label": sig_label,
         })
