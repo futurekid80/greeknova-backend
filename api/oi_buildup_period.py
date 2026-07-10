@@ -1,9 +1,20 @@
 """
 oi_buildup_period.py
-Rolling weekly (5 trading days) and monthly (20 trading days) FUT OI buildup
+Rolling weekly (5 trading days) and monthly (current series) FUT OI buildup
 ranking — reuses daily_oi_summary.fut_oi_chg_pct, compounded across the
 window to get a true cumulative change (not a simple sum, since daily %
 changes compound rather than add).
+
+"Monthly" means "since the current F&O series started", NOT a blind rolling
+20-day window — a rolling window can cross a monthly rollover, where FUT OI
+resets to a new contract. That produces one artificially huge daily % change
+(comparing fresh low OI against the old expiring contract) which then wrecks
+the whole cumulative figure once compounded. Weekly stays a simple rolling
+window since a week rarely crosses rollover.
+
+Also computes avg_daily_fut_vol as a RATIO vs the equivalent previous period
+(prior 5 trading days for weekly, prior series for monthly), not a raw
+absolute number — e.g. "1.2x" meaning 20% more daily volume than last period.
 """
 from datetime import datetime, timedelta
 
@@ -23,17 +34,22 @@ def classify(oi_pct, price_pct):
     return "NEUTRAL", "Neutral"
 
 
+def _prev_month_series_start(today):
+    """Get the series_start of the PREVIOUS monthly F&O series."""
+    from api.positional_radar import get_monthly_expiry, get_series_start
+    prev_month = today.month - 1
+    prev_year = today.year
+    if prev_month == 0:
+        prev_month = 12
+        prev_year -= 1
+    prev_expiry = get_monthly_expiry(prev_year, prev_month)
+    return get_series_start(prev_expiry)
+
+
 def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     days = PERIOD_DAYS.get(period, 5)
-
     today = datetime.now().date()
 
-    # "Monthly" means "since the current F&O series started", NOT a blind
-    # rolling 20-day window — a rolling window can cross a monthly rollover,
-    # where FUT OI resets to a new contract. That produces one artificially
-    # huge daily % change (comparing fresh low OI against the old expiring
-    # contract) which then wrecks the whole cumulative figure once compounded.
-    # Weekly stays a simple rolling window since a week rarely crosses rollover.
     series_start = None
     if period == "monthly":
         try:
@@ -43,7 +59,10 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         except Exception as e:
             print(f"[OIBuildup] Series start lookup failed, falling back to rolling window: {e}")
 
-    lookback_start = series_start if series_start else (today - timedelta(days=int(days * 2.2) + 5)).isoformat()
+    if series_start:
+        lookback_start = series_start
+    else:
+        lookback_start = (today - timedelta(days=int(days * 4.4) + 7)).isoformat()
 
     try:
         rows_res = supabase.from_("daily_oi_summary") \
@@ -57,6 +76,21 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     by_symbol: dict = {}
     for r in (rows_res.data or []):
         by_symbol.setdefault(r["symbol"], []).append(r)
+
+    prev_by_symbol: dict = {}
+    if series_start:
+        try:
+            prev_start = _prev_month_series_start(today)
+            prev_end = (datetime.strptime(series_start, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
+            prev_res = supabase.from_("daily_oi_summary") \
+                .select("symbol, trade_date, fut_vol") \
+                .gte("trade_date", prev_start) \
+                .lte("trade_date", prev_end) \
+                .limit(10000).execute()
+            for r in (prev_res.data or []):
+                prev_by_symbol.setdefault(r["symbol"], []).append(r)
+        except Exception as e:
+            print(f"[OIBuildup] Previous series fetch failed (non-fatal, ratio will be omitted): {e}")
 
     results = []
     for sym, rows in by_symbol.items():
@@ -87,6 +121,22 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
             continue
 
         actual_days = len(window)
+        avg_vol = vol_total / actual_days if actual_days else 0
+
+        prev_avg_vol = None
+        if series_start:
+            prev_rows = prev_by_symbol.get(sym, [])
+            if prev_rows:
+                prev_total = sum(int(r.get("fut_vol") or 0) for r in prev_rows)
+                prev_avg_vol = prev_total / len(prev_rows) if prev_rows else None
+        else:
+            prev_window = rows_sorted[-(2 * days):-days] if len(rows_sorted) >= 2 * days else []
+            if prev_window:
+                prev_total = sum(int(r.get("fut_vol") or 0) for r in prev_window)
+                prev_avg_vol = prev_total / len(prev_window)
+
+        vol_ratio = round(avg_vol / prev_avg_vol, 2) if prev_avg_vol and prev_avg_vol > 0 else None
+
         results.append({
             "symbol": sym,
             "period": period,
@@ -96,7 +146,8 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
             "cumulative_oi_pct": cumulative_oi_pct,
             "cumulative_price_pct": cumulative_price_pct,
             "close_price": float(window[-1].get("close_price") or 0),
-            "avg_daily_fut_vol": round(vol_total / actual_days) if actual_days else 0,
+            "avg_daily_fut_vol": round(avg_vol),
+            "vol_ratio": vol_ratio,
             "signal_type": sig_type,
             "signal_label": sig_label,
         })
