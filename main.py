@@ -2072,6 +2072,13 @@ async def push_unsubscribe(request: Request):
     supabase = get_supabase()
     return remove_subscription(supabase, endpoint)
 
+@app.get("/oi-buildup-period")
+def oi_buildup_period(period: str = "weekly"):
+    from api.oi_buildup_period import get_oi_buildup_period
+    if period not in ("weekly", "monthly"):
+        return {"error": "period must be 'weekly' or 'monthly'"}
+    return get_oi_buildup_period(get_supabase(), period)
+
 @app.get("/fetch-delivery")
 def fetch_delivery():
     try:
