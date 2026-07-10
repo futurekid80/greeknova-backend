@@ -207,8 +207,11 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
         # Step 2: For each EOD timestamp fetch OI — 20 small queries
         # Each query returns ~50 strikes = 1,000 rows total vs 75,000 before
-        lo = cmp * 0.90 if cmp and cmp > 0 else 0
-        hi = cmp * 1.10 if cmp and cmp > 0 else float('inf')
+        # NOTE: strike filtering happens per-day further below, using that
+        # day's OWN price (day_cmp_map), not a single global band based on
+        # today's price — using today's cmp for every historical day was
+        # excluding the correct strikes on days when price was far from
+        # today's level, producing wrong CE/PE walls for older dates.
 
         # Fetch CMP per day in ONE query
         start_date = (today - timedelta(days=20)).isoformat()
@@ -255,12 +258,16 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
                 if len(batch.data) < 1000:
                     break
 
+            day_cmp_val = day_cmp_map.get(d, {}).get("cmp")
+            day_lo = day_cmp_val * 0.90 if day_cmp_val and day_cmp_val > 0 else 0
+            day_hi = day_cmp_val * 1.10 if day_cmp_val and day_cmp_val > 0 else float('inf')
+
             day_ce: dict = {}
             day_pe: dict = {}
             for r in day_rows:
                 strike = float(r["strike"])
                 oi     = r["oi"] or 0
-                if cmp and cmp > 0 and not (lo <= strike <= hi):
+                if day_cmp_val and day_cmp_val > 0 and not (day_lo <= strike <= day_hi):
                     continue
                 if r["option_type"] == "CE":
                     day_ce[strike] = day_ce.get(strike, 0) + oi
@@ -268,7 +275,6 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
                     day_pe[strike] = day_pe.get(strike, 0) + oi
 
             if day_ce and day_pe:
-                day_cmp_val = day_cmp_map.get(d, {}).get("cmp")
                 wall_migration.append({
                     "date":       d,
                     "ce_wall":    max(day_ce, key=day_ce.get),
