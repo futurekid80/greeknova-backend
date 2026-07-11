@@ -788,15 +788,49 @@ def archive_old_snapshots():
 
         print(f"[ARCHIVE] Starting archive — {len(old_days)} calendar day(s) from {earliest_date} to {cutoff_date}")
 
-        succeeded = 0
+        # Chunk each day into small 2-hour windows instead of one call per
+        # day — the biggest days (~1M rows) were still occasionally timing
+        # out even with the proper index, since a single INSERT+DELETE over
+        # that much data can just genuinely take a while. Small chunks stay
+        # comfortably within any statement timeout regardless of day size.
+        succeeded_chunks = 0
+        failed_chunks = 0
         for day in old_days:
-            try:
-                supabase.rpc('archive_single_day_oi_snapshots', {'target_date': day}).execute()
-                succeeded += 1
-            except Exception as e:
-                print(f"[ARCHIVE] Day {day} failed (will retry next run): {e}")
+            day_dt = datetime.fromisoformat(day)
+            day_start = ist.localize(datetime.combine(day_dt, datetime.min.time())).astimezone(pytz.utc)
+            day_end = day_start + timedelta(days=1)
 
-        print(f"[ARCHIVE] Complete — {succeeded}/{len(old_days)} day(s) processed ✅")
+            try:
+                eod_res = supabase.from_("oi_snapshots") \
+                    .select("timestamp") \
+                    .gte("timestamp", day_start.isoformat()) \
+                    .lt("timestamp", day_end.isoformat()) \
+                    .order("timestamp", desc=True) \
+                    .limit(1).execute()
+                if not eod_res.data:
+                    continue  # no data this day, nothing to do
+                eod_ts = eod_res.data[0]["timestamp"]
+            except Exception as e:
+                print(f"[ARCHIVE] Day {day} — couldn't find EOD timestamp, skipping: {e}")
+                continue
+
+            chunk_hours = 2
+            chunk_start = day_start
+            while chunk_start < day_end:
+                chunk_end = min(chunk_start + timedelta(hours=chunk_hours), day_end)
+                try:
+                    supabase.rpc('archive_range_oi_snapshots', {
+                        'range_start': chunk_start.isoformat(),
+                        'range_end': chunk_end.isoformat(),
+                        'eod_ts': eod_ts,
+                    }).execute()
+                    succeeded_chunks += 1
+                except Exception as e:
+                    failed_chunks += 1
+                    print(f"[ARCHIVE] Day {day} chunk {chunk_start.strftime('%H:%M')}-{chunk_end.strftime('%H:%M')} failed (will retry next run): {e}")
+                chunk_start = chunk_end
+
+        print(f"[ARCHIVE] Complete — {succeeded_chunks} chunk(s) succeeded, {failed_chunks} failed, across {len(old_days)} day(s) ✅")
     except Exception as e:
         print(f"[ARCHIVE] Error: {e}")
 
