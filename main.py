@@ -814,7 +814,7 @@ def archive_old_snapshots():
                 print(f"[ARCHIVE] Day {day} — couldn't find EOD timestamp, skipping: {e}")
                 continue
 
-            chunk_hours = 2
+            chunk_hours = 0.5  # was 2 — market-hours windows (9:15am-3:30pm IST) have much denser data than off-hours, so even 2-hour chunks there were still hitting timeout
             chunk_start = day_start
             while chunk_start < day_end:
                 chunk_end = min(chunk_start + timedelta(hours=chunk_hours), day_end)
