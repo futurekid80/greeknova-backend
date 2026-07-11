@@ -750,17 +750,38 @@ def archive_old_snapshots():
     Weekly job — moves non-EOD intraday snapshots older than 7 days to archive.
     Keeps only last snapshot of each day for older dates.
     Nothing deleted without archiving first.
+
+    Processes ONE DAY PER CALL (archive_single_day_oi_snapshots) instead of
+    looping through every old day inside a single giant transaction — the
+    old approach hit Postgres's statement timeout once there was more than
+    about a week of backlog (e.g. after this job silently missed a few runs
+    due to Railway container restarts wiping the in-memory weekly scheduler
+    slot), which rolled back the ENTIRE multi-week batch every time, so nothing
+    ever got archived. Per-day calls are small and fast, and one bad day can't
+    block the rest.
     """
     from utils.db import get_supabase
     from datetime import datetime, timedelta
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
-    cutoff = (datetime.now(ist) - timedelta(days=7)).strftime('%Y-%m-%dT00:00:00+00:00')
+    cutoff_date = (datetime.now(ist) - timedelta(days=7)).date()
     supabase = get_supabase()
+
     try:
-        print(f"[ARCHIVE] Starting weekly archive — cutoff: {cutoff}")
-        supabase.rpc('archive_old_oi_snapshots', {'cutoff_ts': cutoff}).execute()
-        print(f"[ARCHIVE] Weekly archive complete ✅")
+        print(f"[ARCHIVE] Starting archive — finding days older than {cutoff_date}")
+        days_res = supabase.rpc('get_distinct_old_snapshot_days', {'cutoff_date_param': cutoff_date.isoformat()}).execute()
+        old_days = [r['day'] for r in (days_res.data or [])]
+        print(f"[ARCHIVE] {len(old_days)} day(s) need archiving")
+
+        succeeded = 0
+        for day in old_days:
+            try:
+                supabase.rpc('archive_single_day_oi_snapshots', {'target_date': day}).execute()
+                succeeded += 1
+            except Exception as e:
+                print(f"[ARCHIVE] Day {day} failed (will retry next run): {e}")
+
+        print(f"[ARCHIVE] Complete — {succeeded}/{len(old_days)} day(s) archived ✅")
     except Exception as e:
         print(f"[ARCHIVE] Error: {e}")
 
