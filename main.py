@@ -2042,6 +2042,14 @@ def oi_walls_detail(symbol: str):
         "intraday_range_pct":  intraday_range_pct,
     }
 
+@app.get("/archive-snapshots-now")
+def archive_snapshots_now():
+    try:
+        archive_old_snapshots()
+        return {"status": "triggered"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @app.get("/premarket-brief")
 def premarket_brief():
     from api.premarket_brief import get_premarket_brief
