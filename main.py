@@ -768,10 +768,25 @@ def archive_old_snapshots():
     supabase = get_supabase()
 
     try:
-        print(f"[ARCHIVE] Starting archive — finding days older than {cutoff_date}")
-        days_res = supabase.rpc('get_distinct_old_snapshot_days', {'cutoff_date_param': cutoff_date.isoformat()}).execute()
-        old_days = [r['day'] for r in (days_res.data or [])]
-        print(f"[ARCHIVE] {len(old_days)} day(s) need archiving")
+        # Avoid asking Postgres to scan all 12M+ rows to find distinct old
+        # days (that scan itself was timing out) — just get the earliest
+        # timestamp (cheap, index-backed) and generate the day range in
+        # Python instead. archive_single_day_oi_snapshots() safely no-ops
+        # for any day that has no data, so calling it for every calendar
+        # day in the range (not just ones we've confirmed have data) is fine.
+        earliest_res = supabase.from_("oi_snapshots").select("timestamp").order("timestamp", desc=False).limit(1).execute()
+        if not earliest_res.data:
+            print("[ARCHIVE] No data in oi_snapshots — nothing to do")
+            return
+        earliest_date = datetime.fromisoformat(earliest_res.data[0]["timestamp"].replace("Z", "+00:00")).date()
+
+        old_days = []
+        d = earliest_date
+        while d < cutoff_date:
+            old_days.append(d.isoformat())
+            d += timedelta(days=1)
+
+        print(f"[ARCHIVE] Starting archive — {len(old_days)} calendar day(s) from {earliest_date} to {cutoff_date}")
 
         succeeded = 0
         for day in old_days:
@@ -781,7 +796,7 @@ def archive_old_snapshots():
             except Exception as e:
                 print(f"[ARCHIVE] Day {day} failed (will retry next run): {e}")
 
-        print(f"[ARCHIVE] Complete — {succeeded}/{len(old_days)} day(s) archived ✅")
+        print(f"[ARCHIVE] Complete — {succeeded}/{len(old_days)} day(s) processed ✅")
     except Exception as e:
         print(f"[ARCHIVE] Error: {e}")
 
