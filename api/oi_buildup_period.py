@@ -46,6 +46,82 @@ def _prev_month_series_start(today):
     return get_series_start(prev_expiry)
 
 
+def _get_net_delta_map(supabase):
+    """
+    PE OI minus CE OI at ATM±5 strikes, from the latest available options
+    snapshot. Same pattern as positional_intelligence.py's stealth buildup
+    net delta — tells you whether today's buildup is put-writing-heavy
+    (support building below) or call-writing-heavy (resistance above),
+    NOT averaged/summed across the week/month — a point-in-time reading,
+    same as everywhere else this metric is shown.
+    """
+    net_delta_map: dict = {}
+    try:
+        import pytz
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+        today_str = now_ist.date().isoformat()
+
+        from utils.market_calendar import is_trading_day
+        check = now_ist.date()
+        if not is_trading_day(check):
+            check -= timedelta(days=1)
+            while not is_trading_day(check):
+                check -= timedelta(days=1)
+        last_trading_day = check.isoformat()
+
+        cmp_res = supabase.from_("cmp_prices") \
+            .select("symbol, cmp") \
+            .gte("timestamp", f"{last_trading_day}T00:00:00+00:00") \
+            .lte("timestamp", f"{last_trading_day}T23:59:59+00:00") \
+            .order("timestamp", desc=True) \
+            .limit(500).execute()
+        cmp_map: dict = {}
+        seen = set()
+        for r in (cmp_res.data or []):
+            if r["symbol"] not in seen:
+                cmp_map[r["symbol"]] = float(r["cmp"])
+                seen.add(r["symbol"])
+
+        latest_snap = supabase.from_("oi_snapshots") \
+            .select("timestamp") \
+            .gte("timestamp", f"{last_trading_day}T03:45:00+00:00") \
+            .lt("timestamp", f"{last_trading_day}T11:00:00+00:00") \
+            .order("timestamp", desc=True) \
+            .limit(1).execute()
+        if not latest_snap.data:
+            return net_delta_map
+        latest_ts = latest_snap.data[0]["timestamp"]
+
+        options_res = supabase.from_("oi_snapshots") \
+            .select("symbol, option_type, strike, oi") \
+            .eq("timestamp", latest_ts) \
+            .in_("option_type", ["CE", "PE"]) \
+            .limit(10000).execute()
+
+        sym_options: dict = {}
+        for r in (options_res.data or []):
+            sym_options.setdefault(r["symbol"], []).append(r)
+
+        for sym, opts in sym_options.items():
+            cmp_price = cmp_map.get(sym, 0)
+            if cmp_price <= 0:
+                continue
+            strikes = sorted(set(float(r["strike"]) for r in opts if r.get("strike")))
+            if not strikes:
+                continue
+            atm = min(strikes, key=lambda x: abs(x - cmp_price))
+            atm_idx = strikes.index(atm)
+            atm_range = strikes[max(0, atm_idx - 5): atm_idx + 6]
+            pe_oi = sum(int(r.get("oi") or 0) for r in opts if float(r.get("strike") or 0) in atm_range and r["option_type"] == "PE")
+            ce_oi = sum(int(r.get("oi") or 0) for r in opts if float(r.get("strike") or 0) in atm_range and r["option_type"] == "CE")
+            net_delta_map[sym] = pe_oi - ce_oi
+    except Exception as e:
+        print(f"[OIBuildup] Net delta fetch failed (non-fatal): {e}")
+
+    return net_delta_map
+
+
 def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     days = PERIOD_DAYS.get(period, 5)
     today = datetime.now().date()
@@ -91,6 +167,8 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
                 prev_by_symbol.setdefault(r["symbol"], []).append(r)
         except Exception as e:
             print(f"[OIBuildup] Previous series fetch failed (non-fatal, ratio will be omitted): {e}")
+
+    net_delta_map = _get_net_delta_map(supabase)
 
     results = []
     for sym, rows in by_symbol.items():
@@ -148,6 +226,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
             "close_price": float(window[-1].get("close_price") or 0),
             "avg_daily_fut_vol": round(avg_vol),
             "vol_ratio": vol_ratio,
+            "net_delta": net_delta_map.get(sym),
             "signal_type": sig_type,
             "signal_label": sig_label,
         })
