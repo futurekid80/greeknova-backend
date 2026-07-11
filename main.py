@@ -2042,6 +2042,11 @@ def oi_walls_detail(symbol: str):
         "intraday_range_pct":  intraday_range_pct,
     }
 
+@app.get("/premarket-brief")
+def premarket_brief():
+    from api.premarket_brief import get_premarket_brief
+    return get_premarket_brief(get_supabase())
+
 @app.get("/push-check-now")
 def push_check_now():
     try:
