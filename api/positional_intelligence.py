@@ -322,7 +322,11 @@ def get_positional_intelligence(min_consec: int = 0):
             today_row = next((r for r in reversed(vol_data_for_sym) if r["trade_date"] == last_trading_day), None)
             if today_row:
                 today_vol_amt = int(today_row.get("fut_vol") or 0)
-                hist_vols_ctx = sorted([int(r.get("fut_vol") or 0) for r in vol_data_for_sym[:-1] if int(r.get("fut_vol") or 0) > 0], reverse=True)[:5]
+                hist_rows_ctx = sorted(
+                    [r for r in vol_data_for_sym[:-1] if int(r.get("fut_vol") or 0) > 0],
+                    key=lambda r: r["trade_date"], reverse=True
+                )[:5]
+                hist_vols_ctx = [int(r.get("fut_vol") or 0) for r in hist_rows_ctx]
                 avg_5d_ctx = sum(hist_vols_ctx) / len(hist_vols_ctx) if hist_vols_ctx else 0
                 vol_ratio_ctx = round(today_vol_amt / avg_5d_ctx, 2) if avg_5d_ctx > 0 else None
 
@@ -408,7 +412,11 @@ def get_positional_intelligence(min_consec: int = 0):
             today_vol_row = next((r for r in reversed(vol_data) if r["trade_date"] == today_str), None)
             if today_vol_row:
                 today_vol = int(today_vol_row.get("fut_vol") or 0)
-                hist_vols = sorted([int(r.get("fut_vol") or 0) for r in vol_data[:-1] if int(r.get("fut_vol") or 0) > 0], reverse=True)[:5]
+                hist_rows = sorted(
+                    [r for r in vol_data[:-1] if int(r.get("fut_vol") or 0) > 0],
+                    key=lambda r: r["trade_date"], reverse=True
+                )[:5]
+                hist_vols = [int(r.get("fut_vol") or 0) for r in hist_rows]
                 avg_5d = sum(hist_vols) / len(hist_vols) if hist_vols else 0
                 vol_ratio = round(today_vol / avg_5d, 2) if avg_5d > 0 else 0
                 if vol_ratio >= 1.5:
