@@ -137,3 +137,64 @@ def get_adx_map(supabase, symbols: list = None) -> dict:
             result[sym] = adx_data
 
     return result
+
+
+def get_hourly_adx_map(supabase, symbols: list = None, lookback_days: int = 15) -> dict:
+    """
+    Same ADX(14) math, but on HOURLY bars built from cmp_prices' 5-min ticks
+    instead of daily bars — no new data collection needed, just a different
+    aggregation of data we already capture. Needs ~28 hourly bars (roughly
+    5 trading days, since each day has ~6 hourly buckets during market hours)
+    for a stable reading.
+    """
+    import pytz
+    ist = pytz.timezone("Asia/Kolkata")
+    today = datetime.now(ist).date()
+    lookback_start = (today - timedelta(days=lookback_days)).isoformat()
+
+    try:
+        rows_res = []
+        q_base = supabase.from_("cmp_prices").select("symbol, timestamp, cmp").gte("timestamp", f"{lookback_start}T00:00:00+00:00").order("timestamp", desc=False)
+        if symbols:
+            q_base = q_base.in_("symbol", symbols)
+        for offset in range(0, 50000, 1000):
+            batch = q_base.range(offset, offset + 999).execute()
+            if not batch.data:
+                break
+            rows_res.extend(batch.data)
+            if len(batch.data) < 1000:
+                break
+    except Exception as e:
+        print(f"[ADX Hourly] Fetch failed: {e}")
+        return {}
+
+    # Bucket into hourly bars per symbol, in IST
+    buckets: dict = {}  # (symbol, hour_bucket_iso) -> list of prices in order
+    for r in rows_res:
+        sym = r["symbol"]
+        cmp_val = r.get("cmp")
+        if cmp_val is None:
+            continue
+        ts = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")).astimezone(ist)
+        hour_bucket = ts.replace(minute=0, second=0, microsecond=0)
+        key = (sym, hour_bucket.isoformat())
+        buckets.setdefault(key, []).append(float(cmp_val))
+
+    # Build per-symbol hourly OHLC bar series
+    sym_bars: dict = {}
+    for (sym, bucket_iso), prices in buckets.items():
+        sym_bars.setdefault(sym, []).append({
+            "trade_date": bucket_iso,  # reused as the sort/date key by _compute_adx_for_symbol
+            "high": max(prices),
+            "low": min(prices),
+            "close": prices[-1],
+        })
+
+    result = {}
+    for sym, bars in sym_bars.items():
+        bars_sorted = sorted(bars, key=lambda b: b["trade_date"])
+        adx_data = _compute_adx_for_symbol(bars_sorted)
+        if adx_data:
+            result[sym] = adx_data
+
+    return result
