@@ -31,8 +31,16 @@ def _wilder_smooth(values: list) -> list:
     return smoothed
 
 
-def _compute_adx_for_symbol(rows: list) -> dict | None:
-    """rows: list of {trade_date, high, low, close} sorted oldest -> newest."""
+def _compute_adx_for_symbol(rows: list, intraday: bool = False) -> dict | None:
+    """
+    rows: list of {trade_date, high, low, close} sorted oldest -> newest.
+    intraday=True (hourly bars): rows also need a "day" key. The transition
+    from the last bar of one trading day to the first bar of the next is
+    SKIPPED — that gap is an overnight price move, not real intraday
+    volatility, and counting it as a normal bar-to-bar move systematically
+    inflates True Range (and therefore ADX) versus a real chart platform,
+    which was confirmed by comparing against Kite on two different stocks.
+    """
     if len(rows) < MIN_DAYS + 1:
         return None
 
@@ -40,6 +48,10 @@ def _compute_adx_for_symbol(rows: list) -> dict | None:
     for i in range(1, len(rows)):
         prev = rows[i - 1]
         cur = rows[i]
+
+        if intraday and cur.get("day") != prev.get("day"):
+            continue  # overnight gap — not a real intraday move, skip it
+
         high, low, prev_close = cur["high"], cur["low"], prev["close"]
         if high is None or low is None or prev_close is None:
             return None
@@ -185,6 +197,7 @@ def get_hourly_adx_map(supabase, symbols: list = None, lookback_days: int = 15) 
     for (sym, bucket_iso), prices in buckets.items():
         sym_bars.setdefault(sym, []).append({
             "trade_date": bucket_iso,  # reused as the sort/date key by _compute_adx_for_symbol
+            "day": bucket_iso[:10],    # calendar date only, for overnight-gap detection
             "high": max(prices),
             "low": min(prices),
             "close": prices[-1],
@@ -193,7 +206,7 @@ def get_hourly_adx_map(supabase, symbols: list = None, lookback_days: int = 15) 
     result = {}
     for sym, bars in sym_bars.items():
         bars_sorted = sorted(bars, key=lambda b: b["trade_date"])
-        adx_data = _compute_adx_for_symbol(bars_sorted)
+        adx_data = _compute_adx_for_symbol(bars_sorted, intraday=True)
         if adx_data:
             result[sym] = adx_data
 
