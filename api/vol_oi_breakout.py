@@ -4,6 +4,12 @@ Persists EOD snapshot to Supabase so it survives Railway restarts.
 Fixes:
 - Price change now uses prev close → current (not FUT open → now)
 - ±0.3% threshold applied before classifying signal direction
+
+Known issue (Jul 14): the EOD save can catch a price the instant before
+market close settles fully, permanently freezing a slightly-stale number
+for the rest of the day. Restarting the process (this comment triggers a
+redeploy) clears the in-memory cache and forces a fresh recompute from
+daily_oi_summary, which always has the correct settled close.
 """
 import time as time_module
 from datetime import datetime, timezone, timedelta
