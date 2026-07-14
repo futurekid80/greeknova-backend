@@ -244,7 +244,7 @@ def get_positional_intelligence(min_consec: int = 0):
             latest_ts = latest_snap.data[0]["timestamp"]
             # Fetch CE/PE OI for all symbols at latest snapshot
             options_res = supabase.from_("oi_snapshots")\
-                .select("symbol, option_type, strike, oi, last_price")\
+                .select("symbol, option_type, strike, oi, last_price, expiry")\
                 .eq("timestamp", latest_ts)\
                 .in_("option_type", ["CE", "PE"])\
                 .limit(10000)\
@@ -254,10 +254,20 @@ def get_positional_intelligence(min_consec: int = 0):
             for r in (options_res.data or []):
                 sym_options[r["symbol"]].append(r)
             # Compute net delta per symbol using ATM±5 strikes
+            # BUG FIX: was summing OI across ALL expiries mixed together (no
+            # expiry filter at all) — e.g. ITC's Net Delta showed +11.8L but
+            # the correct near-month-only figure was ~-0.1L, a huge distortion
+            # caused by silently merging weekly/monthly OI at the same strike.
+            # Now filters to each symbol's nearest (soonest) expiry first.
             for sym, opts in sym_options.items():
                 cmp_price = cmp_map.get(sym, 0)
                 if cmp_price <= 0:
                     continue
+                expiries = sorted(set(str(r.get("expiry") or "") for r in opts if r.get("expiry")))
+                if not expiries:
+                    continue
+                nearest_expiry = expiries[0]
+                opts = [r for r in opts if str(r.get("expiry") or "") == nearest_expiry]
                 # Find ATM strike
                 strikes = sorted(set(float(r["strike"]) for r in opts if r.get("strike")))
                 if not strikes:
