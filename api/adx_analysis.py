@@ -198,3 +198,26 @@ def get_hourly_adx_map(supabase, symbols: list = None, lookback_days: int = 15) 
             result[sym] = adx_data
 
     return result
+
+
+def get_combined_adx_map(supabase, symbols: list = None) -> dict:
+    """
+    Best available ADX per symbol — daily where there's enough history
+    (more reliable, since it needs 28 calendar days), falling back to
+    hourly for newer symbols that haven't built up daily history yet
+    (only needs ~5 trading days of hourly bars). Every symbol gets tagged
+    with which source was actually used, so callers can show that clearly
+    rather than presenting hourly and daily as if they're interchangeable.
+    """
+    daily_map = get_adx_map(supabase, symbols=symbols)
+    hourly_map = get_hourly_adx_map(supabase, symbols=symbols)
+
+    combined = {}
+    all_symbols = set(daily_map.keys()) | set(hourly_map.keys())
+    for sym in all_symbols:
+        if sym in daily_map:
+            combined[sym] = {**daily_map[sym], "source": "daily"}
+        elif sym in hourly_map:
+            combined[sym] = {**hourly_map[sym], "source": "hourly"}
+
+    return combined

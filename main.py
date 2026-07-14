@@ -2120,6 +2120,12 @@ def archive_snapshots_now():
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@app.get("/adx-map")
+def adx_map():
+    from api.adx_analysis import get_combined_adx_map
+    from api.iv_analysis import SYMBOLS
+    return {"data": get_combined_adx_map(get_supabase(), symbols=SYMBOLS)}
+
 @app.get("/premarket-brief")
 def premarket_brief():
     from api.premarket_brief import get_premarket_brief
