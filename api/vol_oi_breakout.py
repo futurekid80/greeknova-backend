@@ -11,6 +11,29 @@ from datetime import datetime, timezone, timedelta
 _breakout_cache = {}
 _breakout_cache_time = 0.0
 
+def _attach_adx(supabase, signals):
+    """Adds ADX(14) trend-strength data to each signal — 'trending' means a
+    genuine directional move is underway (ADX >= 25), not just noise, even
+    if the OI/volume numbers look identical to a choppier stock."""
+    if not signals:
+        return signals
+    try:
+        from api.adx_analysis import get_adx_map
+        symbols = [s["symbol"] for s in signals]
+        adx_map = get_adx_map(supabase, symbols=symbols)
+        for s in signals:
+            adx_data = adx_map.get(s["symbol"])
+            s["adx"] = adx_data["adx"] if adx_data else None
+            s["adx_trending"] = adx_data["trending"] if adx_data else None
+            s["adx_watch"] = adx_data["watch"] if adx_data else None
+    except Exception as e:
+        print(f"[VOL_OI_BREAKOUT] ADX attach failed (non-fatal): {e}")
+        for s in signals:
+            s.setdefault("adx", None)
+            s.setdefault("adx_trending", None)
+            s.setdefault("adx_watch", None)
+    return signals
+
 def is_market_hours():
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
@@ -206,6 +229,7 @@ def _get_eod_from_summary(supabase, now_ist):
             "cpr_width_emoji": None,
         })
 
+    signals = _attach_adx(supabase, signals)
     signals.sort(key=lambda x: (x["vol_ratio"], abs(x["oi_chg_pct"])), reverse=True)
     return {
         "signals":         signals[:10],
@@ -423,6 +447,7 @@ def get_vol_oi_breakout(supabase):
                 "cpr_width_emoji": cpr.get("width_emoji"),
             })
 
+        signals = _attach_adx(supabase, signals)
         signals.sort(key=lambda x: (x["vol_ratio"], abs(x["oi_chg_pct"])), reverse=True)
         top_signals = signals[:10]
 
