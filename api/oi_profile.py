@@ -37,34 +37,41 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
 
     eod_ts = ts_q.data[0]["timestamp"]
 
-    # Fetch all strikes for today's profile
-    all_rows = []
+    # Fetch ALL expiries' rows first (unfiltered) so the "available expiries"
+    # list is always complete, regardless of whether a specific expiry was
+    # requested. BUG FIX (Jul 14): previously the expiry filter was applied
+    # to this same query, so whenever a specific expiry was passed, "expiries"
+    # collapsed down to just that one — even though the others still existed.
+    # This broke the dropdown after the very first auto-triggered re-fetch
+    # (page loads with expiry=None -> gets full list -> sets expiry state ->
+    # re-fetches WITH that expiry -> list collapses to 1).
+    all_rows_unfiltered = []
     for offset in range(0, 50000, 1000):
-        q = supabase.from_("oi_snapshots")\
+        batch = supabase.from_("oi_snapshots")\
             .select("strike, option_type, oi, expiry")\
             .eq("symbol", symbol)\
             .eq("timestamp", eod_ts)\
-            .range(offset, offset + 999)
-        if expiry:
-            q = q.eq("expiry", expiry)
-        batch = q.execute()
+            .range(offset, offset + 999)\
+            .execute()
         if not batch.data:
             break
-        all_rows.extend(batch.data)
+        all_rows_unfiltered.extend(batch.data)
         if len(batch.data) < 1000:
             break
 
-    if not all_rows:
+    if not all_rows_unfiltered:
         return {"error": "No OI data found"}
 
-    # Get available expiries
     today_str = date_type.today().isoformat()
     expiries = sorted(set(
-        r["expiry"] for r in all_rows
+        r["expiry"] for r in all_rows_unfiltered
         if r["expiry"] and r["expiry"] >= today_str
     ))
 
     active_expiry = expiry or (expiries[0] if expiries else None)
+
+    # Now narrow down to just the active expiry for the actual profile data
+    all_rows = [r for r in all_rows_unfiltered if r["expiry"] == active_expiry] if active_expiry else all_rows_unfiltered
 
     if active_expiry:
         all_rows = [r for r in all_rows if r["expiry"] == active_expiry]
