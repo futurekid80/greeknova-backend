@@ -18,9 +18,11 @@ def _attach_adx(supabase, signals):
     if not signals:
         return signals
     try:
-        from api.adx_analysis import get_adx_map
+        # Hourly, not daily — see adx_analysis.py's get_combined_adx_map
+        # docstring for why daily is disabled until symbols have more history.
+        from api.adx_analysis import get_hourly_adx_map
         symbols = [s["symbol"] for s in signals]
-        adx_map = get_adx_map(supabase, symbols=symbols)
+        adx_map = get_hourly_adx_map(supabase, symbols=symbols)
         for s in signals:
             adx_data = adx_map.get(s["symbol"])
             s["adx"] = adx_data["adx"] if adx_data else None

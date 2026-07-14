@@ -202,22 +202,19 @@ def get_hourly_adx_map(supabase, symbols: list = None, lookback_days: int = 15) 
 
 def get_combined_adx_map(supabase, symbols: list = None) -> dict:
     """
-    Best available ADX per symbol — daily where there's enough history
-    (more reliable, since it needs 28 calendar days), falling back to
-    hourly for newer symbols that haven't built up daily history yet
-    (only needs ~5 trading days of hourly bars). Every symbol gets tagged
-    with which source was actually used, so callers can show that clearly
-    rather than presenting hourly and daily as if they're interchangeable.
+    HOURLY ONLY for now (Jul 2026) — daily ADX is intentionally disabled
+    platform-wide. Every symbol currently caps out at ~32 days of price
+    history (the whole dataset only goes back to 26-May), which is barely
+    past the 28-day floor and produces daily ADX readings that diverge
+    significantly from mature platforms (e.g. Kite showed ONGC at ~36 while
+    ours showed ~69 on the same day). Hourly ADX uses ~80+ bars from the
+    same window and is far more settled, so it's the trustworthy one right
+    now. Re-enable the daily branch below once symbols have 60-90+ days of
+    real history and the daily-vs-Kite comparison has been re-verified.
+
+        daily_map = get_adx_map(supabase, symbols=symbols)
+        for sym in daily_map: combined[sym] = {**daily_map[sym], "source": "daily"}
+        (then hourly as fallback only for symbols not in daily_map)
     """
-    daily_map = get_adx_map(supabase, symbols=symbols)
     hourly_map = get_hourly_adx_map(supabase, symbols=symbols)
-
-    combined = {}
-    all_symbols = set(daily_map.keys()) | set(hourly_map.keys())
-    for sym in all_symbols:
-        if sym in daily_map:
-            combined[sym] = {**daily_map[sym], "source": "daily"}
-        elif sym in hourly_map:
-            combined[sym] = {**hourly_map[sym], "source": "hourly"}
-
-    return combined
+    return {sym: {**data, "source": "hourly"} for sym, data in hourly_map.items()}
