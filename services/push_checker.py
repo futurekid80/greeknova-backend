@@ -69,8 +69,19 @@ def _check_options_jungle(supabase):
             + (f" | {interp.replace('_', ' ')}" if interp else "")
         )
 
+        # Use the real interpretation (Call Writing, Put Writing, Long
+        # Buildup, etc.) as the alert's signal type when Jungle has one —
+        # this makes it the SAME signal vocabulary as UOA, so a single
+        # "Put Writing" toggle controls alerts from both pages at once.
+        # Falls back to generic OI_SPIKE when there's no clear interpretation.
+        known_interps = {
+            "CALL_WRITING", "PUT_WRITING", "LONG_BUILDUP", "SHORT_BUILDUP",
+            "SHORT_COVERING", "LONG_UNWINDING",
+        }
+        sig_type = interp if interp in known_interps else "OI_SPIKE"
+
         broadcast_alert(supabase, {
-            "signal": "OI_SPIKE",
+            "signal": sig_type,
             "symbol": spike.get("symbol"),
             "strike": spike.get("strike"),
             "optionType": spike.get("option_type"),
