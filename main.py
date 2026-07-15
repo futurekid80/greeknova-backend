@@ -2126,6 +2126,21 @@ def adx_map():
     from api.iv_analysis import SYMBOLS
     return {"data": get_combined_adx_map(get_supabase(), symbols=SYMBOLS)}
 
+@app.get("/push-preferences")
+def push_preferences_get(endpoint: str):
+    from api.push_notifications import get_preferences
+    return get_preferences(get_supabase(), endpoint)
+
+@app.post("/push-preferences")
+async def push_preferences_post(request: Request):
+    from api.push_notifications import save_preferences
+    body = await request.json()
+    endpoint = body.get("endpoint")
+    enabled_signals = body.get("enabled_signals", [])
+    if not endpoint:
+        return {"error": "endpoint required"}
+    return save_preferences(get_supabase(), endpoint, enabled_signals)
+
 @app.get("/premarket-brief")
 def premarket_brief():
     from api.premarket_brief import get_premarket_brief

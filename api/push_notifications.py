@@ -47,6 +47,53 @@ def remove_subscription(supabase, endpoint: str):
         return {"error": str(e)}
 
 
+# All signal types the alert system can ever generate. Used both to validate
+# incoming preference updates and as the "everything enabled" default when a
+# subscription has never customized (enabled_signals is NULL in the DB).
+ALL_SIGNAL_TYPES = [
+    "OI_SPIKE", "FRESH_BUILD",
+    "LONG_BUILDUP", "SHORT_BUILDUP", "CALL_WRITING", "PUT_WRITING",
+    "SHORT_COVERING", "LONG_UNWINDING", "BUYER_DOMINATED", "SELLER_DOMINATED",
+    "FAR_OTM_ACTIVITY", "VOLUME_SURGE",
+]
+
+
+def get_preferences(supabase, endpoint: str) -> dict:
+    """
+    Per-device alert type preferences for one subscription (identified by its
+    own push endpoint URL, since that's the one thing the browser can supply
+    without needing a login system). NULL enabled_signals means the device
+    has never customized — everything is on by default.
+    """
+    try:
+        res = supabase.from_("push_subscriptions").select("enabled_signals, spike_threshold").eq("endpoint", endpoint).limit(1).execute()
+        if not res.data:
+            return {"error": "Subscription not found"}
+        row = res.data[0]
+        enabled = row.get("enabled_signals")
+        return {
+            "enabled_signals": enabled if enabled is not None else ALL_SIGNAL_TYPES,
+            "spike_threshold": row.get("spike_threshold"),
+            "customized": enabled is not None,
+        }
+    except Exception as e:
+        print(f"[Push] Get preferences failed: {e}")
+        return {"error": str(e)}
+
+
+def save_preferences(supabase, endpoint: str, enabled_signals: list) -> dict:
+    """Save which alert types this specific device wants to receive."""
+    valid = [s for s in enabled_signals if s in ALL_SIGNAL_TYPES]
+    try:
+        supabase.from_("push_subscriptions").update({
+            "enabled_signals": valid,
+        }).eq("endpoint", endpoint).execute()
+        return {"status": "saved", "enabled_signals": valid}
+    except Exception as e:
+        print(f"[Push] Save preferences failed: {e}")
+        return {"error": str(e)}
+
+
 def _send_one(subscription: dict, payload: dict) -> bool:
     """Send push to a single subscription. Returns False if the subscription is dead."""
     from urllib.parse import urlparse
@@ -113,6 +160,13 @@ def broadcast_alert(supabase, alert: dict):
     for sub in subs:
         threshold = float(sub.get("spike_threshold") or 10)
         if alert.get("signal") == "OI_SPIKE" and oi_pct < threshold:
+            continue
+
+        # NULL enabled_signals = device never customized = everything on.
+        # Once a device saves preferences, enabled_signals becomes a real
+        # list and only those exact signal types get sent to it.
+        enabled_signals = sub.get("enabled_signals")
+        if enabled_signals is not None and alert.get("signal") not in enabled_signals:
             continue
 
         payload = {
