@@ -2137,9 +2137,11 @@ async def push_preferences_post(request: Request):
     body = await request.json()
     endpoint = body.get("endpoint")
     enabled_signals = body.get("enabled_signals", [])
+    spike_threshold = body.get("spike_threshold")
+    vol_threshold = body.get("vol_threshold")
     if not endpoint:
         return {"error": "endpoint required"}
-    return save_preferences(get_supabase(), endpoint, enabled_signals)
+    return save_preferences(get_supabase(), endpoint, enabled_signals, spike_threshold, vol_threshold)
 
 @app.get("/premarket-brief")
 def premarket_brief():

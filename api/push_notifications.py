@@ -66,7 +66,7 @@ def get_preferences(supabase, endpoint: str) -> dict:
     has never customized — everything is on by default.
     """
     try:
-        res = supabase.from_("push_subscriptions").select("enabled_signals, spike_threshold").eq("endpoint", endpoint).limit(1).execute()
+        res = supabase.from_("push_subscriptions").select("enabled_signals, spike_threshold, vol_threshold").eq("endpoint", endpoint).limit(1).execute()
         if not res.data:
             return {"error": "Subscription not found"}
         row = res.data[0]
@@ -74,6 +74,7 @@ def get_preferences(supabase, endpoint: str) -> dict:
         return {
             "enabled_signals": enabled if enabled is not None else ALL_SIGNAL_TYPES,
             "spike_threshold": row.get("spike_threshold"),
+            "vol_threshold": row.get("vol_threshold"),
             "customized": enabled is not None,
         }
     except Exception as e:
@@ -81,13 +82,16 @@ def get_preferences(supabase, endpoint: str) -> dict:
         return {"error": str(e)}
 
 
-def save_preferences(supabase, endpoint: str, enabled_signals: list) -> dict:
-    """Save which alert types this specific device wants to receive."""
+def save_preferences(supabase, endpoint: str, enabled_signals: list, spike_threshold: float = None, vol_threshold: float = None) -> dict:
+    """Save which alert types this specific device wants to receive, and at what OI%/Vol% thresholds."""
     valid = [s for s in enabled_signals if s in ALL_SIGNAL_TYPES]
+    update = {"enabled_signals": valid}
+    if spike_threshold is not None:
+        update["spike_threshold"] = spike_threshold
+    if vol_threshold is not None:
+        update["vol_threshold"] = vol_threshold
     try:
-        supabase.from_("push_subscriptions").update({
-            "enabled_signals": valid,
-        }).eq("endpoint", endpoint).execute()
+        supabase.from_("push_subscriptions").update(update).eq("endpoint", endpoint).execute()
         return {"status": "saved", "enabled_signals": valid}
     except Exception as e:
         print(f"[Push] Save preferences failed: {e}")
@@ -153,13 +157,22 @@ def broadcast_alert(supabase, alert: dict):
     if not subs:
         return
 
-    oi_pct = abs(float(alert.get("oiPct") or 0))
+    # oiPct/volPct are only present on alerts that actually carry that data
+    # (not every signal type has both) — None means "this alert has no OI/Vol
+    # figure to threshold against", so that particular check is skipped.
+    oi_pct = alert.get("oiPct")
+    vol_pct = alert.get("volPct")
+    oi_pct = abs(float(oi_pct)) if oi_pct is not None else None
+    vol_pct = abs(float(vol_pct)) if vol_pct is not None else None
     dead_endpoints = []
     sent = 0
 
     for sub in subs:
-        threshold = float(sub.get("spike_threshold") or 10)
-        if alert.get("signal") == "OI_SPIKE" and oi_pct < threshold:
+        oi_threshold = float(sub.get("spike_threshold") or 10)
+        vol_threshold = float(sub.get("vol_threshold") or 20)
+        if oi_pct is not None and oi_pct < oi_threshold:
+            continue
+        if vol_pct is not None and vol_pct < vol_threshold:
             continue
 
         # NULL enabled_signals = device never customized = everything on.
@@ -169,9 +182,23 @@ def broadcast_alert(supabase, alert: dict):
         if enabled_signals is not None and alert.get("signal") not in enabled_signals:
             continue
 
+        # Front-load the strike/OI%/Vol% into the title itself — the OS
+        # truncates long notification bodies, so the most important numbers
+        # need to survive truncation, not sit buried at the end of a long body.
+        signal_label = alert.get("signal", "Alert").replace("_", " ").title()
+        strike_part = f" {alert.get('strike')}{alert.get('optionType', '')}" if alert.get("strike") else ""
+        stats = []
+        if oi_pct is not None:
+            stats.append(f"OI {'+' if (alert.get('oiPct') or 0) > 0 else ''}{alert.get('oiPct')}%")
+        if vol_pct is not None:
+            stats.append(f"Vol +{alert.get('volPct')}%")
+        if alert.get("ltp") is not None:
+            stats.append(f"LTP ₹{alert.get('ltp')}")
+        compact_body = " | ".join(stats) if stats else alert.get("message", "")
+
         payload = {
-            "title": f"{alert.get('signal', 'Alert').replace('_', ' ').title()} — {alert.get('symbol', '')}",
-            "body": alert.get("message", ""),
+            "title": f"{signal_label} — {alert.get('symbol', '')}{strike_part}",
+            "body": compact_body,
             "url": alert.get("url", "/alerts"),
             "alert": alert,
         }
