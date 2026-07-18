@@ -384,6 +384,11 @@ async def lifespan(app: FastAPI):
         "cron", day_of_week="mon", hour=9, minute=0, timezone="Asia/Kolkata", id="archive_watchdog",
         misfire_grace_time=600
     )
+    scheduler.add_job(
+        lambda: __import__('api.positional_radar', fromlist=['clear_radar_cache']).clear_radar_cache(),
+        "cron", hour=9, minute=0, timezone="Asia/Kolkata", id="daily_radar_cache_clear",
+        misfire_grace_time=600
+    )
     scheduler.start()
 
     scheduler.add_job(
