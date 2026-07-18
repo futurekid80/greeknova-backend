@@ -814,20 +814,39 @@ def archive_old_snapshots():
                 print(f"[ARCHIVE] Day {day} — couldn't find EOD timestamp, skipping: {e}")
                 continue
 
-            chunk_hours = 0.5  # was 2 — market-hours windows (9:15am-3:30pm IST) have much denser data than off-hours, so even 2-hour chunks there were still hitting timeout
-            chunk_start = day_start
-            while chunk_start < day_end:
-                chunk_end = min(chunk_start + timedelta(hours=chunk_hours), day_end)
+            def _archive_chunk(c_start, c_end, depth=0):
+                """
+                Try a chunk; on timeout, split it in half and retry each half
+                recursively (down to a 5-minute floor) instead of giving up
+                until the next external trigger. Some 30-min windows during
+                the busiest market-open/mid-day periods were consistently
+                too dense to fit in one statement even after retrying the
+                exact same 30-min chunk multiple times across separate runs —
+                splitting finer (down to ~5 min) fits comfortably instead.
+                """
+                nonlocal succeeded_chunks, failed_chunks
                 try:
                     supabase.rpc('archive_range_oi_snapshots', {
-                        'range_start': chunk_start.isoformat(),
-                        'range_end': chunk_end.isoformat(),
+                        'range_start': c_start.isoformat(),
+                        'range_end': c_end.isoformat(),
                         'eod_ts': eod_ts,
                     }).execute()
                     succeeded_chunks += 1
                 except Exception as e:
-                    failed_chunks += 1
-                    print(f"[ARCHIVE] Day {day} chunk {chunk_start.strftime('%H:%M')}-{chunk_end.strftime('%H:%M')} failed (will retry next run): {e}")
+                    width = c_end - c_start
+                    if width > timedelta(minutes=5) and depth < 4:
+                        mid = c_start + width / 2
+                        _archive_chunk(c_start, mid, depth + 1)
+                        _archive_chunk(mid, c_end, depth + 1)
+                    else:
+                        failed_chunks += 1
+                        print(f"[ARCHIVE] Day {day} chunk {c_start.strftime('%H:%M')}-{c_end.strftime('%H:%M')} failed even at finest granularity (will retry next run): {e}")
+
+            chunk_hours = 0.5  # was 2 — market-hours windows (9:15am-3:30pm IST) have much denser data than off-hours, so even 2-hour chunks there were still hitting timeout
+            chunk_start = day_start
+            while chunk_start < day_end:
+                chunk_end = min(chunk_start + timedelta(hours=chunk_hours), day_end)
+                _archive_chunk(chunk_start, chunk_end)
                 chunk_start = chunk_end
 
         print(f"[ARCHIVE] Complete — {succeeded_chunks} chunk(s) succeeded, {failed_chunks} failed, across {len(old_days)} day(s) ✅")
