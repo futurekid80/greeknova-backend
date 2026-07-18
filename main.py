@@ -2187,6 +2187,23 @@ def adx_map():
     from api.iv_analysis import SYMBOLS
     return {"data": get_combined_adx_map(get_supabase(), symbols=SYMBOLS)}
 
+@app.post("/waitlist-join")
+async def waitlist_join(request: Request):
+    body = await request.json()
+    email = (body.get("email") or "").strip().lower()
+    if not email or "@" not in email:
+        return {"error": "Please enter a valid email"}
+    try:
+        supabase = get_supabase()
+        res = supabase.from_("waitlist_emails").select("email").eq("email", email).limit(1).execute()
+        if res.data:
+            return {"status": "already_joined"}
+        supabase.from_("waitlist_emails").insert({"email": email}).execute()
+        return {"status": "joined"}
+    except Exception as e:
+        print(f"[Waitlist] Failed: {e}")
+        return {"error": "Something went wrong, please try again"}
+
 @app.get("/push-preferences")
 def push_preferences_get(endpoint: str):
     from api.push_notifications import get_preferences
