@@ -379,6 +379,11 @@ async def lifespan(app: FastAPI):
         "cron", hour=17, minute=15, timezone="Asia/Kolkata", id="cpr_watchdog",
         misfire_grace_time=600
     )
+    scheduler.add_job(
+        watchdog_archive,
+        "cron", day_of_week="mon", hour=9, minute=0, timezone="Asia/Kolkata", id="archive_watchdog",
+        misfire_grace_time=600
+    )
     scheduler.start()
 
     scheduler.add_job(
@@ -852,6 +857,38 @@ def archive_old_snapshots():
         print(f"[ARCHIVE] Complete — {succeeded_chunks} chunk(s) succeeded, {failed_chunks} failed, across {len(old_days)} day(s) ✅")
     except Exception as e:
         print(f"[ARCHIVE] Error: {e}")
+
+def watchdog_archive():
+    """
+    Watchdog job — runs Monday mornings, checking whether the weekly archival
+    job (scheduled Sundays 8PM IST) actually fired. This exists because the
+    scheduler is in-memory and Railway container restarts can silently wipe
+    a scheduled slot without any error — exactly what happened Jul 5 and
+    Jul 12 2026, when the archive job missed two consecutive Sundays and
+    oi_snapshots grew unchecked to 10.89M rows before anyone noticed. Same
+    self-healing pattern as watchdog_cpr/watchdog_participant_flow.
+    """
+    import pytz
+    from datetime import datetime, timedelta
+    ist = pytz.timezone('Asia/Kolkata')
+    supabase = get_supabase()
+    try:
+        recent = supabase.from_("oi_snapshots_archive") \
+            .select("created_at") \
+            .order("created_at", desc=True) \
+            .limit(1).execute()
+        last_run = None
+        if recent.data:
+            last_run = datetime.fromisoformat(recent.data[0]["created_at"].replace("Z", "+00:00"))
+        stale = (not last_run) or (datetime.now(pytz.utc) - last_run > timedelta(days=8))
+        if stale:
+            print("[ARCHIVE Watchdog] ⚠️ No archive activity in over 8 days — re-triggering...")
+            archive_old_snapshots()
+        else:
+            print(f"[ARCHIVE Watchdog] ✅ Last archive run {last_run.isoformat()} — within expected window")
+    except Exception as e:
+        print(f"[ARCHIVE Watchdog] Error: {e}")
+
 
 def watchdog_cpr():
     """
