@@ -268,8 +268,18 @@ def get_vol_oi_breakout(supabase):
         if saved and saved.get("date") == today:
             _breakout_cache = saved
             return saved
-        # Today's data not yet saved — compute fresh from daily_oi_summary
-        return _get_eod_from_summary(supabase, now_ist)
+        # Today's data not yet saved — compute fresh from the fully-settled
+        # daily_oi_summary table (reliable source), then persist THIS result
+        # so subsequent requests today load fast without recomputing.
+        fresh = _get_eod_from_summary(supabase, now_ist)
+        if fresh.get("signals") is not None and fresh.get("date") == today:
+            try:
+                _save_to_supabase(supabase, fresh["signals"], fresh["total"], fresh["date"])
+                _breakout_cache = fresh
+                _breakout_cache_time = time_module.time()
+            except Exception as e:
+                print(f"[VOL_OI_BREAKOUT] Failed to persist EOD snapshot: {e}")
+        return fresh
 
     # ── MARKET HOURS ONLY BELOW THIS LINE ────────────────────────────────
     # During market hours NEVER serve EOD snapshot from Supabase
@@ -466,10 +476,15 @@ def get_vol_oi_breakout(supabase):
             "is_eod_snapshot": False,
         }
 
-        # Save to Supabase after market close (3:30 PM IST = 10:00 UTC)
-        ist_now = datetime.now(ist)
-        if ist_now.hour >= 15 and ist_now.minute >= 30:
-            _save_to_supabase(supabase, top_signals, len(signals), today)
+        # BUG FIX (Jul 19): used to save straight to Supabase here the moment
+        # any request landed at/after 3:30pm, using whatever the LIVE intraday
+        # computation looked like at that exact instant — which could be a
+        # split-second before the true final numbers settled (same root cause
+        # as the Jul 14 DIVISLAB incident). That flawed snapshot would then get
+        # served for the rest of the day with no way to self-correct. Now the
+        # only thing ever persisted is the result of _get_eod_from_summary(),
+        # which reads from the fully-settled daily_oi_summary table instead —
+        # see the persistence call in get_vol_oi_breakout()'s post-market path.
 
         _breakout_cache.update(result)
         _breakout_cache_time = time_module.time()
