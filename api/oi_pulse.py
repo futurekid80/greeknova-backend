@@ -118,6 +118,43 @@ def fetch_fut_oi_for_timestamp(supabase, timestamp: str) -> dict:
     return fut_oi
 
 
+def fetch_fut_volume_for_timestamp(supabase, timestamp: str) -> dict:
+    """BUG FIX (Jul 20 2026): live path never fetched volume at all, so
+    vol_ratio/vol_surge (used by the 'Vol Surge Leaders' card) were only
+    ever computed in the post-market EOD function -- during live market
+    hours those fields were simply missing, making the card always show
+    empty regardless of what was actually happening intraday."""
+    result = supabase.from_("oi_snapshots")\
+        .select("symbol, volume")\
+        .eq("timestamp", timestamp)\
+        .eq("option_type", "FUT")\
+        .limit(5000)\
+        .execute()
+    fut_vol = defaultdict(int)
+    for r in (result.data or []):
+        fut_vol[r["symbol"]] += r["volume"] or 0
+    return fut_vol
+
+
+def fetch_avg_vol_5d(supabase, before_date: str) -> dict:
+    """Same 5-day average volume logic already used in the EOD path,
+    reused here so the live path can compute vol_ratio too."""
+    hist_start = (datetime.strptime(before_date, '%Y-%m-%d') - timedelta(days=10)).strftime('%Y-%m-%d')
+    result = supabase.from_("daily_oi_summary")\
+        .select("symbol, trade_date, fut_vol")\
+        .gte("trade_date", hist_start)\
+        .lt("trade_date", before_date)\
+        .gt("fut_vol", 0)\
+        .order("trade_date", desc=True)\
+        .limit(1000)\
+        .execute()
+    vol_hist_map: dict = {}
+    for r in (result.data or []):
+        s = r["symbol"]
+        vol_hist_map.setdefault(s, []).append(int(r["fut_vol"]))
+    return {s: sum(v[:5]) / len(v[:5]) for s, v in vol_hist_map.items() if v}
+
+
 def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = None):
     all_rows = []
     for offset in range(0, 500000, 1000):
@@ -356,6 +393,10 @@ def get_oi_pulse():
     fut_oi_old = fetch_fut_oi_for_timestamp(supabase, ts_old)
     fut_oi_new = fetch_fut_oi_for_timestamp(supabase, ts_new)
 
+    # Step 3a-2: Live volume + 5-day average, for Vol Surge Leaders
+    fut_vol_new = fetch_fut_volume_for_timestamp(supabase, ts_new)
+    avg_vol_map = fetch_avg_vol_5d(supabase, active_date)
+
     # Step 3b: Options OI for activity display
     nearest_expiry_map = get_nearest_expiry_per_symbol(supabase, ts_new)
     old_rows = fetch_oi_for_timestamp(supabase, ts_old, nearest_expiry_map)
@@ -487,6 +528,10 @@ def get_oi_pulse():
             "color":             color,
             "bg":                bg,
             "border":            border,
+            "vol_ratio":         (round(fut_vol_new.get(sym, 0) / avg_vol_map[sym], 2)
+                                   if avg_vol_map.get(sym) else None),
+            "vol_surge":         bool(avg_vol_map.get(sym) and
+                                   (fut_vol_new.get(sym, 0) / avg_vol_map[sym]) >= 1.5),
         })
 
     items.sort(key=lambda x: (x["has_fut_data"], abs(x["oi_chg_pct"])), reverse=True)
