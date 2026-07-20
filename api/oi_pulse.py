@@ -123,16 +123,29 @@ def fetch_fut_volume_for_timestamp(supabase, timestamp: str) -> dict:
     vol_ratio/vol_surge (used by the 'Vol Surge Leaders' card) were only
     ever computed in the post-market EOD function -- during live market
     hours those fields were simply missing, making the card always show
-    empty regardless of what was actually happening intraday."""
+    empty regardless of what was actually happening intraday.
+
+    BUG FIX #2 (same day): initial version summed volume across BOTH
+    near-month and far-month FUT contracts, inflating the ratio ~1.3-1.4x
+    vs the Volume + OI Breakout card, which correctly uses front-month
+    only. Now restricted to nearest expiry per symbol so both cards agree."""
     result = supabase.from_("oi_snapshots")\
-        .select("symbol, volume")\
+        .select("symbol, expiry, volume")\
         .eq("timestamp", timestamp)\
         .eq("option_type", "FUT")\
         .limit(5000)\
         .execute()
+    rows = result.data or []
+    nearest_expiry: dict = {}
+    for r in rows:
+        sym, exp = r["symbol"], r.get("expiry")
+        if exp and (sym not in nearest_expiry or exp < nearest_expiry[sym]):
+            nearest_expiry[sym] = exp
     fut_vol = defaultdict(int)
-    for r in (result.data or []):
-        fut_vol[r["symbol"]] += r["volume"] or 0
+    for r in rows:
+        sym = r["symbol"]
+        if r.get("expiry") == nearest_expiry.get(sym):
+            fut_vol[sym] += r["volume"] or 0
     return fut_vol
 
 
