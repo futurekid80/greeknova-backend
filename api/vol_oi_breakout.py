@@ -298,12 +298,20 @@ def get_vol_oi_breakout(supabase):
 
     try:
         # ── Step 1: Today's FUT snapshots ─────────────────────────────────
+        # BUG FIX (Jul 20 2026): limit(10000) sorted oldest-first meant that
+        # once today's row count passed 10k (~11:30 AM on a normal day), the
+        # query silently stopped seeing anything captured after that point —
+        # "latest" oi/vol/price was frozen at whatever existed at the 10k
+        # mark, growing more stale as the day went on. At ~75 rows/min this
+        # blind spot only gets worse as symbol count/capture frequency grow.
+        # Raised to 50000 (full day ≈ 28k rows at current pace) so "latest"
+        # always reflects genuinely live data through market close.
         today_rows = supabase.from_("oi_snapshots")\
             .select("symbol, timestamp, oi, volume, last_price, expiry")\
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{today}T00:00:00+00:00")\
             .order("timestamp", desc=False)\
-            .limit(10000)\
+            .limit(50000)\
             .execute()
 
         if not today_rows.data:
