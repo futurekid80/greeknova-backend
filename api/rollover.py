@@ -4,6 +4,48 @@ Shows current month vs next month FUT OI rollover status.
 Compares vs previous series benchmark for context.
 """
 from datetime import datetime, timezone, timedelta
+import calendar
+
+
+def _last_tuesday(year: int, month: int):
+    """NSE monthly F&O expiry: last Tuesday of the month (post FAOP68747 circular)."""
+    last_day = calendar.monthrange(year, month)[1]
+    d = datetime(year, month, last_day).date()
+    while d.weekday() != 1:  # Tuesday
+        d -= timedelta(days=1)
+    return d
+
+
+def _shift_month(year: int, month: int, n: int):
+    m = month - 1 + n
+    y = year + m // 12
+    m = m % 12 + 1
+    return y, m
+
+
+def _get_rollover_expiries(today_date):
+    """BUG FIX (Jul 20 2026): expiry dates used to be hardcoded literals
+    (e.g. '2026-06-30' / '2026-07-28') that went stale the moment the
+    'current' expiry passed -- comparing OI against a dead, already-settled
+    contract with zero live snapshots, which silently emptied the whole
+    tracker every month once that date rolled by. Now computed fresh from
+    today's date every time the function runs, so it self-corrects across
+    every future expiry cycle without needing a manual code edit."""
+    y, m = today_date.year, today_date.month
+    curr = _last_tuesday(y, m)
+    if today_date > curr:
+        y, m = _shift_month(y, m, 1)
+        curr = _last_tuesday(y, m)
+    ny, nm = _shift_month(y, m, 1)
+    nxt = _last_tuesday(ny, nm)
+    py, pm = _shift_month(y, m, -1)
+    prev_curr = _last_tuesday(py, pm)
+    prev_next = curr
+    prev_bench = prev_curr
+    return (curr.strftime('%Y-%m-%d'), nxt.strftime('%Y-%m-%d'),
+            prev_curr.strftime('%Y-%m-%d'), prev_next.strftime('%Y-%m-%d'),
+            prev_bench.strftime('%Y-%m-%d'))
+
 
 def get_rollover(supabase):
     import pytz
@@ -30,14 +72,9 @@ def get_rollover(supabase):
 
     print(f"[ROLLOVER] Using trading date: {last_trading_date} (today={today})")
 
-    # Current expiries
-    curr_expiry = '2026-06-30'
-    next_expiry = '2026-07-28'
-
-    # Previous series benchmark dates
-    prev_curr_expiry = '2026-05-26'
-    prev_next_expiry = '2026-06-30'
-    prev_bench_date  = '2026-05-26'  # May expiry day — data in archive
+    # Current + previous-benchmark expiries, computed dynamically each run
+    curr_expiry, next_expiry, prev_curr_expiry, prev_next_expiry, prev_bench_date = \
+        _get_rollover_expiries(datetime.now(ist).date())
 
     # ── 1. Today's OI for both expiries ───────────────────────────────────────
     try:
