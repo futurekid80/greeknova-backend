@@ -406,19 +406,30 @@ def get_signal_log(date: str = None):
     # vol_rank = how many of last 5 days today's volume exceeds
     hist_vol_map: dict = {}  # sym -> [vol_day1, vol_day2, ...] sorted recent first
     try:
-        
         from collections import defaultdict
-        # Get last 5 trading dates before today — limit to 5000 rows max
-        hist_start = (datetime.now(timezone.utc) - timedelta(days=8)).strftime('%Y-%m-%d')
-        # Only fetch last snapshot per day per symbol (max volume proxy)
-        hist_rows = supabase.from_("oi_snapshots")            .select("symbol, volume, timestamp")            .eq("option_type", "FUT")            .gte("timestamp", f"{hist_start}T09:00:00+00:00")            .lt("timestamp",  f"{today}T00:00:00+00:00")            .gte("volume", 1000)            .order("timestamp", desc=False)            .limit(5000)            .execute()
-        sym_date_vol: dict = defaultdict(lambda: defaultdict(int))
+        # BUG FIX (Jul 21 2026): this used to pull raw oi_snapshots rows
+        # (option_type=FUT, volume>=1000, no expiry filter) ordered oldest
+        # first and capped at limit(5000). With ~128k matching rows across
+        # an 8-day window, that limit was hit within the first ~2.5 hours
+        # of the SINGLE oldest day -- so "5-day average volume" was really
+        # being computed from a couple hours of one day, producing a tiny,
+        # wrong baseline that inflated vol_ratio (e.g. showing 3.5x when
+        # the true pace-adjusted ratio was closer to 1.2x). Switched to
+        # daily_oi_summary.fut_vol -- one clean, pre-aggregated full-day
+        # figure per symbol per day, already isolated to near-month, same
+        # source already used for oi_pulse.py's live vol_ratio.
+        hist_start = (datetime.now(timezone.utc) - timedelta(days=10)).strftime('%Y-%m-%d')
+        hist_rows = supabase.from_("daily_oi_summary")\
+            .select("symbol, trade_date, fut_vol")\
+            .gte("trade_date", hist_start)\
+            .lt("trade_date", today)\
+            .gt("fut_vol", 0)\
+            .order("trade_date", desc=True)\
+            .limit(1000)\
+            .execute()
+        sym_date_vol: dict = defaultdict(dict)
         for r in (hist_rows.data or []):
-            sym = r["symbol"]
-            date_str = str(r["timestamp"])[:10]
-            vol = int(r["volume"] or 0)
-            if vol > sym_date_vol[sym][date_str]:
-                sym_date_vol[sym][date_str] = vol
+            sym_date_vol[r["symbol"]][r["trade_date"]] = int(r["fut_vol"])
         for sym, date_vols in sym_date_vol.items():
             sorted_vols = [v for _, v in sorted(date_vols.items(), reverse=True)][:5]
             hist_vol_map[sym] = sorted_vols
