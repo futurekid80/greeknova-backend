@@ -97,6 +97,14 @@ def get_historical_chain(symbol: str, date_str: str, timestamp: str = None, expi
         return qq
 
     rows = _query_both_tables(supabase, build)
+    print(f"[HIST_CHAIN_DEBUG] symbol={symbol} timestamp={timestamp!r} expiry_param={expiry!r} total_rows={len(rows)}")
+    if rows:
+        from collections import Counter
+        type_counts = Counter(r["option_type"] for r in rows)
+        expiry_counts = Counter(r["expiry"] for r in rows)
+        print(f"[HIST_CHAIN_DEBUG] option_type breakdown: {dict(type_counts)}")
+        print(f"[HIST_CHAIN_DEBUG] expiry breakdown: {dict(expiry_counts)}")
+        print(f"[HIST_CHAIN_DEBUG] sample row: {rows[0]!r}")
     if not rows:
         return {"symbol": symbol, "date": date_str, "timestamp": timestamp, "chain": [],
                 "error": "No data at this timestamp"}
