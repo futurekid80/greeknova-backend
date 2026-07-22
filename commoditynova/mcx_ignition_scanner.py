@@ -802,6 +802,18 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
             except Exception as stealth_err:
                 logger.error(f"Stealth update failed [{commodity}]: {stealth_err}")
 
+            # Gold zone covering — which side losing conviction near ATM
+            try:
+                gold_zone = compute_gold_zone_covering(commodity, float(price_result["current_price"]), supabase)
+                supabase.table("mcx_ignition_signals").update({
+                    "gold_zone_lean":        gold_zone["lean"],
+                    "gold_zone_ce_covering": str(gold_zone["ce_covering"]),
+                    "gold_zone_pe_covering": str(gold_zone["pe_covering"]),
+                }).eq("commodity", commodity).execute()
+                logger.info(f"{commodity}: gold_zone lean={gold_zone['lean']}")
+            except Exception as gz_err:
+                logger.error(f"Gold zone update failed [{commodity}]: {gz_err}")
+
             if signal["status"] == "fired":
                 supabase.table("mcx_ignition_history").insert({
                     "commodity":     commodity,
@@ -835,6 +847,65 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
 
 
 # ── MCX Stealth Buildup ──────────────────────────────────────────
+
+def compute_gold_zone_covering(commodity: str, current_price: float, supabase) -> dict:
+    """
+    Returns top covering strikes within ATM ±200 (gold zone).
+    CE covering = bears exiting = bullish signal
+    PE covering = bulls exiting = bearish signal
+    """
+    ZONE = {
+        "NATURALGAS": 10,
+        "CRUDEOIL": 200,
+        "GOLD": 2000,
+        "SILVER": 5000,
+    }
+    zone = ZONE.get(commodity, 200)
+    low = current_price - zone
+    high = current_price + zone
+
+    try:
+        result = supabase.table("mcx_strike_oi") \
+            .select("strike, option_type, current_oi, oi_delta") \
+            .eq("commodity", commodity) \
+            .lt("oi_delta", 0) \
+            .gte("strike", low) \
+            .lte("strike", high) \
+            .order("oi_delta", desc=False) \
+            .limit(6) \
+            .execute()
+        rows = result.data or []
+    except Exception as e:
+        logger.error(f"Gold zone fetch failed [{commodity}]: {e}")
+        return {"ce_covering": [], "pe_covering": [], "lean": "neutral"}
+
+    ce_covering = []
+    pe_covering = []
+    for r in rows:
+        item = {"strike": r["strike"], "delta": r["oi_delta"]}
+        if r["option_type"] == "CE":
+            ce_covering.append(item)
+        else:
+            pe_covering.append(item)
+
+    # Lean = whichever side has more total covering
+    ce_total = sum(abs(r["delta"]) for r in ce_covering)
+    pe_total = sum(abs(r["delta"]) for r in pe_covering)
+
+    if ce_total > pe_total * 1.3:
+        lean = "bullish"   # bears exiting more = bulls winning
+    elif pe_total > ce_total * 1.3:
+        lean = "bearish"   # bulls exiting more = bears winning
+    else:
+        lean = "neutral"
+
+    return {
+        "ce_covering": ce_covering[:2],  # top 2 only
+        "pe_covering": pe_covering[:2],
+        "lean": lean,
+        "zone": zone,
+    }
+
 def _stealth_empty() -> dict:
     return {
         "stealth_tier": None,
