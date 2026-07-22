@@ -865,9 +865,21 @@ def compute_gold_zone_covering(commodity: str, current_price: float, supabase) -
     high = current_price + zone
 
     try:
+        # Get latest scanned_at for this commodity
+        latest = supabase.table("mcx_strike_oi") \
+            .select("scanned_at") \
+            .eq("commodity", commodity) \
+            .order("scanned_at", desc=True) \
+            .limit(1) \
+            .execute()
+        if not latest.data:
+            return {"ce_covering": [], "pe_covering": [], "lean": "neutral"}
+        latest_ts = latest.data[0]["scanned_at"]
+
         result = supabase.table("mcx_strike_oi") \
             .select("strike, option_type, current_oi, oi_delta") \
             .eq("commodity", commodity) \
+            .eq("scanned_at", latest_ts) \
             .lt("oi_delta", 0) \
             .gte("strike", low) \
             .lte("strike", high) \
@@ -876,7 +888,7 @@ def compute_gold_zone_covering(commodity: str, current_price: float, supabase) -
             .execute()
         rows = result.data or []
     except Exception as e:
-        logger.error(f"Gold zone fetch failed [{commodity}]: {e}")
+        logger.error(f"ATM zone fetch failed [{commodity}]: {e}")
         return {"ce_covering": [], "pe_covering": [], "lean": "neutral"}
 
     ce_covering = []
