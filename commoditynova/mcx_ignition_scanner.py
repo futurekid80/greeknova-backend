@@ -883,10 +883,10 @@ def compute_gold_zone_covering(commodity: str, current_price: float, supabase) -
     pe_covering = []
     for r in rows:
         item = {"strike": r["strike"], "delta": r["oi_delta"]}
-        if r["option_type"] == "CE":
-            ce_covering.append(item)
-        else:
-            pe_covering.append(item)
+        if r["option_type"] == "CE" and r["strike"] >= current_price:
+            ce_covering.append(item)   # CE above price = real resistance exiting
+        elif r["option_type"] == "PE" and r["strike"] <= current_price:
+            pe_covering.append(item)   # PE below price = real floor exiting
 
     # Lean = whichever side has more total covering
     ce_total = sum(abs(r["delta"]) for r in ce_covering)
