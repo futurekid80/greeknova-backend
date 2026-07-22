@@ -100,9 +100,21 @@ def get_historical_chain(symbol: str, date_str: str, timestamp: str = None, expi
         return {"symbol": symbol, "date": date_str, "timestamp": timestamp, "chain": [],
                 "error": "No data at this timestamp"}
 
-    available_expiries = sorted(set(r["expiry"] for r in rows))
-    active_expiry = expiry or available_expiries[0]
-    rows = [r for r in rows if r["expiry"] == active_expiry]
+    # BUG FIX (Jul 22 2026): oi_snapshots stores a single FUT placeholder
+    # row (strike=0.00) for far-month contracts alongside the real CE/PE
+    # option chain rows for near-month expiries. These FUT rows were
+    # getting swept into available_expiries, so a far-month expiry with
+    # zero real strikes could get auto-selected as "active", producing a
+    # single all-zero row instead of a real chain. Only expiries that
+    # actually have CE/PE strike data are offered as choices.
+    option_rows = [r for r in rows if r["option_type"] in ("CE", "PE")]
+    available_expiries = sorted(set(r["expiry"] for r in option_rows))
+    if not available_expiries:
+        return {"symbol": symbol, "date": date_str, "timestamp": timestamp, "chain": [],
+                "error": "No option chain data at this timestamp (futures only)"}
+
+    active_expiry = expiry if expiry in available_expiries else available_expiries[0]
+    rows = [r for r in option_rows if r["expiry"] == active_expiry]
 
     # T is relative to the snapshot's own date, not today
     exp_date = datetime.strptime(active_expiry, "%Y-%m-%d").date()
@@ -127,7 +139,7 @@ def get_historical_chain(symbol: str, date_str: str, timestamp: str = None, expi
                 best = s
     spot = best or rows[len(rows) // 2]["strike"]
 
-    strikes = sorted(set(r["strike"] for r in rows))
+    strikes = sorted(set(r["strike"] for r in rows if r["strike"] and r["strike"] > 0))
     ce_map = {r["strike"]: r for r in rows if r["option_type"] == "CE"}
     pe_map = {r["strike"]: r for r in rows if r["option_type"] == "PE"}
     atm = min(strikes, key=lambda s: abs(s - spot))
