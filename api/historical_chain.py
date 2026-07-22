@@ -90,7 +90,8 @@ def get_historical_chain(symbol: str, date_str: str, timestamp: str = None, expi
     def build(q):
         qq = q.select("strike, option_type, oi, volume, last_price, expiry")\
             .eq("symbol", symbol)\
-            .eq("timestamp", timestamp)
+            .eq("timestamp", timestamp)\
+            .limit(2000)
         if expiry:
             qq = qq.eq("expiry", expiry)
         return qq
