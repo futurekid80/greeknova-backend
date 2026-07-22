@@ -1077,6 +1077,21 @@ def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
     return get_option_chain(symbol.upper(), expiry)
 
+@app.get("/historical-chain/dates/{symbol}")
+def historical_chain_dates(symbol: str):
+    from api.historical_chain import get_available_dates
+    return get_available_dates(symbol)
+
+@app.get("/historical-chain/snapshots/{symbol}")
+def historical_chain_snapshots(symbol: str, date: str):
+    from api.historical_chain import get_available_snapshots
+    return get_available_snapshots(symbol, date)
+
+@app.get("/historical-chain/{symbol}")
+def historical_chain(symbol: str, date: str, timestamp: str = None, expiry: str = None):
+    from api.historical_chain import get_historical_chain
+    return get_historical_chain(symbol, date, timestamp, expiry)
+
 @app.get("/oi-history/{symbol}")
 def oi_history(symbol: str = "NIFTY", date_a: str = None, date_b: str = None, expiry: str = None):
     from api.oi_history import get_oi_comparison
