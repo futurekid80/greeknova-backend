@@ -444,6 +444,7 @@ async def lifespan(app: FastAPI):
         kite = get_kite_client()
         supabase = get_supabase()
         start_mcx_scheduler(kite, supabase)
+    
     except Exception as e:
         print(f"⚠️ CommodityNova scheduler skipped — no Kite token: {e}")
         print("⚠️ Will retry captures using Supabase token once available")
