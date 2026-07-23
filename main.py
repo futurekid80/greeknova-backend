@@ -446,7 +446,7 @@ async def lifespan(app: FastAPI):
         if not os.environ.get("DISABLE_MCX"):
             start_mcx_scheduler(kite, supabase)
         else:
-            logger.info("MCX scheduler disabled via DISABLE_MCX env var")
+            print("⏭️ MCX scheduler disabled via DISABLE_MCX env var")
     
     except Exception as e:
         print(f"⚠️ CommodityNova scheduler skipped — no Kite token: {e}")
