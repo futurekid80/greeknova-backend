@@ -98,7 +98,10 @@ def save_preferences(supabase, endpoint: str, enabled_signals: list, spike_thres
         return {"error": str(e)}
 
 
-def _send_one(subscription: dict, payload: dict) -> bool:
+FAILURE_CLEANUP_THRESHOLD = 5  # consecutive non-404/410 failures before auto-removing
+
+
+def _send_one(supabase, subscription: dict, payload: dict) -> bool:
     """Send push to a single subscription. Returns False if the subscription is dead."""
     from urllib.parse import urlparse
     import time as _time
@@ -127,21 +130,43 @@ def _send_one(subscription: dict, payload: dict) -> bool:
             vapid_private_key=VAPID_PRIVATE_KEY,
             vapid_claims=claims,
         )
+        # BUG FIX (Jul 24 2026): reset the failure streak on a genuine
+        # success, so a subscription that recovers after a transient blip
+        # doesn't carry a stale count toward the auto-cleanup threshold.
+        if subscription.get("consecutive_failures"):
+            try:
+                supabase.from_("push_subscriptions")\
+                    .update({"consecutive_failures": 0})\
+                    .eq("id", subscription["id"]).execute()
+            except Exception:
+                pass
         return True
     except WebPushException as e:
         status = getattr(e.response, "status_code", None)
         if status in (404, 410):
             return False
-        # BUG FIX (Jul 24 2026): non-404/410 failures were logged without
-        # any way to identify WHICH subscription failed, so a permanently
-        # broken subscription (e.g. consistent 400 Bad Request) could fail
-        # on every single send, forever, with no way to spot or clean it up
-        # -- it was also never removed, since only 404/410 count as "dead"
-        # here. Logging the subscription id + endpoint tail makes the
-        # broken one identifiable directly from the logs.
+        # BUG FIX (Jul 24 2026): non-404/410 failures (e.g. a permanently
+        # malformed subscription returning 400 Bad Request on every single
+        # send) used to be logged and otherwise ignored forever -- one dead
+        # subscription could fail on every alert indefinitely with no way
+        # to notice or clean it up short of manually reading logs. Now
+        # tracked per-subscription: after several CONSECUTIVE failures
+        # (reset by any success in between, so a one-off blip is harmless)
+        # the subscription is treated as dead and removed, same as 404/410.
         endpoint_tail = endpoint[-24:] if endpoint else "?"
         sub_id = subscription.get("id", "?")
-        print(f"[Push] Send failed ({status}): sub_id={sub_id} endpoint=...{endpoint_tail} -- {e}")
+        new_count = int(subscription.get("consecutive_failures") or 0) + 1
+        try:
+            supabase.from_("push_subscriptions")\
+                .update({"consecutive_failures": new_count})\
+                .eq("id", sub_id).execute()
+        except Exception:
+            pass
+        print(f"[Push] Send failed ({status}): sub_id={sub_id} endpoint=...{endpoint_tail} "
+              f"attempt={new_count}/{FAILURE_CLEANUP_THRESHOLD} -- {e}")
+        if new_count >= FAILURE_CLEANUP_THRESHOLD:
+            print(f"[Push] sub_id={sub_id} hit {FAILURE_CLEANUP_THRESHOLD} consecutive failures -- marking dead")
+            return False
         return True
     except Exception as e:
         print(f"[Push] Send error: {e}")
@@ -212,7 +237,7 @@ def broadcast_alert(supabase, alert: dict):
             "alert": alert,
         }
 
-        ok = _send_one(sub, payload)
+        ok = _send_one(supabase, sub, payload)
         if ok:
             sent += 1
         else:
