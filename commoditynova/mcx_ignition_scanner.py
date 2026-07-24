@@ -891,14 +891,21 @@ def compute_gold_zone_covering(commodity: str, current_price: float, supabase) -
         logger.error(f"ATM zone fetch failed [{commodity}]: {e}")
         return {"ce_covering": [], "pe_covering": [], "lean": "neutral"}
 
+    # Deduplicate by strike+type — keep worst (most negative) delta only
+    seen = {}
+    for r in rows:
+        key = f"{r['option_type']}_{r['strike']}"
+        if key not in seen or r["oi_delta"] < seen[key]["oi_delta"]:
+            seen[key] = r
+
     ce_covering = []
     pe_covering = []
-    for r in rows:
+    for r in seen.values():
         item = {"strike": r["strike"], "delta": r["oi_delta"]}
         if r["option_type"] == "CE" and r["strike"] >= current_price:
-            ce_covering.append(item)   # CE above price = real resistance exiting
+            ce_covering.append(item)
         elif r["option_type"] == "PE" and r["strike"] <= current_price:
-            pe_covering.append(item)   # PE below price = real floor exiting
+            pe_covering.append(item)
 
     # Lean = whichever side has more total covering
     ce_total = sum(abs(r["delta"]) for r in ce_covering)
