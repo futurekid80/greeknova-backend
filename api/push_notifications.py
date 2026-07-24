@@ -132,7 +132,16 @@ def _send_one(subscription: dict, payload: dict) -> bool:
         status = getattr(e.response, "status_code", None)
         if status in (404, 410):
             return False
-        print(f"[Push] Send failed ({status}): {e}")
+        # BUG FIX (Jul 24 2026): non-404/410 failures were logged without
+        # any way to identify WHICH subscription failed, so a permanently
+        # broken subscription (e.g. consistent 400 Bad Request) could fail
+        # on every single send, forever, with no way to spot or clean it up
+        # -- it was also never removed, since only 404/410 count as "dead"
+        # here. Logging the subscription id + endpoint tail makes the
+        # broken one identifiable directly from the logs.
+        endpoint_tail = endpoint[-24:] if endpoint else "?"
+        sub_id = subscription.get("id", "?")
+        print(f"[Push] Send failed ({status}): sub_id={sub_id} endpoint=...{endpoint_tail} -- {e}")
         return True
     except Exception as e:
         print(f"[Push] Send error: {e}")
