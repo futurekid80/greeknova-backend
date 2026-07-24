@@ -984,11 +984,11 @@ def compute_mcx_stealth(commodity: str, supabase) -> dict:
 
     tier = None
     if cum_oi_pct >= 30:
-        tier = "Elite"   # cum OI alone sufficient — one bad scan shouldn't reset
-    elif cum_oi_pct >= 20 and consecutive >= 3:
-        tier = "Strong"
+        tier = "Elite"    # cum OI alone sufficient
+    elif cum_oi_pct >= 20:
+        tier = "Strong"   # cum OI alone sufficient
     elif cum_oi_pct >= 8 and consecutive >= 2:
-        tier = "Watch"
+        tier = "Watch"    # Watch still needs some consecutive confirmation
 
     if tier == "Elite" and not rate_slowing and phase == "build":
         tier = "Strong"
