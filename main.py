@@ -797,17 +797,32 @@ def archive_old_snapshots():
     supabase = get_supabase()
 
     try:
-        # Avoid asking Postgres to scan all 12M+ rows to find distinct old
-        # days (that scan itself was timing out) — just get the earliest
-        # timestamp (cheap, index-backed) and generate the day range in
-        # Python instead. archive_single_day_oi_snapshots() safely no-ops
-        # for any day that has no data, so calling it for every calendar
-        # day in the range (not just ones we've confirmed have data) is fine.
-        earliest_res = supabase.from_("oi_snapshots").select("timestamp").order("timestamp", desc=False).limit(1).execute()
-        if not earliest_res.data:
-            print("[ARCHIVE] No data in oi_snapshots — nothing to do")
-            return
-        earliest_date = datetime.fromisoformat(earliest_res.data[0]["timestamp"].replace("Z", "+00:00")).date()
+        # BUG FIX (Jul 26 2026): this used to compute earliest_date from
+        # oi_snapshots' own oldest row — but that row is the permanently-
+        # kept EOD snapshot for the oldest old day, which never gets
+        # deleted by design. That meant earliest_date was stuck at the
+        # very first archived day FOREVER, and every single run rebuilt
+        # the full day-range from there, re-scanning every already-done
+        # day from scratch before ever reaching genuinely new days. Each
+        # successful run only made that redundant backlog longer, so the
+        # job got progressively slower and further behind over time even
+        # while "succeeding" — exactly what happened here (stalled at
+        # Jul 10, then Jul 17, each run's time budget increasingly eaten
+        # by rescanning completed days instead of doing new work).
+        # Resume from the day after the archive table's own newest entry
+        # instead, so completed days are never touched again.
+        archive_newest_res = supabase.from_("oi_snapshots_archive")\
+            .select("timestamp").order("timestamp", desc=True).limit(1).execute()
+        if archive_newest_res.data:
+            archive_newest_date = datetime.fromisoformat(
+                archive_newest_res.data[0]["timestamp"].replace("Z", "+00:00")).date()
+            earliest_date = archive_newest_date + timedelta(days=1)
+        else:
+            earliest_res = supabase.from_("oi_snapshots").select("timestamp").order("timestamp", desc=False).limit(1).execute()
+            if not earliest_res.data:
+                print("[ARCHIVE] No data in oi_snapshots — nothing to do")
+                return
+            earliest_date = datetime.fromisoformat(earliest_res.data[0]["timestamp"].replace("Z", "+00:00")).date()
 
         old_days = []
         d = earliest_date
