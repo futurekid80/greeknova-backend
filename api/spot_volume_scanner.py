@@ -240,6 +240,14 @@ def _find_active_pattern(bars):
                 "baseline_used": baseline_used, "burst_is_green": burst_is_green,
             }
 
+    # BUG FIX (Jul 27 2026): if a breakout AND a fresh new burst both land
+    # on the same (most recent) day — price clears the old burst-high, and
+    # that same day's volume is also big enough to start a brand new watch
+    # — the breakout must win. Checking `active` first (as this used to)
+    # meant the fresh pause silently buried a real breakout that happened
+    # today, showing "Pausing" when the honest answer was "just broke out".
+    if last_breakout and last_breakout["breakout_date"] == bars[-1]["trade_date"]:
+        return last_breakout
     if active:
         pause_days = (n - 1) - active["burst_idx"]
         if pause_days > MAX_PAUSE_DAYS:
@@ -256,10 +264,6 @@ def _find_active_pattern(bars):
             "burst_is_green": active["burst_is_green"],
             "pause_days": pause_days,
         }
-    if last_breakout and last_breakout["breakout_date"] == bars[-1]["trade_date"]:
-        # Only surface a breakout if it happened on the most recent bar —
-        # older, already-played-out breakouts aren't actionable anymore.
-        return last_breakout
     return None
 
 
@@ -305,9 +309,31 @@ def get_volume_breakout_scan(supabase, symbols):
     results = []
     for sym, bars in by_symbol.items():
         bars_sorted = sorted(bars, key=lambda b: b["trade_date"])
-        # Fold in today's live data as a provisional last bar, if we have
-        # any and it's not already the last completed bar in the table.
-        if sym in live_high and (not bars_sorted or bars_sorted[-1]["trade_date"] != today_str):
+        # BUG FIX (Jul 27 2026): this used to only fold in live data when
+        # today's date was MISSING from spot_daily_bars — but a premature
+        # EOD write for today (e.g. from manually testing the eod-append
+        # endpoint mid-session, exactly what happened while building this)
+        # silently freezes the scanner's view of "today" for the entire
+        # rest of the day: every subsequent scan would keep re-reading
+        # that stale row instead of genuine live data, for every symbol,
+        # with no visible sign anything was wrong. During market hours,
+        # always replace any existing "today" row with live data instead —
+        # live intraday is the more current source while trading is live.
+        # Outside market hours, trust the DB row (the official EOD bar via
+        # Kite historical_data) over a frozen, possibly-incomplete live
+        # snapshot from before/after the session.
+        now_ist = _now_ist()
+        market_open = (9, 15) <= (now_ist.hour, now_ist.minute) < (15, 30)
+        if market_open:
+            if bars_sorted and bars_sorted[-1]["trade_date"] == today_str:
+                bars_sorted = bars_sorted[:-1]
+            if sym in live_high:
+                bars_sorted = bars_sorted + [{
+                    "trade_date": today_str,
+                    "open": live_open.get(sym), "high": live_high[sym],
+                    "close": live_last.get(sym), "volume": live_vol.get(sym, 0),
+                }]
+        elif sym in live_high and (not bars_sorted or bars_sorted[-1]["trade_date"] != today_str):
             bars_sorted = bars_sorted + [{
                 "trade_date": today_str,
                 "open": live_open.get(sym), "high": live_high[sym],
