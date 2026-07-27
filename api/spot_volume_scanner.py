@@ -23,6 +23,14 @@ Data sources:
 """
 from datetime import datetime, timedelta, date as date_type
 import time
+import pytz
+
+def _now_ist():
+    """Railway's datetime.now() returns naive UTC. Every date/timestamp
+    computation in this module needs IST wall-clock time (market hours,
+    calendar days, and the scan's own generated_at display all assume
+    it) — this is the single source of truth for 'now' in this file."""
+    return datetime.now(pytz.timezone("Asia/Kolkata"))
 
 BURST_THRESHOLD = 2.0   # volume >= 2x baseline counts as a burst
 BREAKOUT_VOL_THRESHOLD = 1.5  # volume >= 1.5x baseline confirms a breakout
@@ -57,8 +65,8 @@ def backfill_spot_daily_bars(supabase, kite, symbols, days_back=180):
     all_symbols = list(symbols) + list(INDEX_TOKENS.keys())
     token_map = _get_instrument_tokens(kite, symbols)
 
-    from_date = (datetime.now().date() - timedelta(days=days_back)).isoformat()
-    to_date = datetime.now().date().isoformat()
+    from_date = (_now_ist().date() - timedelta(days=days_back)).isoformat()
+    to_date = _now_ist().date().isoformat()
 
     total_bars = 0
     for sym in all_symbols:
@@ -106,7 +114,7 @@ def append_todays_spot_bar(supabase, kite, symbols):
     day after market close so spot_daily_bars stays current going forward."""
     all_symbols = list(symbols) + list(INDEX_TOKENS.keys())
     token_map = _get_instrument_tokens(kite, symbols)
-    today = datetime.now().date().isoformat()
+    today = _now_ist().date().isoformat()
 
     rows = []
     for sym in all_symbols:
@@ -250,7 +258,7 @@ def get_volume_breakout_scan(supabase, symbols):
 
     # Live "today so far" from intraday cmp_prices captures, in case today's
     # completed daily bar isn't in spot_daily_bars yet (market still open).
-    today_str = datetime.now().date().isoformat()
+    today_str = _now_ist().date().isoformat()
     live_res = supabase.from_("cmp_prices")\
         .select("symbol, cmp, volume, timestamp")\
         .gte("timestamp", f"{today_str}T00:00:00+00:00")\
@@ -289,5 +297,10 @@ def get_volume_breakout_scan(supabase, symbols):
         "scanned": len(by_symbol),
         "matches": len(results),
         "results": results,
-        "generated_at": datetime.now().isoformat(),
+        # BUG FIX (Jul 27 2026): datetime.now() on Railway returns naive
+        # UTC — the frontend then displayed that raw clock reading labeled
+        # as IST (showing e.g. "08:25 am IST" at actual 1:55 pm IST, a
+        # dead giveaway of the 5:30 UTC offset). Use IST-aware datetime
+        # explicitly, consistent with the rest of the app's convention.
+        "generated_at": _now_ist().isoformat(),
     }
