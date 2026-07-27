@@ -4,10 +4,18 @@ spot_volume_scanner.py - Spot (cash-market) Volume Breakout Scanner
 Pattern: burst -> pause -> breakout, defined precisely as:
   1. BURST day: volume spikes vs trailing baseline (checked against 5/10/20-day
      averages — a burst after a longer quiet stretch scores higher conviction).
-  2. PAUSE: every day after, while price stays below the burst day's HIGH —
-     the longer this holds with volume staying quiet, the more it's "coiling".
+  2. PAUSE: every day after, while price holds above the burst day's LOW and
+     below its HIGH — the longer this holds with volume staying quiet
+     (dull, contracting volume), the more it's a genuine "coiling" base
+     rather than noise. If price closes below the burst day's low, the
+     setup is invalidated and dropped — a real base holds its low.
   3. BREAKOUT: price crosses above the burst day's high, ideally with volume
      elevated again — that's the actual signal.
+
+Deliberately rule-based rather than shape-based (no flag/trendline/swing
+detection) — the underlying logic (burst, hold support, go quiet, break out
+with volume) is what matters; whatever shape that produces on a chart is
+incidental, not the target.
 
 Built specifically to sidestep the false signals futures volume gives during
 rollover weeks (volume artificially splits across near/far month contracts) —
@@ -156,17 +164,20 @@ def _find_active_pattern(bars):
     """Given a symbol's daily bars (ascending by date), walk forward and
     return the most recent active burst/pause/breakout state, or None if
     no pattern is currently active. bars: list of dicts with
-    trade_date/open/high/close/volume, already sorted ascending."""
+    trade_date/open/high/low/close/volume, already sorted ascending."""
     n = len(bars)
     if n < 21:
         return None  # not enough history for a 20-day baseline
 
-    active = None  # {"burst_date", "burst_high", "burst_ratio", "baseline_used", "burst_is_green"}
+    active = None
     last_breakout = None
 
     for i in range(20, n):
         vol_today = bars[i]["volume"] or 0
         high_today = bars[i]["high"]
+        low_today = bars[i].get("low")
+        open_today = bars[i].get("open")
+        close_today = bars[i].get("close")
         if vol_today <= 0:
             continue
 
@@ -191,26 +202,42 @@ def _find_active_pattern(bars):
         # BUG FIX / FEATURE (Jul 27 2026): a volume burst on a green candle
         # (close >= open — buyers stepping in) reads very differently from
         # one on a red candle (close < open — often capitulation/selling
-        # climax rather than accumulation). The algorithm can't tell these
-        # apart mechanically, so tag it and let the trader judge — e.g.
-        # TVSMOTOR's clean quiet-days-then-green-burst setup vs INDIGO's
-        # burst landing on the 4th red day of a selloff are very different
-        # setups even though both technically qualify as "a burst".
-        open_today = bars[i].get("open")
-        close_today = bars[i].get("close")
+        # climax rather than accumulation). Tag it and let the trader judge.
         burst_is_green = (close_today >= open_today) if (open_today is not None and close_today is not None) else None
 
         if active:
+            # FEATURE (Jul 27 2026): invalidate the pause if price actually
+            # CLOSES below the burst day's own low. A genuine base holds
+            # its low and goes quiet; one that breaks down has failed,
+            # regardless of whether it later pokes back above the high.
+            # Without this, a stock that fully round-tripped and broke
+            # support would still sit in "Pausing" looking identical to a
+            # healthy, tightly-held setup.
+            if (active.get("burst_low") is not None and close_today is not None
+                    and close_today < active["burst_low"]):
+                active = None
+                if is_burst:
+                    active = {
+                        "burst_date": bars[i]["trade_date"], "burst_idx": i,
+                        "burst_high": high_today, "burst_low": low_today,
+                        "burst_ratio": burst_ratio, "baseline_used": baseline_used,
+                        "burst_is_green": burst_is_green, "pause_vol_ratios": [],
+                    }
+                continue
+
             if high_today > active["burst_high"]:
                 # Breakout — price crossed above the burst day's high.
                 confirmed = ratio5 >= BREAKOUT_VOL_THRESHOLD or ratio10 >= BREAKOUT_VOL_THRESHOLD
+                pause_ratios = active.get("pause_vol_ratios") or []
                 last_breakout = {
                     "state": "breakout",
                     "burst_date": active["burst_date"],
                     "burst_high": active["burst_high"],
+                    "burst_low": active.get("burst_low"),
                     "burst_ratio": active["burst_ratio"],
                     "baseline_used": active["baseline_used"],
                     "burst_is_green": active["burst_is_green"],
+                    "avg_pause_vol_ratio": round(sum(pause_ratios) / len(pause_ratios), 2) if pause_ratios else None,
                     "breakout_date": bars[i]["trade_date"],
                     "breakout_vol_ratio": round(max(ratio5, ratio10), 2),
                     "confirmed": confirmed,
@@ -221,8 +248,9 @@ def _find_active_pattern(bars):
                 if is_burst:
                     active = {
                         "burst_date": bars[i]["trade_date"], "burst_idx": i,
-                        "burst_high": high_today, "burst_ratio": burst_ratio,
-                        "baseline_used": baseline_used, "burst_is_green": burst_is_green,
+                        "burst_high": high_today, "burst_low": low_today,
+                        "burst_ratio": burst_ratio, "baseline_used": baseline_used,
+                        "burst_is_green": burst_is_green, "pause_vol_ratios": [],
                     }
                 continue
             # Still pausing — but if today is an even fresher/stronger burst,
@@ -230,22 +258,28 @@ def _find_active_pattern(bars):
             if is_burst and burst_ratio > active["burst_ratio"]:
                 active = {
                     "burst_date": bars[i]["trade_date"], "burst_idx": i,
-                    "burst_high": high_today, "burst_ratio": burst_ratio,
-                    "baseline_used": baseline_used, "burst_is_green": burst_is_green,
+                    "burst_high": high_today, "burst_low": low_today,
+                    "burst_ratio": burst_ratio, "baseline_used": baseline_used,
+                    "burst_is_green": burst_is_green, "pause_vol_ratios": [],
                 }
+            else:
+                # FEATURE (Jul 27 2026): genuine pause day — track this
+                # day's volume ratio (consistently vs the 20d baseline, so
+                # every day in the pause is measured the same way) to
+                # score how "dull" the consolidation has actually been,
+                # rather than just assuming it based on price sitting still.
+                active.setdefault("pause_vol_ratios", []).append(round(ratio20, 2))
         elif is_burst:
             active = {
                 "burst_date": bars[i]["trade_date"], "burst_idx": i,
-                "burst_high": high_today, "burst_ratio": burst_ratio,
-                "baseline_used": baseline_used, "burst_is_green": burst_is_green,
+                "burst_high": high_today, "burst_low": low_today,
+                "burst_ratio": burst_ratio, "baseline_used": baseline_used,
+                "burst_is_green": burst_is_green, "pause_vol_ratios": [],
             }
 
     # BUG FIX (Jul 27 2026): if a breakout AND a fresh new burst both land
-    # on the same (most recent) day — price clears the old burst-high, and
-    # that same day's volume is also big enough to start a brand new watch
-    # — the breakout must win. Checking `active` first (as this used to)
-    # meant the fresh pause silently buried a real breakout that happened
-    # today, showing "Pausing" when the honest answer was "just broke out".
+    # on the same (most recent) day, the breakout must win — see full note
+    # in git history. Checking `active` first buried real same-day breakouts.
     if last_breakout and last_breakout["breakout_date"] == bars[-1]["trade_date"]:
         return last_breakout
     if active:
@@ -255,22 +289,20 @@ def _find_active_pattern(bars):
             # longer a meaningful "coiled" setup. Drop it rather than
             # surfacing an increasingly old, less relevant burst forever.
             return None
-        # BUG FIX / FEATURE (Jul 27 2026): a burst that happened TODAY
-        # (pause_days == 0) is still live and unresolved — its "burst
-        # high" is literally its own still-forming high-so-far, so price
-        # can never be "above" it yet by definition. That's a completely
-        # different situation from a stock that's been quietly sitting
-        # below an OLDER established high for days — lumping both under
-        # "Pausing" hid the fact that something is actively happening
-        # RIGHT NOW. Give same-day bursts their own state.
+        # FEATURE (Jul 27 2026): a burst that happened TODAY (pause_days
+        # == 0) is still live and unresolved — give it its own state
+        # rather than lumping it in with genuinely dormant multi-day pauses.
         state = "bursting" if pause_days == 0 else "pausing"
+        pause_ratios = active.get("pause_vol_ratios") or []
         return {
             "state": state,
             "burst_date": active["burst_date"],
             "burst_high": active["burst_high"],
+            "burst_low": active.get("burst_low"),
             "burst_ratio": active["burst_ratio"],
             "baseline_used": active["baseline_used"],
             "burst_is_green": active["burst_is_green"],
+            "avg_pause_vol_ratio": round(sum(pause_ratios) / len(pause_ratios), 2) if pause_ratios else None,
             "pause_days": pause_days,
         }
     return None
@@ -283,7 +315,7 @@ def get_volume_breakout_scan(supabase, symbols):
     all_symbols = list(symbols) + list(INDEX_TOKENS.keys())
 
     bars_res = supabase.from_("spot_daily_bars")\
-        .select("symbol, trade_date, open, high, close, volume")\
+        .select("symbol, trade_date, open, high, low, close, volume")\
         .in_("symbol", all_symbols)\
         .order("trade_date", desc=False)\
         .limit(50000).execute()
@@ -304,6 +336,7 @@ def get_volume_breakout_scan(supabase, symbols):
     live_open: dict = {}
     live_last: dict = {}
     live_high: dict = {}
+    live_low: dict = {}
     live_vol: dict = {}
     for r in (live_res.data or []):
         sym = r["symbol"]
@@ -313,24 +346,17 @@ def get_volume_breakout_scan(supabase, symbols):
             live_open.setdefault(sym, px)  # first seen this day = open
             live_last[sym] = px            # last seen (ascending order) = latest price
             live_high[sym] = max(live_high.get(sym, 0), px)
+            live_low[sym] = min(live_low.get(sym, px), px)
         live_vol[sym] = max(live_vol.get(sym, 0), vol)  # cumulative, so max = latest
 
     results = []
     for sym, bars in by_symbol.items():
         bars_sorted = sorted(bars, key=lambda b: b["trade_date"])
-        # BUG FIX (Jul 27 2026): this used to only fold in live data when
-        # today's date was MISSING from spot_daily_bars — but a premature
-        # EOD write for today (e.g. from manually testing the eod-append
-        # endpoint mid-session, exactly what happened while building this)
-        # silently freezes the scanner's view of "today" for the entire
-        # rest of the day: every subsequent scan would keep re-reading
-        # that stale row instead of genuine live data, for every symbol,
-        # with no visible sign anything was wrong. During market hours,
-        # always replace any existing "today" row with live data instead —
-        # live intraday is the more current source while trading is live.
-        # Outside market hours, trust the DB row (the official EOD bar via
-        # Kite historical_data) over a frozen, possibly-incomplete live
-        # snapshot from before/after the session.
+        # During market hours, always replace any existing "today" row with
+        # live data — see git history for the full note on why a premature
+        # EOD write must never be allowed to freeze the scanner's view of
+        # the current day. Outside market hours, trust the DB row (the
+        # official EOD bar via Kite historical_data).
         now_ist = _now_ist()
         market_open = (9, 15) <= (now_ist.hour, now_ist.minute) < (15, 30)
         if market_open:
@@ -340,13 +366,15 @@ def get_volume_breakout_scan(supabase, symbols):
                 bars_sorted = bars_sorted + [{
                     "trade_date": today_str,
                     "open": live_open.get(sym), "high": live_high[sym],
-                    "close": live_last.get(sym), "volume": live_vol.get(sym, 0),
+                    "low": live_low.get(sym), "close": live_last.get(sym),
+                    "volume": live_vol.get(sym, 0),
                 }]
         elif sym in live_high and (not bars_sorted or bars_sorted[-1]["trade_date"] != today_str):
             bars_sorted = bars_sorted + [{
                 "trade_date": today_str,
                 "open": live_open.get(sym), "high": live_high[sym],
-                "close": live_last.get(sym), "volume": live_vol.get(sym, 0),
+                "low": live_low.get(sym), "close": live_last.get(sym),
+                "volume": live_vol.get(sym, 0),
             }]
         pattern = _find_active_pattern(bars_sorted)
         if pattern:
@@ -360,10 +388,5 @@ def get_volume_breakout_scan(supabase, symbols):
         "scanned": len(by_symbol),
         "matches": len(results),
         "results": results,
-        # BUG FIX (Jul 27 2026): datetime.now() on Railway returns naive
-        # UTC — the frontend then displayed that raw clock reading labeled
-        # as IST (showing e.g. "08:25 am IST" at actual 1:55 pm IST, a
-        # dead giveaway of the 5:30 UTC offset). Use IST-aware datetime
-        # explicitly, consistent with the rest of the app's convention.
         "generated_at": _now_ist().isoformat(),
     }
