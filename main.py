@@ -112,18 +112,26 @@ def run_full_capture():
         try:
             idx_quotes = kite.quote(list(INDEX_NSE_MAP.values()))
             for sym, key in INDEX_NSE_MAP.items():
-                price = idx_quotes.get(key, {}).get("last_price", 0)
+                q = idx_quotes.get(key, {})
+                price = q.get("last_price", 0)
                 if price:
-                    cmp_records.append({"timestamp": timestamp, "symbol": sym, "cmp": float(price)})
+                    cmp_records.append({
+                        "timestamp": timestamp, "symbol": sym, "cmp": float(price),
+                        "volume": int(q.get("volume", 0)),
+                    })
                     _last_cmp[sym] = float(price)
         except Exception as e: print(f"  ⚠️ Index CMP: {e}")
 
         try:
             stk_quotes = kite.quote(list(STOCK_NSE_MAP.values()))
             for sym, key in STOCK_NSE_MAP.items():
-                price = stk_quotes.get(key, {}).get("last_price", 0)
+                q = stk_quotes.get(key, {})
+                price = q.get("last_price", 0)
                 if price:
-                    cmp_records.append({"timestamp": timestamp, "symbol": sym, "cmp": float(price)})
+                    cmp_records.append({
+                        "timestamp": timestamp, "symbol": sym, "cmp": float(price),
+                        "volume": int(q.get("volume", 0)),
+                    })
                     _last_cmp[sym] = float(price)
         except Exception as e: print(f"  ⚠️ Stock CMP: {e}")
 
@@ -358,6 +366,19 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=600
     )
     scheduler.add_job(keepalive_ping, "interval", minutes=10, id="keepalive")
+
+    def _run_spot_volume_eod():
+        try:
+            from services.kite_auth import get_kite_client
+            from utils.db import get_supabase
+            from api.spot_volume_scanner import append_todays_spot_bar
+            append_todays_spot_bar(get_supabase(), get_kite_client(), list(STOCK_NSE_MAP.keys()))
+        except Exception as e:
+            print(f"[SPOT_VOL] EOD job failed: {e}")
+    scheduler.add_job(
+        _run_spot_volume_eod, "cron", hour=16, minute=0, timezone="Asia/Kolkata",
+        id="spot_volume_eod", misfire_grace_time=600
+    )
     scheduler.add_job(
         archive_old_snapshots,
         "cron",
@@ -2227,6 +2248,37 @@ def archive_snapshots_now():
     try:
         archive_old_snapshots()
         return {"status": "triggered"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/spot-volume/backfill")
+def spot_volume_backfill(days_back: int = 180):
+    from services.kite_auth import get_kite_client
+    from api.spot_volume_scanner import backfill_spot_daily_bars
+    from api.iv_analysis import SYMBOLS
+    try:
+        result = backfill_spot_daily_bars(get_supabase(), get_kite_client(), SYMBOLS, days_back=days_back)
+        return result
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/spot-volume/eod-append")
+def spot_volume_eod_append():
+    from services.kite_auth import get_kite_client
+    from api.spot_volume_scanner import append_todays_spot_bar
+    from api.iv_analysis import SYMBOLS
+    try:
+        result = append_todays_spot_bar(get_supabase(), get_kite_client(), SYMBOLS)
+        return result
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/spot-volume/scan")
+def spot_volume_scan():
+    from api.spot_volume_scanner import get_volume_breakout_scan
+    from api.iv_analysis import SYMBOLS
+    try:
+        return get_volume_breakout_scan(get_supabase(), SYMBOLS)
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
