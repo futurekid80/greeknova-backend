@@ -34,6 +34,9 @@ def _now_ist():
 
 BURST_THRESHOLD = 2.0   # volume >= 2x baseline counts as a burst
 BREAKOUT_VOL_THRESHOLD = 1.5  # volume >= 1.5x baseline confirms a breakout
+MAX_PAUSE_DAYS = 10  # drop a burst from "pausing" if it hasn't broken out
+                     # within this many trading days — beyond this it's
+                     # stopped being a tight coil and is just noise
 LOOKBACK_DAYS_FOR_SCAN = 40    # how far back to look for an active burst/pause
 
 INDEX_TOKENS = {
@@ -225,13 +228,19 @@ def _find_active_pattern(bars):
             }
 
     if active:
+        pause_days = (n - 1) - active["burst_idx"]
+        if pause_days > MAX_PAUSE_DAYS:
+            # Stale — burst never resolved within the watch window, no
+            # longer a meaningful "coiled" setup. Drop it rather than
+            # surfacing an increasingly old, less relevant burst forever.
+            return None
         return {
             "state": "pausing",
             "burst_date": active["burst_date"],
             "burst_high": active["burst_high"],
             "burst_ratio": active["burst_ratio"],
             "baseline_used": active["baseline_used"],
-            "pause_days": (n - 1) - active["burst_idx"],
+            "pause_days": pause_days,
         }
     if last_breakout and last_breakout["breakout_date"] == bars[-1]["trade_date"]:
         # Only surface a breakout if it happened on the most recent bar —
