@@ -255,8 +255,17 @@ def _find_active_pattern(bars):
             # longer a meaningful "coiled" setup. Drop it rather than
             # surfacing an increasingly old, less relevant burst forever.
             return None
+        # BUG FIX / FEATURE (Jul 27 2026): a burst that happened TODAY
+        # (pause_days == 0) is still live and unresolved — its "burst
+        # high" is literally its own still-forming high-so-far, so price
+        # can never be "above" it yet by definition. That's a completely
+        # different situation from a stock that's been quietly sitting
+        # below an OLDER established high for days — lumping both under
+        # "Pausing" hid the fact that something is actively happening
+        # RIGHT NOW. Give same-day bursts their own state.
+        state = "bursting" if pause_days == 0 else "pausing"
         return {
-            "state": "pausing",
+            "state": state,
             "burst_date": active["burst_date"],
             "burst_high": active["burst_high"],
             "burst_ratio": active["burst_ratio"],
@@ -345,7 +354,8 @@ def get_volume_breakout_scan(supabase, symbols):
             pattern["cmp"] = live_high.get(sym) or (bars_sorted[-1]["high"] if bars_sorted else None)
             results.append(pattern)
 
-    results.sort(key=lambda r: (r["state"] != "breakout", -r.get("burst_ratio", 0)))
+    _state_rank = {"breakout": 0, "bursting": 1, "pausing": 2}
+    results.sort(key=lambda r: (_state_rank.get(r["state"], 3), -r.get("burst_ratio", 0)))
     return {
         "scanned": len(by_symbol),
         "matches": len(results),
