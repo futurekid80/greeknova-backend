@@ -156,12 +156,12 @@ def _find_active_pattern(bars):
     """Given a symbol's daily bars (ascending by date), walk forward and
     return the most recent active burst/pause/breakout state, or None if
     no pattern is currently active. bars: list of dicts with
-    trade_date/high/volume, already sorted ascending."""
+    trade_date/open/high/close/volume, already sorted ascending."""
     n = len(bars)
     if n < 21:
         return None  # not enough history for a 20-day baseline
 
-    active = None  # {"burst_date", "burst_high", "burst_ratio", "baseline_used"}
+    active = None  # {"burst_date", "burst_high", "burst_ratio", "baseline_used", "burst_is_green"}
     last_breakout = None
 
     for i in range(20, n):
@@ -188,6 +188,18 @@ def _find_active_pattern(bars):
         elif ratio5 >= BURST_THRESHOLD:
             is_burst, baseline_used, burst_ratio = True, "5d", round(ratio5, 2)
 
+        # BUG FIX / FEATURE (Jul 27 2026): a volume burst on a green candle
+        # (close >= open — buyers stepping in) reads very differently from
+        # one on a red candle (close < open — often capitulation/selling
+        # climax rather than accumulation). The algorithm can't tell these
+        # apart mechanically, so tag it and let the trader judge — e.g.
+        # TVSMOTOR's clean quiet-days-then-green-burst setup vs INDIGO's
+        # burst landing on the 4th red day of a selloff are very different
+        # setups even though both technically qualify as "a burst".
+        open_today = bars[i].get("open")
+        close_today = bars[i].get("close")
+        burst_is_green = (close_today >= open_today) if (open_today is not None and close_today is not None) else None
+
         if active:
             if high_today > active["burst_high"]:
                 # Breakout — price crossed above the burst day's high.
@@ -198,6 +210,7 @@ def _find_active_pattern(bars):
                     "burst_high": active["burst_high"],
                     "burst_ratio": active["burst_ratio"],
                     "baseline_used": active["baseline_used"],
+                    "burst_is_green": active["burst_is_green"],
                     "breakout_date": bars[i]["trade_date"],
                     "breakout_vol_ratio": round(max(ratio5, ratio10), 2),
                     "confirmed": confirmed,
@@ -209,7 +222,7 @@ def _find_active_pattern(bars):
                     active = {
                         "burst_date": bars[i]["trade_date"], "burst_idx": i,
                         "burst_high": high_today, "burst_ratio": burst_ratio,
-                        "baseline_used": baseline_used,
+                        "baseline_used": baseline_used, "burst_is_green": burst_is_green,
                     }
                 continue
             # Still pausing — but if today is an even fresher/stronger burst,
@@ -218,13 +231,13 @@ def _find_active_pattern(bars):
                 active = {
                     "burst_date": bars[i]["trade_date"], "burst_idx": i,
                     "burst_high": high_today, "burst_ratio": burst_ratio,
-                    "baseline_used": baseline_used,
+                    "baseline_used": baseline_used, "burst_is_green": burst_is_green,
                 }
         elif is_burst:
             active = {
                 "burst_date": bars[i]["trade_date"], "burst_idx": i,
                 "burst_high": high_today, "burst_ratio": burst_ratio,
-                "baseline_used": baseline_used,
+                "baseline_used": baseline_used, "burst_is_green": burst_is_green,
             }
 
     if active:
@@ -240,6 +253,7 @@ def _find_active_pattern(bars):
             "burst_high": active["burst_high"],
             "burst_ratio": active["burst_ratio"],
             "baseline_used": active["baseline_used"],
+            "burst_is_green": active["burst_is_green"],
             "pause_days": pause_days,
         }
     if last_breakout and last_breakout["breakout_date"] == bars[-1]["trade_date"]:
@@ -256,7 +270,7 @@ def get_volume_breakout_scan(supabase, symbols):
     all_symbols = list(symbols) + list(INDEX_TOKENS.keys())
 
     bars_res = supabase.from_("spot_daily_bars")\
-        .select("symbol, trade_date, high, volume")\
+        .select("symbol, trade_date, open, high, close, volume")\
         .in_("symbol", all_symbols)\
         .order("trade_date", desc=False)\
         .limit(50000).execute()
@@ -274,6 +288,8 @@ def get_volume_breakout_scan(supabase, symbols):
         .in_("symbol", all_symbols)\
         .order("timestamp", desc=False).limit(20000).execute()
 
+    live_open: dict = {}
+    live_last: dict = {}
     live_high: dict = {}
     live_vol: dict = {}
     for r in (live_res.data or []):
@@ -281,6 +297,8 @@ def get_volume_breakout_scan(supabase, symbols):
         px = float(r["cmp"] or 0)
         vol = int(r["volume"] or 0)
         if px > 0:
+            live_open.setdefault(sym, px)  # first seen this day = open
+            live_last[sym] = px            # last seen (ascending order) = latest price
             live_high[sym] = max(live_high.get(sym, 0), px)
         live_vol[sym] = max(live_vol.get(sym, 0), vol)  # cumulative, so max = latest
 
@@ -292,8 +310,8 @@ def get_volume_breakout_scan(supabase, symbols):
         if sym in live_high and (not bars_sorted or bars_sorted[-1]["trade_date"] != today_str):
             bars_sorted = bars_sorted + [{
                 "trade_date": today_str,
-                "high": live_high[sym],
-                "volume": live_vol.get(sym, 0),
+                "open": live_open.get(sym), "high": live_high[sym],
+                "close": live_last.get(sym), "volume": live_vol.get(sym, 0),
             }]
         pattern = _find_active_pattern(bars_sorted)
         if pattern:
