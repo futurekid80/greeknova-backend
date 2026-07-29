@@ -551,8 +551,8 @@ def writer_buyer_score(symbol: str):
     last_trading_day = check.isoformat()
 
     # ── 1. Fetch ATM±10 strikes OI (EOD snapshot) ─────────────────────────
-    from api.positional_radar import get_monthly_expiry, get_series_start
-    expiry = get_monthly_expiry(today.year, today.month)
+    from api.positional_radar import get_current_expiry, get_series_start
+    expiry = get_current_expiry(today)
 
     cmp_res = supabase.from_("cmp_prices")\
         .select("cmp")\
@@ -1002,9 +1002,9 @@ def watchdog_cpr():
 
         if not radar_check.data:
             print(f"[CPR Watchdog] ⚠️ Radar cache missing for {_today} — refreshing...")
-            from api.positional_radar import get_monthly_expiry, get_series_start, clear_radar_cache
+            from api.positional_radar import get_current_expiry, get_series_start, clear_radar_cache
             _today_dt = _dt.date.today()
-            _expiry = get_monthly_expiry(_today_dt.year, _today_dt.month)
+            _expiry = get_current_expiry(_today_dt)
             _series_start = get_series_start(_expiry)
             supabase.rpc("refresh_positional_radar_cache", {
                 "p_series_start": _series_start,
@@ -1073,11 +1073,11 @@ def refresh_radar_cache():
     if datetime.now(ist).weekday() >= 5:
         return
     try:
-        from api.positional_radar import get_monthly_expiry, get_series_start
+        from api.positional_radar import get_current_expiry, get_series_start
         from utils.db import get_supabase
         import datetime as dt
         today = dt.date.today()
-        expiry = get_monthly_expiry(today.year, today.month)
+        expiry = get_current_expiry(today)
         series_start = get_series_start(expiry)
         result = get_supabase().rpc("refresh_positional_radar_cache", {
             "p_series_start": series_start,
@@ -1353,10 +1353,10 @@ def oi_buildup(symbol: str, days: int = 15):
 
     # Filter to current series only — avoids rollover confusion
     try:
-        from api.positional_radar import get_monthly_expiry, get_series_start
+        from api.positional_radar import get_current_expiry, get_series_start
         import datetime as _dt
         _today = _dt.date.today()
-        _expiry = get_monthly_expiry(_today.year, _today.month)
+        _expiry = get_current_expiry(_today)
         _series_start = get_series_start(_expiry)
         data = [d for d in data if d["date"] > _series_start]
     except Exception as e:
@@ -1780,8 +1780,8 @@ def stealth_buildup():
     last_trading_day = check.isoformat()
 
     # ── Get series start ──────────────────────────────────────────────────
-    from api.positional_radar import get_monthly_expiry, get_series_start
-    expiry = get_monthly_expiry(today.year, today.month)
+    from api.positional_radar import get_current_expiry, get_series_start
+    expiry = get_current_expiry(today)
     series_start = get_series_start(expiry)
 
     # ── Fetch last 15 days of FUT OI change from daily_oi_summary ────────

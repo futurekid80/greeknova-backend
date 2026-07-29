@@ -21,9 +21,9 @@ def get_watch_today(supabase):
 
     # ── Step 1: Get Positional Radar — ALL stocks (already filtered 2+ days) ──
     try:
-        from api.positional_radar import get_monthly_expiry, get_series_start
+        from api.positional_radar import get_current_expiry, get_series_start
         _today_date = _dt.date.today()
-        _expiry = get_monthly_expiry(_today_date.year, _today_date.month)
+        _expiry = get_current_expiry(_today_date)
         _series_start = get_series_start(_expiry)
     except:
         _series_start = "2026-05-27"

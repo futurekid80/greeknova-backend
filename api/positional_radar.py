@@ -47,6 +47,27 @@ def get_series_start(expiry_date: str) -> str:
     return series_start.strftime('%Y-%m-%d')
 
 
+def get_current_expiry(today) -> str:
+    """The correct ACTIVE monthly expiry for `today` — automatically rolls
+    forward to next month if today is already past this month's own
+    expiry date (e.g. the day after monthly expiry, when the naive
+    get_monthly_expiry(today.year, today.month) would still hand back an
+    already-dead contract). Every caller that needs "today's expiry"
+    should use this instead of calling get_monthly_expiry directly with
+    today's own month — that naive pattern was found duplicated across 8+
+    call sites (main.py x5, positional_intelligence.py, oi_buildup_period.py,
+    watch_today.py) on 29-Jul-2026, all still returning the dead 28-Jul
+    contract a day after it expired. This is the single, shared, correct
+    version going forward."""
+    expiry = get_monthly_expiry(today.year, today.month)
+    if today.strftime('%Y-%m-%d') > expiry:
+        if today.month == 12:
+            expiry = get_monthly_expiry(today.year + 1, 1)
+        else:
+            expiry = get_monthly_expiry(today.year, today.month + 1)
+    return expiry
+
+
 def count_signal_days(oi_series, cmp_series, signal_type):
     count = 0
     for i in range(len(oi_series) - 1, 0, -1):
@@ -236,13 +257,7 @@ def get_positional_radar(min_consec: int = 0):
     today = datetime.now(timezone.utc).date()
     today_str = today.isoformat()
 
-    current_expiry = get_monthly_expiry(today.year, today.month)
-    if today.strftime('%Y-%m-%d') > current_expiry:
-        if today.month == 12:
-            current_expiry = get_monthly_expiry(today.year + 1, 1)
-        else:
-            current_expiry = get_monthly_expiry(today.year, today.month + 1)
-
+    current_expiry = get_current_expiry(today)
     series_start = get_series_start(current_expiry)
 
     # ── SERVER-SIDE AGGREGATION via RPC ──────────────────────────────────────

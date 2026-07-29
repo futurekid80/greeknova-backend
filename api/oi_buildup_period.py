@@ -129,8 +129,8 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     series_start = None
     if period == "monthly":
         try:
-            from api.positional_radar import get_monthly_expiry, get_series_start
-            expiry = get_monthly_expiry(today.year, today.month)
+            from api.positional_radar import get_current_expiry, get_series_start
+            expiry = get_current_expiry(today)
             series_start = get_series_start(expiry)
         except Exception as e:
             print(f"[OIBuildup] Series start lookup failed, falling back to rolling window: {e}")
