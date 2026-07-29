@@ -985,7 +985,8 @@ def compute_mcx_stealth(commodity: str, supabase) -> dict:
     # Minimum OI thresholds — avoid misleading signals on thin markets
     MIN_OI = {"NATURALGAS": 5000, "CRUDEOIL": 5000, "GOLD": 500, "SILVER": 500}
     min_oi = MIN_OI.get(commodity, 500)
-    oi_sufficient = (rows[-1].get("current_oi") or 0) >= min_oi
+    latest_oi = float(rows[-1].get("current_oi") or 0)
+    oi_sufficient = latest_oi >= min_oi if latest_oi > 0 else True  # fallback: allow if no data
 
     tier = None
     if not oi_sufficient:
