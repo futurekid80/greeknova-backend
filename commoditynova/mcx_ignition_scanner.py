@@ -880,7 +880,7 @@ def compute_gold_zone_covering(commodity: str, current_price: float, supabase) -
             .select("strike, option_type, current_oi, oi_delta") \
             .eq("commodity", commodity) \
             .eq("scanned_at", latest_ts) \
-            .lt("oi_delta", 0) \
+            .lt("oi_delta", -5) \
             .gte("strike", low) \
             .lte("strike", high) \
             .order("oi_delta", desc=False) \
@@ -982,13 +982,20 @@ def compute_mcx_stealth(commodity: str, supabase) -> dict:
         else:
             break
 
+    # Minimum OI thresholds — avoid misleading signals on thin markets
+    MIN_OI = {"NATURALGAS": 5000, "CRUDEOIL": 5000, "GOLD": 500, "SILVER": 500}
+    min_oi = MIN_OI.get(commodity, 500)
+    oi_sufficient = (rows[-1].get("current_oi") or 0) >= min_oi
+
     tier = None
-    if cum_oi_pct >= 30:
-        tier = "Elite"    # cum OI alone sufficient
+    if not oi_sufficient:
+        tier = None   # Too thin — no tier regardless of %
+    elif cum_oi_pct >= 30:
+        tier = "Elite"
     elif cum_oi_pct >= 20:
-        tier = "Strong"   # cum OI alone sufficient
+        tier = "Strong"
     elif cum_oi_pct >= 8 and consecutive >= 2:
-        tier = "Watch"    # Watch still needs some consecutive confirmation
+        tier = "Watch"
 
     if tier == "Elite" and not rate_slowing and phase == "build":
         tier = "Strong"
