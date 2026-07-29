@@ -894,7 +894,7 @@ def compute_gold_zone_covering(commodity: str, current_price: float, supabase) -
     # Deduplicate by strike+type — keep worst (most negative) delta only
     seen = {}
     for r in rows:
-        key = f"{r['option_type']}_{r['strike']}"
+        key = f"{r['option_type']}_{int(float(r['strike']))}"
         if key not in seen or r["oi_delta"] < seen[key]["oi_delta"]:
             seen[key] = r
 
