@@ -353,8 +353,8 @@ def get_signal_log(date: str = None):
     from collections import defaultdict
     # Pick nearest valid expiry = smallest expiry date >= today
     # This correctly identifies near-month contract for each symbol
-    from datetime import date as _date
-    _today = _date.today().isoformat()
+    from utils.market_calendar import today_ist
+    _today = today_ist().isoformat()
     nearest_expiry: dict = {}
     for r in all_fut_rows:
         sym    = r["symbol"]

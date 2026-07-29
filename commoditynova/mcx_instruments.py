@@ -43,7 +43,8 @@ def get_nearest_expiry_futures_symbol(commodity: str, kite: KiteConnect) -> Opti
     """Search for the nearest active futures contract for a commodity."""
     try:
         results = kite.instruments("MCX")
-        today = date.today()
+        from utils.market_calendar import today_ist
+        today = today_ist()
 
         futures = [
             inst for inst in results

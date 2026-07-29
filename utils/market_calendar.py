@@ -2,7 +2,7 @@
 market_calendar.py - NSE Holiday Calendar 2026
 Hardcoded from official NSE circular. Update annually.
 """
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime
 
 NSE_HOLIDAYS_2026 = {
     date(2026, 1, 26): "Republic Day",
@@ -23,16 +23,31 @@ NSE_HOLIDAYS_2026 = {
     date(2026, 12, 25): "Christmas",
 }
 
+
+def today_ist() -> date:
+    """IST-aware 'today'. Railway's server clock runs on UTC, so plain
+    date.today() is WRONG specifically between 12:00 AM and 5:30 AM IST
+    (UTC is still on the previous calendar day during that window).
+    Found duplicated as the naive date.today()/datetime.now().date()
+    pattern across ~8 files on 29-Jul-2026 (market_calendar.py itself,
+    iv_calc.py, max_pain.py, adx_analysis.py, signal_log.py, and three
+    CommodityNova/MCX files). This is the single, shared, correct
+    version — every trading-day/session-date computation should use
+    this instead of calling date.today() directly."""
+    import pytz
+    return datetime.now(pytz.timezone("Asia/Kolkata")).date()
+
+
 def is_trading_day(d: date = None) -> bool:
     if d is None:
-        d = date.today()
+        d = today_ist()
     if d.weekday() >= 5:
         return False
     return d not in NSE_HOLIDAYS_2026
 
 def get_next_trading_day(from_date: date = None) -> date:
     if from_date is None:
-        from_date = date.today()
+        from_date = today_ist()
     d = from_date + timedelta(days=1)
     while not is_trading_day(d):
         d += timedelta(days=1)
@@ -40,14 +55,14 @@ def get_next_trading_day(from_date: date = None) -> date:
 
 def get_prev_trading_day(from_date: date = None) -> date:
     if from_date is None:
-        from_date = date.today()
+        from_date = today_ist()
     d = from_date - timedelta(days=1)
     while not is_trading_day(d):
         d -= timedelta(days=1)
     return d
 
 def get_market_status() -> dict:
-    today = date.today()
+    today = today_ist()
     tomorrow = today + timedelta(days=1)
     
     today_holiday = NSE_HOLIDAYS_2026.get(today)

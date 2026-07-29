@@ -19,7 +19,7 @@ UNWIND_CONFIRM_PCT  = 3.0   # unwinding
 
 
 def get_or_set_session_open_oi(commodity, current_oi, supabase, session_open_oi):
-    today = date.today().isoformat()
+    today = datetime.now(IST).date().isoformat()
     if commodity in session_open_oi:
         return session_open_oi[commodity]
     try:
@@ -42,7 +42,7 @@ def get_or_set_session_open_price(commodity, current_price, supabase, session_op
     Returns today's session open price.
     Persists in Supabase so Railway restarts don't wipe it.
     """
-    today = date.today().isoformat()
+    today = datetime.now(IST).date().isoformat()
 
     if commodity in session_open_price_dict:
         return session_open_price_dict[commodity]
@@ -72,7 +72,7 @@ def get_or_set_session_peak(commodity, current_cumulative_pct, supabase, session
     Updates peak if current is higher.
     Persists in Supabase so Railway restarts don't wipe it.
     """
-    today = date.today().isoformat()
+    today = datetime.now(IST).date().isoformat()
 
     # Load from Supabase if not in memory
     if commodity not in session_peak_oi:
@@ -942,7 +942,7 @@ def compute_mcx_stealth(commodity: str, supabase) -> dict:
         result = supabase.table("mcx_oi_history") \
             .select("scanned_at, oi_change_pct, cumulative_oi_pct") \
             .eq("commodity", commodity) \
-            .eq("session_date", str(date.today())) \
+            .eq("session_date", str(datetime.now(IST).date())) \
             .order("scanned_at", desc=False) \
             .execute()
         rows = result.data or []

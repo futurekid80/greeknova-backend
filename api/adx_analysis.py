@@ -117,7 +117,8 @@ def get_adx_map(supabase, symbols: list = None) -> dict:
     for every symbol with enough history. Symbols with insufficient history
     are simply omitted (caller should treat missing = "building history").
     """
-    today = datetime.now().date()
+    from utils.market_calendar import today_ist
+    today = today_ist()
     lookback_start = (today - timedelta(days=int(MIN_DAYS * 1.6) + 10)).isoformat()
 
     try:

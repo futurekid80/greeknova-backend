@@ -50,8 +50,9 @@ def get_max_pain_all():
         days_to_expiry = None
         if expiry_str:
             try:
+                from utils.market_calendar import today_ist
                 exp_date = date.fromisoformat(expiry_str[:10])
-                days_to_expiry = (exp_date - date.today()).days
+                days_to_expiry = (exp_date - today_ist()).days
             except:
                 pass
         

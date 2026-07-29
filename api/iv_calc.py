@@ -49,8 +49,9 @@ def norm_pdf(x):
 def add_iv_to_strikes(strikes: list, cmp: float, expiry_str: str) -> list:
     """Add IV to each strike row"""
     try:
+        from utils.market_calendar import today_ist
         exp_date = date.fromisoformat(expiry_str[:10])
-        T = max((exp_date - date.today()).days, 1) / 365.0
+        T = max((exp_date - today_ist()).days, 1) / 365.0
     except:
         T = 30/365.0
     

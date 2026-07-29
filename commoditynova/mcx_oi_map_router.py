@@ -18,7 +18,8 @@ def get_oi_map(commodity: str):
     """
     try:
         supabase = get_supabase()
-        today = date.today().isoformat()
+        from utils.market_calendar import today_ist
+        today = today_ist().isoformat()
         commodity = commodity.upper()
 
         # 1. Latest signal for price + session summary
