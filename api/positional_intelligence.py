@@ -20,8 +20,22 @@ _CACHE_TTL = 300  # 5 min during market, 3600 post-market
 def _get_expiry_and_series(today):
     """Get current monthly expiry and series start date."""
     import calendar
+    from datetime import datetime
     from api.positional_radar import get_monthly_expiry, get_series_start
     expiry = get_monthly_expiry(today.year, today.month)
+    # BUG FIX (Jul 29 2026): get_monthly_expiry() just computes the last
+    # Tuesday of whatever month it's given -- it has no idea whether that
+    # date has already passed. Calling it with today.month is fine every
+    # day EXCEPT the day(s) after this month's own expiry, when it hands
+    # back an already-dead contract (e.g. still returning 28-Jul on
+    # 29-Jul, a day after that series actually ended) instead of rolling
+    # forward to the new active month. Advance to next month whenever
+    # today is already past the computed expiry.
+    expiry_dt = datetime.strptime(expiry, "%Y-%m-%d").date()
+    if today > expiry_dt:
+        next_month = today.month + 1 if today.month < 12 else 1
+        next_year = today.year if today.month < 12 else today.year + 1
+        expiry = get_monthly_expiry(next_year, next_month)
     series_start = get_series_start(expiry)
     return expiry, series_start
 
