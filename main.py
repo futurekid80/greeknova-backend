@@ -517,10 +517,35 @@ def test_telegram():
     confirm the new Telegram bot token (set via TELEGRAM_BOT_TOKEN env var
     after the old bot was compromised and deleted) actually works
     end-to-end, without waiting for a real alert to fire organically
-    during market hours."""
-    from services.alert_engine import send_telegram
-    ok = send_telegram("✅ GreekNova test message -- new bot token is working correctly.")
-    return {"sent": ok}
+    during market hours.
+
+    UPDATED (Aug 3 2026): Railway's dashboard log viewer was intermittently
+    failing to show fresh log lines during debugging even though curl was
+    getting real, correctly-timed responses -- so this now returns full
+    diagnostics directly in the HTTP response body instead of relying on
+    server-side logs at all. Token is masked (first 6 + last 4 chars only)
+    so it's safe to see in a response without re-exposing the full secret."""
+    import os, requests
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "5513733966")
+    masked = f"{token[:6]}...{token[-4:]}" if len(token) > 10 else "(not set or too short)"
+    if not token:
+        return {"sent": False, "error": "TELEGRAM_BOT_TOKEN env var is empty/not set on this deployment"}
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": "✅ GreekNova test message"},
+            timeout=10,
+        )
+        return {
+            "sent": r.status_code == 200,
+            "http_status": r.status_code,
+            "telegram_response": r.json() if r.headers.get("content-type", "").startswith("application/json") else r.text,
+            "token_used_masked": masked,
+            "chat_id_used": chat_id,
+        }
+    except Exception as e:
+        return {"sent": False, "error": str(e), "token_used_masked": masked, "chat_id_used": chat_id}
 
 @app.get("/force-login")
 def force_login():
