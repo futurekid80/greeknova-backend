@@ -53,6 +53,14 @@ def send_telegram(text: str) -> bool:
             "text":       text,
             "parse_mode": "Markdown"
         }, timeout=10)
+        # BUG FIX (Aug 3 2026): this only ever logged on network-level
+        # exceptions (timeout, connection error) -- a non-200 response from
+        # Telegram's own API (e.g. 401 for a bad/revoked token, 400 for a
+        # bad chat_id) fell through silently with zero logging, returning
+        # False with no way to diagnose why. Discovered while debugging
+        # the new bot token right after the old one was compromised.
+        if r.status_code != 200:
+            print(f"[ALERTS] Telegram API error {r.status_code}: {r.text}")
         return r.status_code == 200
     except Exception as e:
         print(f"[ALERTS] Telegram send failed: {e}")
