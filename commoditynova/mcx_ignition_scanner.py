@@ -953,7 +953,6 @@ def compute_mcx_stealth(commodity: str, supabase) -> dict:
     if len(rows) < 3:
         return _stealth_empty()
 
-    IST = pytz.timezone("Asia/Kolkata")
     now_ist = datetime.now(IST)
     hours_into_session = max(0, (now_ist.hour - 17) + now_ist.minute / 60)
     if hours_into_session < 2:
