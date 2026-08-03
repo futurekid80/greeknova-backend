@@ -511,6 +511,17 @@ def health(): return {"status": "ok"}
 @app.get("/capture-now")
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
+@app.get("/test-telegram")
+def test_telegram():
+    """Manual verification trigger (Aug 3 2026) -- added specifically to
+    confirm the new Telegram bot token (set via TELEGRAM_BOT_TOKEN env var
+    after the old bot was compromised and deleted) actually works
+    end-to-end, without waiting for a real alert to fire organically
+    during market hours."""
+    from services.alert_engine import send_telegram
+    ok = send_telegram("✅ GreekNova test message -- new bot token is working correctly.")
+    return {"sent": ok}
+
 @app.get("/force-login")
 def force_login():
     try:
