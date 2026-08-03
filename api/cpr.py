@@ -216,9 +216,12 @@ def compute_and_store_cpr(trade_date: str = None):
     print(f"[CPR] Computing for trade_date: {trade_date}")
 
     # Previous trading day = the OHLC source
-    # If running post-market (after 15:30 IST), today's candle is complete — use it
+    # If running post-market (after 15:40 IST), today's candle is complete — use it
+    # BUG FIX (Aug 3 2026): was 15:30 — CAS goes live today, F&O trades
+    # until 15:40 now, so this was treating today's candle as "final" 10
+    # minutes before the day's trading actually ended.
     now_ist = datetime.now(ist)
-    market_closed = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)
+    market_closed = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 40)
     if market_closed and today.weekday() < 5:
         prev_trading_day = today  # Use today's completed candle
     else:

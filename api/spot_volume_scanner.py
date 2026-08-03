@@ -358,7 +358,16 @@ def get_volume_breakout_scan(supabase, symbols):
         # the current day. Outside market hours, trust the DB row (the
         # official EOD bar via Kite historical_data).
         now_ist = _now_ist()
-        market_open = (9, 15) <= (now_ist.hour, now_ist.minute) < (15, 30)
+        # BUG FIX (Aug 3 2026): CAS goes live today — F&O now trades until
+        # 3:40 PM, not 3:30 PM. Extended so live intraday data keeps
+        # folding in through the actual close instead of freezing 10 min
+        # early. Separately, note the underlying STOCK's own continuous
+        # trading stops at 3:15 PM for CAS-covered names (auction runs
+        # 3:15-3:30) — cmp_prices ticks during that window may reflect a
+        # frozen/indicative price rather than a live LTP. Worth watching
+        # once CAS is actually live to see how Kite's quote() responds
+        # during that specific 15-minute window.
+        market_open = (9, 15) <= (now_ist.hour, now_ist.minute) < (15, 40)
         if market_open:
             if bars_sorted and bars_sorted[-1]["trade_date"] == today_str:
                 bars_sorted = bars_sorted[:-1]

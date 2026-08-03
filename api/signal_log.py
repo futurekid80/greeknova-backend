@@ -53,7 +53,9 @@ def is_market_hours() -> bool:
     if now_utc.weekday() >= 5:
         return False
     total = now_utc.hour * 60 + now_utc.minute
-    return (3 * 60 + 45) <= total <= (10 * 60 + 0)
+    # BUG FIX (Aug 3 2026): was 10:00 UTC (15:30 IST) — CAS goes live
+    # today, F&O trades until 15:40 IST now.
+    return (3 * 60 + 45) <= total <= (10 * 60 + 10)
 
 
 def classify(oi_chg_pct: float, price_chg_pct: float):

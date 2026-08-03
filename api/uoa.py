@@ -55,7 +55,9 @@ INDEX_NSE_MAP = {
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
 
 MARKET_OPEN_UTC  = 3 * 60 + 45
-MARKET_CLOSE_UTC = 10 * 60 + 0
+# BUG FIX (Aug 3 2026): was 10:00 UTC (15:30 IST) — CAS goes live today,
+# F&O trades until 15:40 IST now.
+MARKET_CLOSE_UTC = 10 * 60 + 10
 
 def is_market_hours() -> bool:
     now_utc = datetime.now(timezone.utc)
@@ -449,7 +451,7 @@ def get_uoa(date: str = None):
         "snapshot_count":    len(timestamps),
         "mins_to_close":     max(0, mins_to_close),
         "is_post_market":    post_market,
-        "market_close_time": "15:29",
+        "market_close_time": "15:40",
     }
 
     # Cache the result

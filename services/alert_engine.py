@@ -64,7 +64,10 @@ def is_market_hours() -> bool:
     if now.weekday() >= 5:
         return False
     total = now.hour * 60 + now.minute
-    return (9 * 60 + 15) <= total <= (15 * 60 + 30)
+    # BUG FIX (Aug 3 2026): was 15:30 — CAS goes live today, F&O trades
+    # until 15:40 now. This gate controls whether alerts get generated
+    # at all in that window.
+    return (9 * 60 + 15) <= total <= (15 * 60 + 40)
 
 
 def run_alert_check():

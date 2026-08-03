@@ -98,7 +98,11 @@ def run_full_capture():
     if not is_trading_day(now.date()): return
     if not (9 <= now.hour <= 15): return
     if now.hour == 9 and now.minute < 15: return
-    if now.hour == 15 and now.minute > 30: return
+    # BUG FIX (Aug 3 2026): SEBI's Closing Auction Session (CAS) goes live
+    # today. F&O contracts (futures & options) now trade until 3:40 PM,
+    # not 3:30 PM — this cutoff was silently dropping the last 10 minutes
+    # of every trading day's OI/volume capture. Extended to match.
+    if now.hour == 15 and now.minute > 40: return
     print(f"[CAPTURE] Auto-capture at {now.strftime('%H:%M:%S')}...")
     try:
         from services.kite_auth import get_kite_client

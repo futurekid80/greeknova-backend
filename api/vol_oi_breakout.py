@@ -49,7 +49,9 @@ def is_market_hours():
     if now.weekday() >= 5:
         return False
     mins = now.hour * 60 + now.minute
-    return 555 <= mins <= 930
+    # BUG FIX (Aug 3 2026): was <= 930 (15:30) — CAS goes live today,
+    # F&O trades until 15:40 (940 mins) now.
+    return 555 <= mins <= 940
 
 def is_weekday():
     import pytz
@@ -147,9 +149,11 @@ def _get_eod_from_summary(supabase, now_ist):
     """Fallback: compute Vol+OI breakout from daily_oi_summary when cache is stale."""
     from collections import defaultdict
     check = now_ist.date()
-    # Post-market: use today if after 3:30 PM, else use previous trading day
+    # Post-market: use today if after 3:40 PM, else use previous trading day
+    # BUG FIX (Aug 3 2026): was 15:30 — CAS goes live today, F&O trades
+    # until 15:40 now.
     if not is_market_hours():
-        market_closed_today = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 30)
+        market_closed_today = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 40)
         if not market_closed_today:
             check -= timedelta(days=1)
             while check.weekday() >= 5:

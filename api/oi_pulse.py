@@ -54,7 +54,9 @@ INDEX_NSE_MAP = {
 ALL_SYMBOLS = list(INDEX_NSE_MAP.keys()) + list(STOCK_NSE_MAP.keys())
 
 MARKET_OPEN_UTC  = 3 * 60 + 45   # 03:45 UTC = 09:15 IST
-MARKET_CLOSE_UTC = 10 * 60 + 0   # 10:00 UTC = 15:30 IST
+# BUG FIX (Aug 3 2026): was 10:00 UTC (15:30 IST) — CAS goes live today,
+# F&O trades until 15:40 IST now.
+MARKET_CLOSE_UTC = 10 * 60 + 10   # 10:10 UTC = 15:40 IST
 
 
 def is_market_ts(ts: str) -> bool:
@@ -366,7 +368,7 @@ def _get_eod_pulse(supabase):
         "is_live":     False,
         "is_eod":      True,
         "open_time":   "09:15",
-        "close_time":  "15:30",
+        "close_time":  "15:40",
         "snapshots":   76,
     }
 
