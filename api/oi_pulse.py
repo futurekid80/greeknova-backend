@@ -107,15 +107,37 @@ def get_nearest_expiry_per_symbol(supabase, timestamp: str) -> dict:
 
 
 def fetch_fut_oi_for_timestamp(supabase, timestamp: str) -> dict:
+    """BUG FIX (Aug 3 2026): was summing OI across BOTH near-month and
+    far-month FUT contracts for every symbol -- e.g. MUTHOOTFIN's real
+    August OI (~8.5M) plus its brand-new, much smaller September OI
+    (~175K) got added together into one blended number. Since the two
+    contracts move at very different rates (a small far-month contract
+    can swing 10-20% on tiny volume while the near-month barely moves),
+    the combined change % was frequently nonsensical -- e.g. showing
+    +157.5% OI change on the Market Pulse 'Highest OI Buildup' card when
+    the actual near-month contract alone had moved a normal, sane amount.
+    This is the exact same bug already found and fixed in
+    fetch_fut_volume_for_timestamp on 20-Jul-2026 -- that fix was never
+    carried over to this sibling function. Now restricted to nearest
+    expiry per symbol only, matching the volume function's pattern
+    exactly so both agree."""
     result = supabase.from_("oi_snapshots")\
-        .select("symbol, oi")\
+        .select("symbol, expiry, oi")\
         .eq("timestamp", timestamp)\
         .eq("option_type", "FUT")\
         .limit(5000)\
         .execute()
+    rows = result.data or []
+    nearest_expiry: dict = {}
+    for r in rows:
+        sym, exp = r["symbol"], r.get("expiry")
+        if exp and (sym not in nearest_expiry or exp < nearest_expiry[sym]):
+            nearest_expiry[sym] = exp
     fut_oi = defaultdict(int)
-    for r in (result.data or []):
-        fut_oi[r["symbol"]] += r["oi"] or 0
+    for r in rows:
+        sym = r["symbol"]
+        if r.get("expiry") == nearest_expiry.get(sym):
+            fut_oi[sym] += r["oi"] or 0
     return fut_oi
 
 
