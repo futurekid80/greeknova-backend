@@ -102,12 +102,25 @@ def get_oi_map(commodity: str):
 def get_session_exits(commodity: str):
     """
     Returns cumulative CE/PE exit totals per strike for today's session.
-    Persists all session-long exit activity — used to detect divergence,
-    e.g. PE (bull) exits dominating during a rally signals weakening conviction.
+    Splits into near-ATM (proximity zone) vs far-OTM so the divergence
+    signal is driven by strikes that actually matter — not distant
+    low-conviction unwinding that can otherwise dominate the raw total.
     """
     try:
         supabase = get_supabase()
         commodity = commodity.upper()
+
+        # Get current price for zone calculation
+        sig_result = supabase.table("mcx_ignition_signals") \
+            .select("current_price") \
+            .eq("commodity", commodity) \
+            .limit(1) \
+            .execute()
+        current_price = float(sig_result.data[0]["current_price"]) if sig_result.data else 0
+
+        ZONE = {"NATURALGAS": 10, "CRUDEOIL": 200, "GOLD": 2000, "SILVER": 5000}
+        zone = ZONE.get(commodity, 200)
+        low, high = current_price - zone, current_price + zone
 
         result = supabase.table("mcx_strike_oi") \
             .select("strike, option_type, oi_delta, scanned_at") \
@@ -126,33 +139,49 @@ def get_session_exits(commodity: str):
             key = (float(r["strike"]), r["option_type"])
             totals[key] = totals.get(key, 0) + r["oi_delta"]
 
-        ce_exits = []
-        pe_exits = []
-        for (strike, opt_type), total in totals.items():
-            item = {"strike": strike, "total_exited": total}
-            if opt_type == "CE":
-                ce_exits.append(item)
-            else:
-                pe_exits.append(item)
+        def build_lists(near_only: bool):
+            ce, pe = [], []
+            for (strike, opt_type), total in totals.items():
+                in_zone = low <= strike <= high
+                if near_only and not in_zone:
+                    continue
+                if not near_only and in_zone:
+                    continue
+                item = {"strike": strike, "total_exited": total}
+                (ce if opt_type == "CE" else pe).append(item)
+            ce.sort(key=lambda x: x["total_exited"])
+            pe.sort(key=lambda x: x["total_exited"])
+            return ce, pe
 
-        ce_exits.sort(key=lambda x: x["total_exited"])
-        pe_exits.sort(key=lambda x: x["total_exited"])
+        ce_near, pe_near = build_lists(near_only=True)
+        ce_far, pe_far = build_lists(near_only=False)
 
-        ce_total = sum(x["total_exited"] for x in ce_exits)
-        pe_total = sum(x["total_exited"] for x in pe_exits)
+        ce_near_total = sum(x["total_exited"] for x in ce_near)
+        pe_near_total = sum(x["total_exited"] for x in pe_near)
+        ce_far_total = sum(x["total_exited"] for x in ce_far)
+        pe_far_total = sum(x["total_exited"] for x in pe_far)
 
+        # Divergence driven ONLY by near-ATM activity — this is the fix
         divergence = None
-        if abs(pe_total) > abs(ce_total) * 1.5 and abs(pe_total) > 50:
+        if abs(pe_near_total) > abs(ce_near_total) * 1.5 and abs(pe_near_total) > 20:
             divergence = "pe_heavy"
-        elif abs(ce_total) > abs(pe_total) * 1.5 and abs(ce_total) > 50:
+        elif abs(ce_near_total) > abs(pe_near_total) * 1.5 and abs(ce_near_total) > 20:
             divergence = "ce_heavy"
 
         return {
             "commodity": commodity,
-            "ce_exits": ce_exits[:10],
-            "pe_exits": pe_exits[:10],
-            "ce_total_exited": ce_total,
-            "pe_total_exited": pe_total,
+            "current_price": current_price,
+            "zone": zone,
+            # Near-ATM — drives the signal
+            "ce_exits_near": ce_near[:10],
+            "pe_exits_near": pe_near[:10],
+            "ce_total_near": ce_near_total,
+            "pe_total_near": pe_near_total,
+            # Far OTM — shown separately as background noise
+            "ce_exits_far": ce_far[:10],
+            "pe_exits_far": pe_far[:10],
+            "ce_total_far": ce_far_total,
+            "pe_total_far": pe_far_total,
             "divergence": divergence,
         }
 
