@@ -677,12 +677,12 @@ def get_signal_log(date: str = None):
         "message":        "No significant OI buildup detected — market may be in consolidation or low activity phase." if len(signals) == 0 else None,
     }
 
-    if uoa_fetch_ok and total_snaps >= 5:
+    if total_snaps >= 5:  # BUG FIX Aug 5 2026: removed fragile uoa_fetch_ok gate that silently blocked saving whenever the UOA sub-fetch timed out
         _signal_cache = result
         _signal_cache_time = time_module.time()
         # Save to Supabase after 3:25 PM IST (10:55 UTC) — near market close
         now_utc = datetime.now(timezone.utc)
-        if now_utc.hour > 10 or (now_utc.hour == 10 and now_utc.minute >= 50):
+        if now_utc.hour > 9 or (now_utc.hour == 9 and now_utc.minute >= 55):  # BUG FIX Aug 5 2026: was UTC 10:50 (16:20 IST), 45 min after the 15:35 IST scheduled job runs -- now correctly matches 15:25 IST
             _save_eod_to_supabase(supabase, result)
     else:
         print(f"[SIGNAL_LOG] Not caching — {len(signals)} signals, uoa_ok={uoa_fetch_ok}, snaps={total_snaps}")
