@@ -18,9 +18,21 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 # ── Telegram config ───────────────────────────────────────────────────────────
-ALERT_BOT_TOKEN  = "8659302604:AAFWa38GGioCI6iEJwD1ZBS88MILPVhJys8"
-PERSONAL_CHAT_ID = "5513733966"
-TELEGRAM_URL     = f"https://api.telegram.org/bot{ALERT_BOT_TOKEN}/sendMessage"
+# BUG FIX (Aug 5 2026): this hardcoded token was the ORIGINAL compromised
+# bot's token (numeric ID 8659302604) -- an "Aug 3" fix to move this to
+# TELEGRAM_BOT_TOKEN env var apparently never actually deployed (several
+# GitHub auth failures that day likely obscured which push actually
+# landed), so the real alert engine has been silently calling Telegram
+# with a long-dead token this whole time -- 401 on every single alert --
+# while /test-telegram (added afterward) correctly read the current valid
+# token fresh from the env var and looked completely fine. Re-applying
+# properly this time, and reading fresh on every call rather than baking
+# it into a module-level constant, so a future env var update can't get
+# silently stuck again regardless of container startup/restart timing.
+def _get_bot_token() -> str:
+    return os.getenv("TELEGRAM_BOT_TOKEN", "")
+
+PERSONAL_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "5513733966")
 
 # ── Persistence milestones to alert at ───────────────────────────────────────
 PERSISTENCE_MILESTONES = [50, 75, 90]
@@ -47,8 +59,12 @@ def _get_milestone(persistence_pct: int) -> Optional[int]:
 
 
 def send_telegram(text: str) -> bool:
+    token = _get_bot_token()
+    if not token:
+        print("[ALERTS] TELEGRAM_BOT_TOKEN env var is empty/not set -- cannot send")
+        return False
     try:
-        r = requests.post(TELEGRAM_URL, json={
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
             "chat_id":    PERSONAL_CHAT_ID,
             "text":       text,
             "parse_mode": "Markdown"
