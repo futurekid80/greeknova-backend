@@ -12,10 +12,11 @@ def _save_eod_to_supabase(supabase, result: dict):
     try:
         summary = {k: v for k, v in result.items() if k != "signals"}
         supabase.table("intraday_signal_cache").upsert({
-            "id":         1,
-            "signals":    result["signals"],
-            "summary":    summary,
-            "trade_date": result["date"],
+            "id":          1,
+            "signals":     result["signals"],
+            "summary":     summary,
+            "trade_date":  result["date"],
+            "computed_at": datetime.now(timezone.utc).isoformat(),
         }, on_conflict="id").execute()
         print(f"[SIGNAL_LOG] EOD snapshot saved to Supabase — {len(result['signals'])} signals")
     except Exception as e:
