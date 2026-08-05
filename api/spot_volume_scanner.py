@@ -388,7 +388,16 @@ def get_volume_breakout_scan(supabase, symbols):
         pattern = _find_active_pattern(bars_sorted)
         if pattern:
             pattern["symbol"] = sym
-            pattern["cmp"] = live_high.get(sym) or (bars_sorted[-1]["high"] if bars_sorted else None)
+            # BUG FIX (Aug 5 2026): "cmp" was set from live_high (the day's
+            # running HIGH), not the actual latest price -- harmless on days
+            # a stock mostly trends up (high stays close to current price),
+            # but badly misleading on a day like this: BSE opened near its
+            # high (3610) then fell steadily all morning to ~3494, and the
+            # scanner kept showing 3610 as "CMP" long after the real price
+            # had moved well away from it. Same issue existed in the
+            # after-hours fallback (used the day's high instead of its
+            # close). Now uses the genuine last-seen price in both cases.
+            pattern["cmp"] = live_last.get(sym) or (bars_sorted[-1]["close"] if bars_sorted else None)
             results.append(pattern)
 
     _state_rank = {"breakout": 0, "bursting": 1, "pausing": 2}
