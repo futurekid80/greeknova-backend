@@ -318,13 +318,15 @@ def _find_active_pattern(bars):
 
 
 def _find_tower_day(bars):
-    """Scan every day in a symbol's available history for its single most
-    extreme "tower day" -- volume at least TOWER_THRESHOLD times the
-    trailing TOWER_LOOKBACK_DAYS average. If several days qualify, the
-    biggest ratio wins (that's the one that genuinely makes everything
-    before it look tiny by comparison). Never expires -- returned as long
-    as it remains the most extreme tower day found, regardless of how
-    long ago it happened."""
+    """Scan every day in a symbol's available history for its most recent
+    "tower day" -- volume at least TOWER_THRESHOLD times the trailing
+    TOWER_LOOKBACK_DAYS average. If several days qualify, the MOST RECENT
+    one wins, not the biggest ratio -- picking the biggest-ever ratio
+    systematically favored old days from whenever a stock's baseline
+    volume happened to be thinnest, often surfacing an unrelated, already-
+    cold spike instead of whatever's actually driving the current chart.
+    Never expires -- returned as long as it remains the most recent
+    qualifying day found, regardless of how long ago it happened."""
     n = len(bars)
     if n < TOWER_LOOKBACK_DAYS + 1:
         return None
@@ -338,7 +340,15 @@ def _find_tower_day(bars):
         if avg20 <= 0:
             continue
         ratio = vol_today / avg20
-        if ratio >= TOWER_THRESHOLD and (best is None or ratio > best["tower_ratio"]):
+        # BUG FIX (Aug 6 2026): "biggest ratio wins" systematically favored
+        # old days from whenever a stock's baseline volume happened to be
+        # thinnest -- e.g. PAYTM's real ignition was 10-Jul (price broke
+        # from 1263 to 1342 on real volume), but a 27-Apr day won instead
+        # purely because the 20-day average was tiny back then, making an
+        # unrelated, already-cold spike outrank the actual current setup.
+        # Picking the MOST RECENT qualifying day instead correctly follows
+        # whatever's actually driving the chart right now.
+        if ratio >= TOWER_THRESHOLD:
             best = {
                 "tower_date": bars[i]["trade_date"],
                 "tower_ratio": round(ratio, 2),
