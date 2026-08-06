@@ -320,60 +320,47 @@ def _find_active_pattern(bars):
 
 
 def _find_tower_day(bars):
-    """Scan every day in a symbol's available history for its most recent
-    "tower day" -- volume at least TOWER_THRESHOLD times the trailing
-    TOWER_LOOKBACK_DAYS average. If several days qualify, the MOST RECENT
-    one wins, not the biggest ratio -- picking the biggest-ever ratio
-    systematically favored old days from whenever a stock's baseline
-    volume happened to be thinnest, often surfacing an unrelated, already-
-    cold spike instead of whatever's actually driving the current chart.
-    Never expires -- returned as long as it remains the most recent
-    qualifying day found, regardless of how long ago it happened."""
+    """Checks ONLY the most recent bar (today) against the trailing
+    TOWER_LOOKBACK_DAYS average -- a live, daily-refreshing signal, not a
+    historical record. Redesigned Aug 6 2026: the original version scanned
+    all of history for the most recent qualifying day and held it
+    indefinitely, but that surfaced already-cold, unactionable days --
+    e.g. JIOFIN's real 17-Jul tower stayed "the answer" for weeks
+    afterward even on a day it had negligible volume, because nothing
+    since had ALSO cleared the threshold against a baseline that
+    17-Jul's own huge volume had itself inflated. The actual want is
+    simpler and more useful: "is today unusually loud right now" -- if
+    today doesn't clear it, the stock just doesn't show up, full stop,
+    regardless of what happened last week or last month."""
     n = len(bars)
     if n < TOWER_LOOKBACK_DAYS + 1:
         return None
 
-    best = None
-    for i in range(TOWER_LOOKBACK_DAYS, n):
-        vol_today = bars[i]["volume"] or 0
-        if vol_today <= 0:
-            continue
-        avg20 = sum(b["volume"] for b in bars[i - TOWER_LOOKBACK_DAYS:i]) / TOWER_LOOKBACK_DAYS
-        if avg20 <= 0:
-            continue
-        ratio = vol_today / avg20
-        # BUG FIX (Aug 6 2026): "biggest ratio wins" systematically favored
-        # old days from whenever a stock's baseline volume happened to be
-        # thinnest -- e.g. PAYTM's real ignition was 10-Jul (price broke
-        # from 1263 to 1342 on real volume), but a 27-Apr day won instead
-        # purely because the 20-day average was tiny back then, making an
-        # unrelated, already-cold spike outrank the actual current setup.
-        # Picking the MOST RECENT qualifying day instead correctly follows
-        # whatever's actually driving the chart right now.
-        if ratio >= TOWER_THRESHOLD:
-            best = {
-                "tower_date": bars[i]["trade_date"],
-                "tower_ratio": round(ratio, 2),
-                "tower_volume": vol_today,
-                "avg_volume_20d": round(avg20),
-                "tower_high": bars[i]["high"],
-                "tower_low": bars[i]["low"],
-                "tower_close": bars[i]["close"],
-                "tower_idx": i,
-            }
-
-    if best is None:
+    today_bar = bars[-1]
+    vol_today = today_bar["volume"] or 0
+    if vol_today <= 0:
         return None
 
-    latest = bars[-1]
-    best["days_since"] = (n - 1) - best["tower_idx"]
-    best["cmp"] = latest["close"]
-    if best["tower_close"] and best["tower_close"] > 0:
-        best["price_chg_since_pct"] = round((best["cmp"] - best["tower_close"]) / best["tower_close"] * 100, 2)
-    else:
-        best["price_chg_since_pct"] = None
-    del best["tower_idx"]
-    return best
+    avg20 = sum(b["volume"] for b in bars[-1 - TOWER_LOOKBACK_DAYS:-1]) / TOWER_LOOKBACK_DAYS
+    if avg20 <= 0:
+        return None
+
+    ratio = vol_today / avg20
+    if ratio < TOWER_THRESHOLD:
+        return None
+
+    return {
+        "tower_date": today_bar["trade_date"],
+        "tower_ratio": round(ratio, 2),
+        "tower_volume": vol_today,
+        "avg_volume_20d": round(avg20),
+        "tower_high": today_bar["high"],
+        "tower_low": today_bar["low"],
+        "tower_close": today_bar["close"],
+        "days_since": 0,
+        "cmp": today_bar["close"],
+        "price_chg_since_pct": 0.0,
+    }
 
 
 def get_volume_breakout_scan(supabase, symbols):
