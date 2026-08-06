@@ -54,7 +54,9 @@ LOOKBACK_DAYS_FOR_SCAN = 40    # how far back to look for an active burst/pause
 # AVERAGE (not a 5/10/20d max), and never expires once found -- a
 # genuine institutional entry day stays relevant weeks later.
 TOWER_LOOKBACK_DAYS = 20
-TOWER_THRESHOLD = 3.0
+TOWER_THRESHOLD = 6.0  # bumped from 3.0 (Aug 6 2026) -- 3x let in too much
+                       # noise (83/99 symbols matched); testing 6x against
+                       # real charts before calling this final
 
 INDEX_TOKENS = {
     "NIFTY":     256265,
