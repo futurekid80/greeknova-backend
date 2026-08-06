@@ -2322,6 +2322,15 @@ def spot_volume_scan():
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@app.get("/first-hour-breakout/scan")
+def first_hour_breakout_scan():
+    from api.first_hour_breakout import get_first_hour_breakout_scan
+    from api.iv_analysis import SYMBOLS
+    try:
+        return get_first_hour_breakout_scan(get_supabase(), SYMBOLS)
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
 @app.get("/adx-map")
 def adx_map():
     from api.adx_analysis import get_combined_adx_map
