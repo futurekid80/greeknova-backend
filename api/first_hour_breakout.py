@@ -31,6 +31,18 @@ IST = pytz.timezone("Asia/Kolkata")
 
 FIRST_HOUR_START = 9 * 60 + 15   # 9:15 AM
 FIRST_HOUR_END   = 10 * 60 + 15  # 10:15 AM
+# BUG FIX (Aug 6 2026): under SEBI's Closing Auction Session (CAS, live
+# since 3-Aug-2026), F&O stocks stop continuous trading at 3:15 PM, then
+# freeze until the ~3:15-3:30 auction resolves a new official close. That
+# resolution can jump the price by a meaningful amount with zero real
+# intraday trading behind it -- observed on NESTLEIND today: flat all
+# day inside its range, then an instant frozen-to-frozen jump right at
+# the auction resolution that happened to clear the first-hour high,
+# wrongly registering as a "breakout" and "sustaining". The auction
+# genuinely sets the day's real official close (see the CAS verification
+# against RELIANCE a few days back), but it isn't organic intraday
+# momentum, so it shouldn't count as a first-hour-breakout signal.
+CONTINUOUS_TRADING_END = 15 * 60 + 15  # 3:15 PM -- last genuine continuous-trading tick
 
 
 def _now_ist():
@@ -61,7 +73,8 @@ def get_first_hour_breakout_scan(supabase, symbols):
     for sym, ticks in rows_by_symbol.items():
         first_hour_high = None
         first_hour_low = None
-        after_ticks = []
+        after_ticks = []       # continuous trading only -- used for breakout/state
+        all_after_ticks = []   # includes post-3:15 auction window -- used for display CMP only
         for t in ticks:
             px = float(t["cmp"] or 0)
             if px <= 0:
@@ -71,7 +84,9 @@ def get_first_hour_breakout_scan(supabase, symbols):
                 first_hour_high = px if first_hour_high is None else max(first_hour_high, px)
                 first_hour_low  = px if first_hour_low  is None else min(first_hour_low, px)
             elif mins >= FIRST_HOUR_END:
-                after_ticks.append((mins, px, ts_ist))
+                all_after_ticks.append((mins, px, ts_ist))
+                if mins < CONTINUOUS_TRADING_END:
+                    after_ticks.append((mins, px, ts_ist))
 
         if first_hour_high is None or not after_ticks:
             continue
@@ -106,7 +121,7 @@ def get_first_hour_breakout_scan(supabase, symbols):
         if not broke_out:
             continue
 
-        cmp_now = after_ticks[-1][1]
+        cmp_now = all_after_ticks[-1][1]
         candidates.append({
             "symbol": sym,
             "state": "failed" if failed else "sustaining",
