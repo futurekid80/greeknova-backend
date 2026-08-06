@@ -79,13 +79,29 @@ def get_first_hour_breakout_scan(supabase, symbols):
         broke_out = False
         breakout_time = None
         failed = False
+        # BUG FIX (Aug 6 2026): a single stray tick momentarily below the
+        # first-hour low (a brief data capture glitch -- observed on
+        # MOTHERSON today: two isolated ~2% drops that fully reverted the
+        # very next tick, not real trading) used to permanently mark a
+        # stock "failed" forever, even though its real price action never
+        # broke down. Now requires 2 CONSECUTIVE ticks below the low
+        # before calling it a genuine failure -- same "persistence"
+        # principle already used by the Intraday Signal Log elsewhere on
+        # the platform. A real breakdown persists across multiple ticks;
+        # a glitch doesn't.
+        consecutive_below_low = 0
         for mins, px, ts_ist in after_ticks:
             if not broke_out and px > first_hour_high:
                 broke_out = True
                 breakout_time = ts_ist
                 continue
-            if broke_out and px < first_hour_low:
-                failed = True
+            if broke_out:
+                if px < first_hour_low:
+                    consecutive_below_low += 1
+                    if consecutive_below_low >= 2:
+                        failed = True
+                else:
+                    consecutive_below_low = 0
 
         if not broke_out:
             continue
