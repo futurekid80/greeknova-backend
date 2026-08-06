@@ -47,6 +47,15 @@ MAX_PAUSE_DAYS = 10  # drop a burst from "pausing" if it hasn't broken out
                      # stopped being a tight coil and is just noise
 LOOKBACK_DAYS_FOR_SCAN = 40    # how far back to look for an active burst/pause
 
+# Tower Day (Aug 6 2026): a separate, independent detection pass alongside
+# the burst/pause/breakout mechanic above. Finds days where volume dwarfs
+# everything in the trailing lookback. Deliberately different from the
+# burst logic above in two ways: compares against a longer trailing
+# AVERAGE (not a 5/10/20d max), and never expires once found -- a
+# genuine institutional entry day stays relevant weeks later.
+TOWER_LOOKBACK_DAYS = 20
+TOWER_THRESHOLD = 3.0
+
 INDEX_TOKENS = {
     "NIFTY":     256265,
     "BANKNIFTY": 260105,
@@ -308,6 +317,53 @@ def _find_active_pattern(bars):
     return None
 
 
+def _find_tower_day(bars):
+    """Scan every day in a symbol's available history for its single most
+    extreme "tower day" -- volume at least TOWER_THRESHOLD times the
+    trailing TOWER_LOOKBACK_DAYS average. If several days qualify, the
+    biggest ratio wins (that's the one that genuinely makes everything
+    before it look tiny by comparison). Never expires -- returned as long
+    as it remains the most extreme tower day found, regardless of how
+    long ago it happened."""
+    n = len(bars)
+    if n < TOWER_LOOKBACK_DAYS + 1:
+        return None
+
+    best = None
+    for i in range(TOWER_LOOKBACK_DAYS, n):
+        vol_today = bars[i]["volume"] or 0
+        if vol_today <= 0:
+            continue
+        avg20 = sum(b["volume"] for b in bars[i - TOWER_LOOKBACK_DAYS:i]) / TOWER_LOOKBACK_DAYS
+        if avg20 <= 0:
+            continue
+        ratio = vol_today / avg20
+        if ratio >= TOWER_THRESHOLD and (best is None or ratio > best["tower_ratio"]):
+            best = {
+                "tower_date": bars[i]["trade_date"],
+                "tower_ratio": round(ratio, 2),
+                "tower_volume": vol_today,
+                "avg_volume_20d": round(avg20),
+                "tower_high": bars[i]["high"],
+                "tower_low": bars[i]["low"],
+                "tower_close": bars[i]["close"],
+                "tower_idx": i,
+            }
+
+    if best is None:
+        return None
+
+    latest = bars[-1]
+    best["days_since"] = (n - 1) - best["tower_idx"]
+    best["cmp"] = latest["close"]
+    if best["tower_close"] and best["tower_close"] > 0:
+        best["price_chg_since_pct"] = round((best["cmp"] - best["tower_close"]) / best["tower_close"] * 100, 2)
+    else:
+        best["price_chg_since_pct"] = None
+    del best["tower_idx"]
+    return best
+
+
 def get_volume_breakout_scan(supabase, symbols):
     """Main scan: returns every symbol currently in a burst/pause/breakout
     state, using completed daily bars plus today's live intraday data (if
@@ -350,6 +406,7 @@ def get_volume_breakout_scan(supabase, symbols):
         live_vol[sym] = max(live_vol.get(sym, 0), vol)  # cumulative, so max = latest
 
     results = []
+    tower_results = []
     for sym, bars in by_symbol.items():
         bars_sorted = sorted(bars, key=lambda b: b["trade_date"])
         # During market hours, always replace any existing "today" row with
@@ -400,11 +457,19 @@ def get_volume_breakout_scan(supabase, symbols):
             pattern["cmp"] = live_last.get(sym) or (bars_sorted[-1]["close"] if bars_sorted else None)
             results.append(pattern)
 
+        tower = _find_tower_day(bars_sorted)
+        if tower:
+            tower["symbol"] = sym
+            tower_results.append(tower)
+
     _state_rank = {"breakout": 0, "bursting": 1, "pausing": 2}
     results.sort(key=lambda r: (_state_rank.get(r["state"], 3), -r.get("burst_ratio", 0)))
+    tower_results.sort(key=lambda t: -t["tower_ratio"])
     return {
         "scanned": len(by_symbol),
         "matches": len(results),
         "results": results,
+        "tower_days": tower_results,
+        "tower_matches": len(tower_results),
         "generated_at": _now_ist().isoformat(),
     }
