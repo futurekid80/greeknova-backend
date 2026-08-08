@@ -326,21 +326,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Startup capture failed: {e}")
 
-    # ── Warm up Positional Radar cache ─────────────────────────────────────
-    try:
-        from api.positional_radar import get_positional_radar
-        def _warmup():
-            try:
-                import time
-                time.sleep(5)
-                get_positional_radar(0)
-                print("📊 Positional Radar warm-up complete")
-            except Exception as e:
-                print(f"📊 Positional Radar warm-up failed (non-fatal): {e}")
-        threading.Thread(target=_warmup, daemon=True).start()
-        print("📊 Positional Radar cache warm-up triggered")
-    except Exception as e:
-        print(f"⚠️ Positional Radar warm-up failed: {e}")
+    # CLEANUP (Aug 7 2026): removed the /positional-radar warm-up here --
+    # confirmed both positional_radar_cache (the table) and /positional-radar
+    # (the endpoint) are fully orphaned. Positional Intelligence was rebuilt
+    # on daily_oi_summary/cmp_prices/cpr_levels/oi_snapshots/delivery_data
+    # and never reads this table at all. This was pure daily waste --
+    # computing and caching something nobody reads.
 
     # ── GreekNova jobs (unchanged) ─────────────────────────────────────────
     scheduler.add_job(run_full_capture, "interval", minutes=5, id="full_capture")
@@ -1028,31 +1019,9 @@ def watchdog_cpr():
     except Exception as e:
         print(f"[CPR Watchdog] ❌ Error: {e}")
 
-    # ── Also check positional radar cache for today ───────────────────────
-    try:
-        import datetime as _dt
-        _today = _dt.date.today().isoformat()
-        radar_check = supabase.from_("positional_radar_cache")\
-            .select("trade_date")\
-            .eq("trade_date", _today)\
-            .limit(1).execute()
-
-        if not radar_check.data:
-            print(f"[CPR Watchdog] ⚠️ Radar cache missing for {_today} — refreshing...")
-            from api.positional_radar import get_current_expiry, get_series_start, clear_radar_cache
-            _today_dt = _dt.date.today()
-            _expiry = get_current_expiry(_today_dt)
-            _series_start = get_series_start(_expiry)
-            supabase.rpc("refresh_positional_radar_cache", {
-                "p_series_start": _series_start,
-                "p_series_end": _today
-            }).execute()
-            clear_radar_cache()
-            print(f"[CPR Watchdog] ✅ Radar cache refreshed for {_today}")
-        else:
-            print(f"[CPR Watchdog] ✅ Radar cache OK for {_today}")
-    except Exception as re:
-        print(f"[CPR Watchdog] ❌ Radar cache check failed: {re}")
+    # CLEANUP (Aug 7 2026): removed the positional radar cache safety-net
+    # check that used to run here -- positional_radar_cache is fully
+    # orphaned, nothing reads it, so there's nothing left to keep fresh.
 
 def watchdog_participant_flow():
     """Watchdog — runs at 7 PM. Re-fetches if today's data missing."""
