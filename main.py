@@ -408,11 +408,8 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=600
     )
 
-    scheduler.add_job(
-        refresh_radar_cache,
-        "cron", hour=16, minute=46, timezone="Asia/Kolkata", id="radar_cache_refresh",
-        misfire_grace_time=600
-    )
+    # CLEANUP (Aug 7 2026): removed the radar_cache_refresh scheduled job
+    # here -- positional_radar_cache is fully orphaned, nothing reads it.
 
     scheduler.add_job(
         watchdog_cpr,
@@ -1105,30 +1102,9 @@ def save_eod_signal_log():
     except Exception as e:
         print(f"[EOD Signal] ❌ {e}")
 
-def refresh_radar_cache():
-    """Refresh positional radar cache at 4:46 PM after EOD summary."""
-    import pytz
-    from datetime import datetime
-    ist = pytz.timezone('Asia/Kolkata')
-    if datetime.now(ist).weekday() >= 5:
-        return
-    try:
-        from api.positional_radar import get_current_expiry, get_series_start
-        from utils.db import get_supabase
-        import datetime as dt
-        today = dt.date.today()
-        expiry = get_current_expiry(today)
-        series_start = get_series_start(expiry)
-        result = get_supabase().rpc("refresh_positional_radar_cache", {
-            "p_series_start": series_start,
-            "p_series_end": today.isoformat()
-        }).execute()
-        print(f"[Radar Cache] ✅ Refreshed")
-        from api.positional_radar import clear_radar_cache
-        clear_radar_cache()
-        print(f"[Radar Cache] ✅ In-memory cache cleared")
-    except Exception as e:
-        print(f"[Radar Cache] ❌ {e}")
+# CLEANUP (Aug 7 2026): removed refresh_radar_cache() here -- was only
+# called by the now-removed scheduled job, writing to a table
+# (positional_radar_cache) that nothing reads.
 
 def auto_refresh_token():
     from datetime import datetime
