@@ -374,15 +374,11 @@ async def lifespan(app: FastAPI):
         _run_spot_volume_eod, "cron", hour=16, minute=0, timezone="Asia/Kolkata",
         id="spot_volume_eod", misfire_grace_time=600
     )
-    scheduler.add_job(
-        archive_old_snapshots,
-        "cron",
-        day_of_week="sun", hour=20, minute=0,
-        timezone="Asia/Kolkata",
-        id="weekly_archive",
-        misfire_grace_time=3600,
-        replace_existing=True
-    )
+    # FIX (Aug 8 2026): removed weekly_archive from the in-process
+    # scheduler -- see /run-archive-watchdog docstring for the full
+    # incident and rationale. Now triggered externally via Railway Cron
+    # hitting /run-archive (or /archive-snapshots-now), decoupled from
+    # app-process uptime. Schedule: Sun 8PM IST = Sun 14:30 UTC.
     scheduler.add_job(
         lambda: compute_daily_summary(get_supabase()),
         "cron",
@@ -407,11 +403,13 @@ async def lifespan(app: FastAPI):
         "cron", hour=17, minute=15, timezone="Asia/Kolkata", id="cpr_watchdog",
         misfire_grace_time=600
     )
-    scheduler.add_job(
-        watchdog_archive,
-        "cron", day_of_week="mon", hour=9, minute=0, timezone="Asia/Kolkata", id="archive_watchdog",
-        misfire_grace_time=600
-    )
+    # FIX (Aug 8 2026): removed archive_watchdog from the in-process
+    # scheduler -- its entire purpose was catching weekly_archive going
+    # silent, but living on the same scheduler meant it went down with
+    # the exact restart it was supposed to guard against, so it was
+    # never actually an independent safety net. Now triggered externally
+    # via Railway Cron hitting /run-archive-watchdog. Schedule: Mon 9AM
+    # IST = Mon 3:30 AM UTC.
     scheduler.add_job(
         lambda: __import__('api.positional_radar', fromlist=['clear_radar_cache']).clear_radar_cache(),
         "cron", hour=9, minute=0, timezone="Asia/Kolkata", id="daily_radar_cache_clear",
@@ -2232,6 +2230,35 @@ def oi_walls_detail(symbol: str):
 def archive_snapshots_now():
     try:
         archive_old_snapshots()
+        return {"status": "triggered"}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/run-archive-watchdog")
+def run_archive_watchdog():
+    """FIX (Aug 8 2026): scheduler reliability -- weekly_archive and
+    archive_watchdog used to live on the in-process APScheduler, which
+    goes down silently on any Railway restart with no alerting. Real
+    incident: weekly_archive missed every Sunday from 24-Jul to 9-Aug
+    (16 days), oi_snapshots grew to 12.77M rows before anyone noticed --
+    and archive_watchdog, whose entire job is catching exactly this,
+    was on the same scheduler, so it went down with the very restart it
+    was supposed to guard against. Not an independent safety net if it
+    can be taken out by the same failure it's watching for.
+
+    Fix: both archive_old_snapshots() (see /archive-snapshots-now /
+    /run-archive above) and watchdog_archive() are now meant to be
+    triggered externally via Railway's own Cron Jobs feature instead of
+    the in-process scheduler -- decouples scheduling from app-process
+    uptime entirely. watchdog_archive()'s own internal logic (check
+    staleness > 8 days, self-heal by calling archive_old_snapshots())
+    is unchanged; only WHERE it runs from has changed.
+
+    Set up in Railway: Cron Jobs -> new job -> schedule "0 9 * * 1"
+    (Mon 9AM IST -- Railway cron schedules run in UTC, so use "30 3 * * 1"
+    for 9:00 AM IST) -> command hits this endpoint's URL."""
+    try:
+        watchdog_archive()
         return {"status": "triggered"}
     except Exception as e:
         return {"status": "error", "detail": str(e)}
