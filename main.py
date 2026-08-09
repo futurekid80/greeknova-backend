@@ -456,6 +456,7 @@ async def lifespan(app: FastAPI):
         supabase = get_supabase()
         if not os.environ.get("DISABLE_MCX"):
             start_mcx_scheduler(kite, supabase)
+            print("✅ CommodityNova MCX scheduler started")
         else:
             print("⏭️ MCX scheduler disabled via DISABLE_MCX env var")
     
@@ -465,7 +466,6 @@ async def lifespan(app: FastAPI):
     # ──────────────────────────────────────────────────────────────────────
 
     print("✅ GreekNova backend started")
-    print("✅ CommodityNova MCX scheduler started")
     print("📸 Full capture every 5 min during market hours")
     print("🔔 Alert engine: wired into capture cycle")
     print("🎯 ATM-centered strike selection: 25 above + 25 below for indices")
