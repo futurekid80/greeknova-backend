@@ -2427,6 +2427,79 @@ def public_landing_highlights(response: Response):
     except Exception as e:
         return {"highlights": [], "count": 0, "error": str(e)}
 
+@app.get("/public/live-signals")
+def public_live_signals(response: Response):
+    """Public, curated live signal ticker for external showcase use (the
+    Claude Design landing page's "Top Signals" strip) -- Aug 10 2026.
+    Blends the real signal categories from Positional Intelligence
+    (STEALTH, LONG_BUILDUP, SHORT_BUILDUP, SHORT_COVERING,
+    LONG_UNWINDING) into one ranked list. Uses the genuine vocabulary
+    already used throughout the app, not placeholder tag names."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    try:
+        from api.positional_intelligence import get_positional_intelligence
+        pi = get_positional_intelligence(min_consec=0)
+
+        rows = []
+        for s in (pi.get("stealth_buildup") or [])[:5]:
+            rows.append({
+                "symbol": s["symbol"], "ltp": s["cmp"], "chg_pct": s.get("latest_price_chg", 0),
+                "oi_chg_pct": s.get("today_oi_chg", 0), "signal": "STEALTH",
+            })
+        for s in (pi.get("active_conviction") or [])[:5]:
+            rows.append({
+                "symbol": s["symbol"], "ltp": s["cmp"], "chg_pct": s.get("latest_price_chg", 0),
+                "oi_chg_pct": s.get("latest_fut_oi_chg", 0), "signal": s.get("signal"),
+            })
+        for s in (pi.get("vol_breakout") or [])[:5]:
+            rows.append({
+                "symbol": s["symbol"], "ltp": s["cmp"], "chg_pct": s.get("latest_price_chg", 0),
+                "oi_chg_pct": s.get("latest_fut_oi_chg", 0), "signal": s.get("signal"),
+            })
+
+        seen = set()
+        deduped = []
+        for r in rows:
+            if r["symbol"] not in seen:
+                seen.add(r["symbol"])
+                deduped.append(r)
+
+        return {"signals": deduped[:8], "count": len(deduped[:8])}
+    except Exception as e:
+        return {"signals": [], "count": 0, "error": str(e)}
+
+@app.get("/public/stealth-featured")
+def public_stealth_featured(response: Response):
+    """Public, single best current Stealth Buildup detection for the
+    landing page's flagship-feature visual -- Aug 10 2026. Returns the
+    highest-tier, most-established one (ELITE beats STRONG beats WATCH,
+    more sessions beats fewer) with its real oi_history for the curve."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    try:
+        from api.positional_intelligence import get_positional_intelligence
+        pi = get_positional_intelligence(min_consec=0)
+        stealth = pi.get("stealth_buildup") or []
+        if not stealth:
+            return {"featured": None}
+
+        _tier_rank = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
+        best = min(stealth, key=lambda s: (_tier_rank.get(s.get("tier"), 3), -len(s.get("oi_history") or [])))
+
+        return {
+            "featured": {
+                "symbol": best["symbol"],
+                "cmp": best["cmp"],
+                "price_chg_pct": best.get("price_chg", 0),
+                "tier": best.get("tier"),
+                "tier_label": best.get("tier_label"),
+                "fut_oi_chg_pct": best.get("today_oi_chg", 0),
+                "oi_history": best.get("oi_history") or [],
+                "sessions": len(best.get("oi_history") or []),
+            }
+        }
+    except Exception as e:
+        return {"featured": None, "error": str(e)}
+
 @app.get("/adx-map")
 def adx_map():
     from api.adx_analysis import get_combined_adx_map
