@@ -1,7 +1,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
@@ -2302,6 +2302,65 @@ def first_hour_breakout_scan():
         return get_first_hour_breakout_scan(get_supabase(), SYMBOLS)
     except Exception as e:
         return {"status": "error", "detail": str(e)}
+
+@app.get("/public/landing-highlights")
+def public_landing_highlights(response: Response):
+    """Curated, public-safe summary of real recent GreekNova signals, built
+    for external showcase use (e.g. the Claude Design landing page) --
+    Aug 9 2026. Deliberately NOT the same as opening up the full API:
+    - Only a small, curated subset of fields (no raw internal data)
+    - Its own permissive CORS header, set manually on just this route,
+      so the main API's origin allowlist (protecting authenticated
+      production traffic) is completely untouched
+    - Framed with plain-language, SEBI-safe wording baked into the
+      response itself, not left to whoever consumes it to get right
+    """
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    try:
+        from datetime import datetime
+        import pytz
+        from api.iv_analysis import SYMBOLS
+        supabase = get_supabase()
+        highlights = []
+
+        from api.spot_volume_scanner import get_volume_breakout_scan
+        spot = get_volume_breakout_scan(supabase, SYMBOLS)
+        for r in (spot.get("results") or []):
+            if r.get("state") == "breakout" and r.get("confirmed") and r.get("burst_high") and r.get("cmp"):
+                move_pct = round((r["cmp"] - r["burst_high"]) / r["burst_high"] * 100, 2)
+                highlights.append({
+                    "symbol": r["symbol"],
+                    "signal": "Spot Volume Breakout — confirmed",
+                    "reference_price": r["burst_high"],
+                    "current_price": r["cmp"],
+                    "move_since_signal_pct": move_pct,
+                    "signal_date": r.get("burst_date"),
+                })
+
+        from api.first_hour_breakout import get_first_hour_breakout_scan
+        fhb = get_first_hour_breakout_scan(supabase, SYMBOLS)
+        for r in (fhb.get("results") or []):
+            if r.get("state") == "sustaining" and r.get("first_hour_high") and r.get("cmp"):
+                move_pct = round((r["cmp"] - r["first_hour_high"]) / r["first_hour_high"] * 100, 2)
+                highlights.append({
+                    "symbol": r["symbol"],
+                    "signal": "First Hour Breakout — sustaining",
+                    "reference_price": r["first_hour_high"],
+                    "current_price": r["cmp"],
+                    "move_since_signal_pct": move_pct,
+                    "signal_date": None,
+                })
+
+        highlights.sort(key=lambda h: -h["move_since_signal_pct"])
+
+        return {
+            "highlights": highlights[:6],
+            "count": len(highlights[:6]),
+            "generated_at": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
+            "disclaimer": "For informational and educational purposes only. Not SEBI registered. Not investment advice. Past signals do not guarantee future results.",
+        }
+    except Exception as e:
+        return {"highlights": [], "count": 0, "error": str(e)}
 
 @app.get("/adx-map")
 def adx_map():
