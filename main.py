@@ -221,6 +221,12 @@ def run_full_capture():
             print(f"  ⚠️ Alert engine error: {ae}")
 
         try:
+            from api.fresh_build_tracker import capture_fresh_build_signals
+            capture_fresh_build_signals(supabase)
+        except Exception as fbe:
+            print(f"  ⚠️ Fresh Build tracker error: {fbe}")
+
+        try:
             from api.cpr import update_cpr_status
             update_cpr_status()
         except Exception as ce:
@@ -2386,6 +2392,23 @@ def public_landing_highlights(response: Response):
                             "move_since_signal_pct": move_pct,
                             "signal_date": r.get("end_date"),
                         })
+
+        # Fresh Build premium winners (Aug 10 2026 addition): options
+        # premium moves, expressed the way traders naturally talk about
+        # them (e.g. "2x premium") alongside the equivalent % move so
+        # this story type can be ranked in the same list as the others.
+        from api.fresh_build_tracker import get_fresh_build_winners
+        fb_winners = get_fresh_build_winners(supabase, days_back=5, min_multiple=1.5)
+        for w in fb_winners[:10]:
+            move_pct = round((w["multiple"] - 1) * 100, 2)
+            highlights.append({
+                "symbol": w["symbol"],
+                "signal": f"Fresh Build — {w['strike']}{w['option_type']} premium {w['multiple']}x",
+                "reference_price": w["entry_premium"],
+                "current_price": w["peak_premium"],
+                "move_since_signal_pct": move_pct,
+                "signal_date": w["entry_timestamp"][:10] if w.get("entry_timestamp") else None,
+            })
 
         # FIX (Aug 10 2026): this public showcase endpoint should surface
         # genuine wins for marketing use, not a random mix including
