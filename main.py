@@ -2351,7 +2351,43 @@ def public_landing_highlights(response: Response):
                     "signal_date": None,
                 })
 
-        highlights.sort(key=lambda h: -h["move_since_signal_pct"])
+        # Weekly OI Buildup story (Aug 10 2026 addition): "heavy OI
+        # activity, then a big move followed" -- uses the ACTUAL
+        # signal_type/signal_label recorded rather than assuming
+        # direction, since a SHORT_BUILDUP week can still be followed
+        # by a rally (real example: MCX built 40% OI on a down week,
+        # then ran +5% afterward -- the honest story is "heavy
+        # positioning preceded a big move," not "we called it bullish").
+        from api.oi_buildup_period import get_oi_buildup_period
+        weekly = get_oi_buildup_period(supabase, "weekly")
+        weekly_results = [r for r in (weekly.get("results") or []) if abs(r.get("cumulative_oi_pct", 0)) >= 25]
+        if weekly_results:
+            wk_symbols = [r["symbol"] for r in weekly_results]
+            cmp_res = supabase.from_("cmp_prices")\
+                .select("symbol, cmp, timestamp")\
+                .in_("symbol", wk_symbols)\
+                .order("timestamp", desc=True)\
+                .limit(len(wk_symbols) * 5).execute()
+            latest_cmp = {}
+            for row in (cmp_res.data or []):
+                if row["symbol"] not in latest_cmp:
+                    latest_cmp[row["symbol"]] = float(row["cmp"])
+            for r in weekly_results:
+                cur = latest_cmp.get(r["symbol"])
+                ref = r.get("close_price")
+                if cur and ref:
+                    move_pct = round((cur - ref) / ref * 100, 2)
+                    if abs(move_pct) >= 3:
+                        highlights.append({
+                            "symbol": r["symbol"],
+                            "signal": f"Weekly OI Buildup — {r.get('signal_label', r.get('signal_type', ''))} ({r['cumulative_oi_pct']}% OI)",
+                            "reference_price": ref,
+                            "current_price": cur,
+                            "move_since_signal_pct": move_pct,
+                            "signal_date": r.get("end_date"),
+                        })
+
+        highlights.sort(key=lambda h: -abs(h["move_since_signal_pct"]))
 
         return {
             "highlights": highlights[:6],
