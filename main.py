@@ -2387,13 +2387,19 @@ def public_landing_highlights(response: Response):
                             "signal_date": r.get("end_date"),
                         })
 
-        highlights.sort(key=lambda h: -abs(h["move_since_signal_pct"]))
+        # FIX (Aug 10 2026): this public showcase endpoint should surface
+        # genuine wins for marketing use, not a random mix including
+        # misses -- but stays honest by saying so explicitly in the
+        # disclaimer, rather than silently curating and letting the
+        # omission imply something false about overall win rate.
+        highlights = [h for h in highlights if h["move_since_signal_pct"] > 0]
+        highlights.sort(key=lambda h: -h["move_since_signal_pct"])
 
         return {
             "highlights": highlights[:6],
             "count": len(highlights[:6]),
             "generated_at": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
-            "disclaimer": "For informational and educational purposes only. Not SEBI registered. Not investment advice. Past signals do not guarantee future results.",
+            "disclaimer": "For informational and educational purposes only. Not SEBI registered. Not investment advice. This is a curated selection of positive outcomes for illustration, not an exhaustive or representative sample of all signals, and does not reflect overall win rate. Past signals do not guarantee future results.",
         }
     except Exception as e:
         return {"highlights": [], "count": 0, "error": str(e)}
