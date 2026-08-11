@@ -385,8 +385,21 @@ async def lifespan(app: FastAPI):
     # incident and rationale. Now triggered externally via Railway Cron
     # hitting /run-archive (or /archive-snapshots-now), decoupled from
     # app-process uptime. Schedule: Sun 8PM IST = Sun 14:30 UTC.
+    def _run_daily_summary_and_clear_pi_cache():
+        # BUG FIX (Aug 10 2026): compute_daily_summary() writes today's
+        # daily_oi_summary row (which Stealth Buildup's Volume field
+        # depends on), but nothing was clearing Positional Intelligence's
+        # 1-hour post-market cache afterward -- so Volume could show
+        # missing for up to an hour even after the real data existed.
+        compute_daily_summary(get_supabase())
+        try:
+            from api.positional_intelligence import clear_positional_intelligence_cache
+            clear_positional_intelligence_cache()
+        except Exception as e:
+            print(f"[EOD] Positional Intelligence cache clear failed: {e}")
+
     scheduler.add_job(
-        lambda: compute_daily_summary(get_supabase()),
+        _run_daily_summary_and_clear_pi_cache,
         "cron",
         hour=16, minute=45,
         timezone="Asia/Kolkata",
@@ -2046,6 +2059,11 @@ def seed_signal_log_eod(date: str = None):
 def trigger_daily_oi_summary(date: str = None):
     from utils.db import get_supabase
     result = compute_daily_summary(get_supabase(), trade_date=date)
+    try:
+        from api.positional_intelligence import clear_positional_intelligence_cache
+        clear_positional_intelligence_cache()
+    except Exception as e:
+        print(f"[EOD] Positional Intelligence cache clear failed: {e}")
     return result
 
 @app.get("/wall-migration")

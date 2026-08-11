@@ -36,13 +36,33 @@ def _classify_stealth_tier(rank, abs_price, net_delta_bullish):
     return None, None
 
 
+def clear_positional_intelligence_cache():
+    """Clear the in-memory cache so the next call fetches fresh data.
+    BUG FIX (Aug 10 2026): nothing was calling this (it didn't even exist)
+    -- the 1-hour post-market cache TTL meant that if this got populated
+    even slightly before the 4:45 PM EOD job finished writing today's
+    daily_oi_summary row, the Stealth Buildup / Volume Breakout cards
+    would keep showing missing Volume for up to an hour afterward, with
+    nothing forcing a refresh once the real data actually became
+    available. Now called right after compute_daily_summary() finishes."""
+    global _cache, _cache_time
+    _cache = {}
+    _cache_time = 0.0
+
+
 def get_positional_intelligence(min_consec: int = 0):
     global _cache, _cache_time
 
     import pytz
     ist = pytz.timezone("Asia/Kolkata")
     now_ist = datetime.now(ist)
-    is_market = now_ist.weekday() < 5 and (9 * 60 + 15) <= (now_ist.hour * 60 + now_ist.minute) <= (15 * 60 + 30)
+    # BUG FIX (Aug 10 2026): was checking market close at 15:30 -- the
+    # same pre-CAS assumption already fixed elsewhere (services.
+    # alert_engine.is_market_hours etc.) when SEBI's Closing Auction
+    # Session extended F&O trading to 15:40. This file never got that
+    # fix, so it switched to the longer 1-hour post-market cache TTL
+    # 10 minutes too early every day.
+    is_market = now_ist.weekday() < 5 and (9 * 60 + 15) <= (now_ist.hour * 60 + now_ist.minute) <= (15 * 60 + 40)
     ttl = 300 if is_market else 3600
 
     cache_key = str(min_consec)
