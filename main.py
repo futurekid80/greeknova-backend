@@ -1539,11 +1539,17 @@ def stock_intel(symbol: str):
     # ── 1. FUT Signal (today) ─────────────────────────────────────────
     try:
         fut_res = supabase.from_("daily_oi_summary")\
-            .select("trade_date, fut_signal, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol")\
+            .select("trade_date, fut_signal, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price, fut_vol")\
             .eq("symbol", sym)\
             .eq("trade_date", last_trading_day)\
             .limit(1).execute()
-        result["fut_signal"] = fut_res.data[0] if fut_res.data else None
+        _fut_row = fut_res.data[0] if fut_res.data else None
+        if _fut_row is not None:
+            _next_raw = _fut_row.get("fut_oi_chg_pct_next")
+            _oi_next = float(_next_raw) if _next_raw is not None else None
+            _oi_now = float(_fut_row.get("fut_oi_chg_pct") or 0)
+            _fut_row["fut_oi_chg_pct_combined"] = round(_oi_now + _oi_next, 2) if _oi_next is not None else None
+        result["fut_signal"] = _fut_row
     except:
         result["fut_signal"] = None
 
