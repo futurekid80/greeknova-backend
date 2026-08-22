@@ -141,6 +141,38 @@ def fetch_fut_oi_for_timestamp(supabase, timestamp: str) -> dict:
     return fut_oi
 
 
+def fetch_fut_oi_next_for_timestamp(supabase, timestamp: str) -> dict:
+    """(Aug 22 2026): sibling to fetch_fut_oi_for_timestamp above, but
+    returns each symbol's SECOND-nearest (next-month) FUT OI instead of
+    nearest. Used to show next-month OI change alongside current-month on
+    Market Pulse, so a spike close to expiry can be checked against
+    whether it's genuine positioning (shows up in next-month too) or just
+    rollover (only shows up as near-month leaving)."""
+    result = supabase.from_("oi_snapshots")\
+        .select("symbol, expiry, oi")\
+        .eq("timestamp", timestamp)\
+        .eq("option_type", "FUT")\
+        .limit(5000)\
+        .execute()
+    rows = result.data or []
+    expiries_by_sym: dict = defaultdict(set)
+    for r in rows:
+        sym, exp = r["symbol"], r.get("expiry")
+        if exp:
+            expiries_by_sym[sym].add(exp)
+    next_expiry: dict = {}
+    for sym, exps in expiries_by_sym.items():
+        sorted_exps = sorted(exps)
+        if len(sorted_exps) > 1:
+            next_expiry[sym] = sorted_exps[1]
+    fut_oi_next = defaultdict(int)
+    for r in rows:
+        sym = r["symbol"]
+        if r.get("expiry") == next_expiry.get(sym):
+            fut_oi_next[sym] += r["oi"] or 0
+    return fut_oi_next
+
+
 def fetch_fut_volume_for_timestamp(supabase, timestamp: str) -> dict:
     """BUG FIX (Jul 20 2026): live path never fetched volume at all, so
     vol_ratio/vol_surge (used by the 'Vol Surge Leaders' card) were only
@@ -307,7 +339,7 @@ def _get_eod_pulse(supabase):
         last_trading_day = now_ist.date().isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
-        .select("symbol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol")\
+        .select("symbol, oi_chg_pct, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price, fut_vol")\
         .eq("trade_date", last_trading_day)\
         .limit(200)\
         .execute()
@@ -351,6 +383,9 @@ def _get_eod_pulse(supabase):
         sym = r["symbol"]
         fut_oi_chg = float(r.get("fut_oi_chg_pct") or 0)
         oi_chg = fut_oi_chg if fut_oi_chg != 0 else round(float(r.get("oi_chg_pct") or 0), 2)
+        _next_raw = r.get("fut_oi_chg_pct_next")
+        fut_oi_chg_next = round(float(_next_raw), 2) if _next_raw is not None else None
+        fut_oi_chg_combined = round(fut_oi_chg + fut_oi_chg_next, 2) if fut_oi_chg_next is not None else None
         price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         ltp = cmp_map.get(sym, 0)
         is_index = sym in INDEX_NSE_MAP
@@ -364,6 +399,8 @@ def _get_eod_pulse(supabase):
             "symbol":        sym,
             "is_index":      is_index,
             "oi_chg_pct":    oi_chg,
+            "fut_oi_chg_pct_next": fut_oi_chg_next,
+            "fut_oi_chg_pct_combined": fut_oi_chg_combined,
             "price_chg_pct": price_chg,
             "ltp":           ltp,
             "signal":        signal,
@@ -428,6 +465,10 @@ def get_oi_pulse():
     # Step 3a: Futures OI for directional signals
     fut_oi_old = fetch_fut_oi_for_timestamp(supabase, ts_old)
     fut_oi_new = fetch_fut_oi_for_timestamp(supabase, ts_new)
+    # (Aug 22 2026): next-month OI too, so a near-expiry spike can be
+    # checked against whether it's genuine or just rollover.
+    fut_oi_old_next = fetch_fut_oi_next_for_timestamp(supabase, ts_old)
+    fut_oi_new_next = fetch_fut_oi_next_for_timestamp(supabase, ts_new)
 
     # Step 3a-2: Live volume + 5-day average, for Vol Surge Leaders
     fut_vol_new = fetch_fut_volume_for_timestamp(supabase, ts_new)
@@ -547,6 +588,19 @@ def get_oi_pulse():
             fut_oi_now  = f_new
             fut_oi_prev = f_old
 
+        # (Aug 22 2026): next-month OI change + combined, same pattern as
+        # the near-month figure above.
+        fut_oi_chg_pct_next = None
+        if not is_index and sym in fut_oi_new_next:
+            fn_old = fut_oi_old_next.get(sym, 0)
+            fn_new = fut_oi_new_next.get(sym, 0)
+            if fn_old > 0:
+                fut_oi_chg_pct_next = round((fn_new - fn_old) / fn_old * 100, 2)
+        fut_oi_chg_pct_combined = (
+            round(display_oi_chg_pct + fut_oi_chg_pct_next, 2)
+            if fut_oi_chg_pct_next is not None else None
+        )
+
         items.append({
             "symbol":            sym,
             "is_index":          is_index,
@@ -554,6 +608,8 @@ def get_oi_pulse():
             "oi_prev":           o_old,
             "oi_chg_abs":        oi_chg_abs,
             "oi_chg_pct":        display_oi_chg_pct,
+            "fut_oi_chg_pct_next": fut_oi_chg_pct_next,
+            "fut_oi_chg_pct_combined": fut_oi_chg_pct_combined,
             "fut_oi_now":        fut_oi_now,
             "fut_oi_prev":       fut_oi_prev,
             "has_fut_data":      has_futures_data and not is_index and sym in fut_oi_new,
