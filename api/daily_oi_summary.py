@@ -6,6 +6,7 @@ contamination that inflated fut_oi_chg_pct (e.g. HINDALCO showing +28% when
 actual Jun30 expiry change was only +1.6%).
 """
 from datetime import datetime, timedelta
+from collections import defaultdict
 import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -209,29 +210,48 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             .limit(1000)\
             .execute()
 
-        # ── Build nearest expiry map from open snapshot ───────────────────
-        # For each symbol, find the smallest (nearest) expiry >= trade_date
-        fut_nearest_expiry = {}
+        # ── Build nearest AND next-nearest expiry maps from open snapshot ──
+        # (Aug 22 2026): also track each symbol's SECOND-nearest expiry, so
+        # we can compute a next-month OI change % alongside the existing
+        # near-month one. Purpose: expiry-week OI spikes in the near-month
+        # contract are often just rollover (positions shifting from near to
+        # next), not genuine new conviction. Showing both months side by
+        # side lets Stealth Buildup distinguish the two -- a real buildup
+        # tends to show up in next-month too, or in the combined total;
+        # pure rollover mostly cancels out when the two are summed.
+        fut_all_expiries: dict = defaultdict(set)
         for r in (fut_open_res.data or []):
             sym = r["symbol"]
             exp = str(r.get("expiry") or "")
             if exp and exp >= trade_date:
-                if sym not in fut_nearest_expiry or exp < fut_nearest_expiry[sym]:
-                    fut_nearest_expiry[sym] = exp
+                fut_all_expiries[sym].add(exp)
 
-        # ── Build open OI map — nearest expiry only ───────────────────────
+        fut_nearest_expiry = {}
+        fut_next_expiry = {}
+        for sym, exps in fut_all_expiries.items():
+            sorted_exps = sorted(exps)
+            fut_nearest_expiry[sym] = sorted_exps[0]
+            if len(sorted_exps) > 1:
+                fut_next_expiry[sym] = sorted_exps[1]
+
+        # ── Build open OI maps — nearest and next-nearest expiry ─────────
         fut_open_map = {}
+        fut_open_map_next = {}
         for r in (fut_open_res.data or []):
             sym = r["symbol"]
             exp = str(r.get("expiry") or "")
             if exp == fut_nearest_expiry.get(sym) and sym not in fut_open_map:
                 fut_open_map[sym] = int(r.get("oi") or 0)
+            elif exp == fut_next_expiry.get(sym) and sym not in fut_open_map_next:
+                fut_open_map_next[sym] = int(r.get("oi") or 0)
 
-        # ── Build close OI + volume map — nearest expiry only ────────────
-        # Use same nearest expiry as open for consistency (apples-to-apples)
+        # ── Build close OI + volume maps — nearest and next-nearest ──────
+        # Use same expiry maps as open for consistency (apples-to-apples)
         fut_close_oi_map = {}
+        fut_close_oi_map_next = {}
         fut_vol_map = {}
         seen_close = set()
+        seen_close_next = set()
         for r in (fut_close_res.data or []):
             sym = r["symbol"]
             exp = str(r.get("expiry") or "")
@@ -239,8 +259,11 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
                 fut_close_oi_map[sym] = int(r.get("oi") or 0)
                 fut_vol_map[sym] = int(r.get("volume") or 0)
                 seen_close.add(sym)
+            elif exp == fut_next_expiry.get(sym) and sym not in seen_close_next:
+                fut_close_oi_map_next[sym] = int(r.get("oi") or 0)
+                seen_close_next.add(sym)
 
-        # ── Compute FUT OI change % ───────────────────────────────────────
+        # ── Compute FUT OI change % — near-month and next-month ───────────
         fut_oi_chg_map = {}
         for sym in fut_close_oi_map:
             open_oi  = fut_open_map.get(sym, 0)
@@ -248,13 +271,21 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if open_oi > 0:
                 fut_oi_chg_map[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
 
-        # ── Add fut_vol, fut_oi_chg_pct and fut_signal to rows ───────────
+        fut_oi_chg_map_next = {}
+        for sym in fut_close_oi_map_next:
+            open_oi  = fut_open_map_next.get(sym, 0)
+            close_oi = fut_close_oi_map_next[sym]
+            if open_oi > 0:
+                fut_oi_chg_map_next[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
+
+        # ── Add fut_vol, fut_oi_chg_pct (+next) and fut_signal to rows ───
         for row in rows:
             sym = row["symbol"]
             fut_oi = fut_oi_chg_map.get(sym, 0)
             price  = row.get("price_chg_pct") or 0
             row["fut_vol"]        = fut_vol_map.get(sym, 0)
             row["fut_oi_chg_pct"] = fut_oi
+            row["fut_oi_chg_pct_next"] = fut_oi_chg_map_next.get(sym, None)
             # Classify FUT signal — same logic as OI Buildup chart
             if fut_oi >= 2.0 and price >= 0.3:
                 row["fut_signal"] = "LONG_BUILDUP"

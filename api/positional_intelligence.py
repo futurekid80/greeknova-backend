@@ -109,7 +109,7 @@ def get_positional_intelligence(min_consec: int = 0):
     hist_start = (today - timedelta(days=25)).isoformat()
     try:
         hist_res = supabase.from_("daily_oi_summary")\
-            .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct, close_price, fut_signal")\
+            .select("symbol, trade_date, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price, fut_signal")\
             .gte("trade_date", hist_start)\
             .lte("trade_date", today_str)\
             .order("trade_date", desc=False)\
@@ -177,25 +177,53 @@ def get_positional_intelligence(min_consec: int = 0):
     if is_market:
         try:
             snap_start = f"{today_str}T03:45:00+00:00"  # 9:15 IST
+            # (Aug 22 2026): now also select expiry, so this snapshot can
+            # be split into near-month and next-month per symbol -- the
+            # same distinction added to the EOD path in daily_oi_summary.py.
             snap_res = supabase.from_("oi_snapshots")\
-                .select("symbol, oi, last_price, timestamp")\
+                .select("symbol, oi, last_price, timestamp, expiry")\
                 .eq("option_type", "FUT")\
                 .gte("timestamp", snap_start)\
                 .order("timestamp", desc=False)\
                 .limit(10000)\
                 .execute()
+            rows_raw = snap_res.data or []
+
+            # Determine each symbol's nearest and next-nearest expiry from
+            # everything seen in today's snapshot window.
+            sym_expiries: dict = defaultdict(set)
+            for r in rows_raw:
+                exp = str(r.get("expiry") or "")
+                if exp and exp >= today_str:
+                    sym_expiries[r["symbol"]].add(exp)
+            nearest_exp = {}
+            next_exp = {}
+            for s, exps in sym_expiries.items():
+                sorted_exps = sorted(exps)
+                nearest_exp[s] = sorted_exps[0]
+                if len(sorted_exps) > 1:
+                    next_exp[s] = sorted_exps[1]
+
             first_oi = {}
             latest_oi = {}
             latest_price = {}
             open_price = {}
+            first_oi_next = {}
+            latest_oi_next = {}
             snap_by_ts: dict = {}
-            for r in (snap_res.data or []):
+            snap_by_ts_next: dict = {}
+            for r in rows_raw:
                 s = r["symbol"]
+                exp = str(r.get("expiry") or "")
                 oi = int(r.get("oi") or 0)
                 ts = r.get("timestamp", "")
                 key = f"{s}_{ts}"
-                if oi > snap_by_ts.get(key, {}).get("oi", 0):
-                    snap_by_ts[key] = {"symbol": s, "oi": oi, "lp": float(r.get("last_price") or 0)}
+                if exp == nearest_exp.get(s):
+                    if oi > snap_by_ts.get(key, {}).get("oi", 0):
+                        snap_by_ts[key] = {"symbol": s, "oi": oi, "lp": float(r.get("last_price") or 0)}
+                elif exp == next_exp.get(s):
+                    if oi > snap_by_ts_next.get(key, {}).get("oi", 0):
+                        snap_by_ts_next[key] = {"symbol": s, "oi": oi}
             for row in snap_by_ts.values():
                 s = row["symbol"]
                 oi = row["oi"]
@@ -206,6 +234,13 @@ def get_positional_intelligence(min_consec: int = 0):
                 if oi > 0:
                     latest_oi[s] = oi
                     latest_price[s] = lp
+            for row in snap_by_ts_next.values():
+                s = row["symbol"]
+                oi = row["oi"]
+                if s not in first_oi_next and oi > 0:
+                    first_oi_next[s] = oi
+                if oi > 0:
+                    latest_oi_next[s] = oi
             # Fetch genuine previous trading day close — NOT last_trading_day,
             # which equals today during market hours. Mirrors vol_oi_breakout.py.
             prev_close_map = {}
@@ -240,9 +275,13 @@ def get_positional_intelligence(min_consec: int = 0):
                         price_chg = ((latest_price[s] - prev_close) / prev_close) * 100
                     else:
                         price_chg = ((latest_price[s] - open_price[s]) / open_price[s]) * 100 if open_price[s] > 0 else 0
+                    oi_chg_next = None
+                    if s in first_oi_next and first_oi_next[s] > 0 and s in latest_oi_next:
+                        oi_chg_next = round(((latest_oi_next[s] - first_oi_next[s]) / first_oi_next[s]) * 100, 2)
                     live_oi_map[s] = {
                         "fut_oi_chg_pct": round(oi_chg, 2),
                         "price_chg_pct": round(price_chg, 2),
+                        "fut_oi_chg_pct_next": oi_chg_next,
                     }
         except Exception as e:
             print(f"[PI] Live OI fetch failed: {e}")
@@ -402,15 +441,23 @@ def get_positional_intelligence(min_consec: int = 0):
             if is_market and sym in live_oi_map:
                 today_oi = live_oi_map[sym].get("fut_oi_chg_pct", 0)
                 today_price = live_oi_map[sym].get("price_chg_pct", 0)
+                today_oi_next = live_oi_map[sym].get("fut_oi_chg_pct_next", None)
             else:
                 today_data = next((h for h in reversed(last_15) if h["trade_date"] == today_str), None)
                 if not today_data:
                     today_data = history[-1] if history else None
                 today_oi = float((today_data or {}).get("fut_oi_chg_pct") or 0)
+                _next_raw = (today_data or {}).get("fut_oi_chg_pct_next")
+                today_oi_next = float(_next_raw) if _next_raw is not None else None
                 _raw_price_chg = (today_data or {}).get("price_chg_pct")
                 if _raw_price_chg is None:
                     continue  # Skip new stocks with no previous day close
                 today_price = float(_raw_price_chg)
+            # Combined = near + next month OI change. Genuine rollover shows
+            # up as OI leaving near-month and arriving in next-month in
+            # roughly equal size, so it largely cancels out here -- what's
+            # left over is closer to real net positioning change.
+            today_oi_combined = round(today_oi + today_oi_next, 2) if today_oi_next is not None else None
             if today_oi > 0 and abs(today_price) <= 1.0:
                 if True:
                     if today_oi >= 2.0 and abs(today_price) <= 0.5:
@@ -429,6 +476,8 @@ def get_positional_intelligence(min_consec: int = 0):
                                 "tier_label": tier_label,
                                 "rank": 0,
                                 "today_oi_chg": round(today_oi, 2),
+                                "next_month_oi_chg": round(today_oi_next, 2) if today_oi_next is not None else None,
+                                "combined_oi_chg": today_oi_combined,
                                 "price_chg": round(today_price, 2),
                                 "net_delta": net_delta_map.get(sym, None),
                                 "delivery_pct": delivery_map.get(sym, None),
