@@ -99,6 +99,11 @@ SYMBOLS = [
     "TVSMOTOR","BHARATFORG","MOTHERSON","LUPIN","TORNTPHARM","AUROPHARMA",
     "GODREJCP","MARICO","DABUR","PIDILITIND","MUTHOOTFIN","SBICARD","ICICIPRULI",
     "IDFCFIRSTB","FEDERALBNK","ETERNAL","POLYCAB","VOLTAS","IEX","ASTRAL",
+    # Added Aug 26 2026: top-liquidity F&O stocks (by FUT OI, price >= Rs 100)
+    # not previously tracked, plus SIEMENS per active personal trading interest.
+    "PNB","ADANIPOWER","IOC","ASHOKLEY","BANDHANBNK","INDUSTOWER","IREDA",
+    "UNIONBANK","AMBUJACEM","BANKINDIA","BHEL","SWIGGY","CROMPTON","VBL",
+    "MANAPPURAM","BIOCON","VMM","LICI","LTF","HINDPETRO","SIEMENS",
 ]
 
 # How many trading days to look back for IVR/IVP

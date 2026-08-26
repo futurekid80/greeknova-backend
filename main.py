@@ -80,6 +80,14 @@ STOCK_NSE_MAP = {
     "IDFCFIRSTB":"NSE:IDFCFIRSTB","FEDERALBNK":"NSE:FEDERALBNK","ETERNAL":"NSE:ETERNAL",
     "POLYCAB":"NSE:POLYCAB","VOLTAS":"NSE:VOLTAS","IEX":"NSE:IEX",
     "ASTRAL":"NSE:ASTRAL",
+    # Added Aug 26 2026 — see matching comment in api/iv_analysis.py SYMBOLS
+    "PNB":"NSE:PNB","ADANIPOWER":"NSE:ADANIPOWER","IOC":"NSE:IOC",
+    "ASHOKLEY":"NSE:ASHOKLEY","BANDHANBNK":"NSE:BANDHANBNK","INDUSTOWER":"NSE:INDUSTOWER",
+    "IREDA":"NSE:IREDA","UNIONBANK":"NSE:UNIONBANK","AMBUJACEM":"NSE:AMBUJACEM",
+    "BANKINDIA":"NSE:BANKINDIA","BHEL":"NSE:BHEL","SWIGGY":"NSE:SWIGGY",
+    "CROMPTON":"NSE:CROMPTON","VBL":"NSE:VBL","MANAPPURAM":"NSE:MANAPPURAM",
+    "BIOCON":"NSE:BIOCON","VMM":"NSE:VMM","LICI":"NSE:LICI",
+    "LTF":"NSE:LTF","HINDPETRO":"NSE:HINDPETRO","SIEMENS":"NSE:SIEMENS",
 }
 
 # CMP cache — updated each capture cycle, used for ATM-centered selection
@@ -265,7 +273,15 @@ def fetch_delivery_data():
         # Check if already fetched
         # Note: removed early-exit-if-exists check — upsert is safe to re-run,
         # and this was blocking legitimate refetches when a partial/stale row existed.
-        SYMBOLS = ["RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN","BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","TITAN","SUNPHARMA","ULTRACEMCO","BAJFINANCE","WIPRO","HCLTECH","TATACONSUM","TATASTEEL","ADANIENT","POWERGRID","NTPC","ONGC","JSWSTEEL","COALINDIA","BAJAJFINSV","TECHM","APOLLOHOSP","BAJAJ-AUTO","BPCL","BRITANNIA","CIPLA","DRREDDY","EICHERMOT","GRASIM","HEROMOTOCO","HINDALCO","HDFCLIFE","INDUSINDBK","JIOFIN","M&M","NESTLEIND","SBILIFE","SHRIRAMFIN","TRENT","ADANIPORTS","BANKBARODA","BEL","CANBK","CHOLAFIN","DLF","GAIL","HAVELLS","HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL","PAYTM","NYKAA","PERSISTENT","DIXON","BSE","MCX","TMPV","LTIM","GODREJPROP","DIVISLAB","COFORGE","ANGELONE","CDSL","OIL","TVSMOTOR","BHARATFORG","MOTHERSON","ESCORTS","LUPIN","TORNTPHARM","AUROPHARMA","GODREJCP","MARICO","DABUR","PIDILITIND","UBL","MUTHOOTFIN","SBICARD","ICICIPRULI","IDFCFIRSTB","FEDERALBNK","ZOMATO","POLYCAB","VOLTAS","IRCTC","IEX","ASTRAL"]
+        # BUG FIX (Aug 26 2026): was a hardcoded, independently-maintained
+        # copy of the symbol list that had drifted out of sync -- still had
+        # retired names (LTIM, ESCORTS, UBL, IRCTC) and, critically, still
+        # said "ZOMATO" instead of "ETERNAL" after that rename, meaning
+        # ETERNAL's delivery data was silently excluded here even though
+        # NSE's own daily file lists it under the new name. Now imports the
+        # same canonical list everywhere else uses, so this can't drift
+        # again and automatically picks up future additions.
+        from api.iv_analysis import SYMBOLS
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*",
