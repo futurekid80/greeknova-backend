@@ -562,6 +562,37 @@ def force_login():
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@app.get("/alerts")
+def get_alerts(limit: int = 100, since_id: int = None):
+    """(Aug 26 2026): serves real alert history from alert_log so the
+    in-app Alerts panel can catch up on load, rather than depending
+    entirely on the live SW->open-tab postMessage relay."""
+    try:
+        supabase = get_supabase()
+        q = supabase.from_("alert_log").select("*").order("id", desc=True)
+        if since_id is not None:
+            q = q.gt("id", since_id)
+        rows = q.limit(min(limit, 200)).execute().data or []
+        alerts = [{
+            "id":         r["id"],
+            "signal":     r.get("signal"),
+            "symbol":     r.get("symbol"),
+            "strike":     r.get("strike"),
+            "optionType": r.get("option_type"),
+            "message":    r.get("message"),
+            "url":        r.get("url") or "/jungle",
+            "receivedAt": r.get("created_at"),
+            "score":      r.get("score"),
+            "bias":       r.get("bias"),
+            "oiPct":      r.get("oi_pct"),
+            "volPct":     r.get("vol_pct"),
+            "ltp":        r.get("ltp"),
+            "direction":  r.get("direction"),
+        } for r in rows]
+        return {"alerts": alerts, "count": len(alerts)}
+    except Exception as e:
+        return {"alerts": [], "count": 0, "error": str(e)}
+
 @app.get("/alerts-test")
 def alerts_test():
     try:

@@ -177,6 +177,31 @@ def broadcast_alert(supabase, alert: dict):
     """
     Send an alert to every subscribed device whose threshold the alert clears.
     """
+    # (Aug 26 2026): persist every alert to alert_log regardless of whether
+    # push delivery succeeds -- the alert itself is real even if VAPID isn't
+    # configured or every subscription happens to be dead. This is what
+    # lets the in-app Alerts panel fetch a true history on load, instead of
+    # depending entirely on the SW->open-tab postMessage relay (which only
+    # reaches tabs open at the exact moment a push fires -- native OS
+    # notifications aren't tab-dependent, but the in-app panel always was).
+    try:
+        supabase.from_("alert_log").insert({
+            "symbol":      alert.get("symbol"),
+            "signal":      alert.get("signal"),
+            "strike":      alert.get("strike"),
+            "option_type": alert.get("optionType"),
+            "message":     alert.get("message"),
+            "url":         alert.get("url"),
+            "oi_pct":      alert.get("oiPct"),
+            "vol_pct":     alert.get("volPct"),
+            "ltp":         alert.get("ltp"),
+            "score":       alert.get("score"),
+            "bias":        alert.get("bias"),
+            "direction":   alert.get("direction"),
+        }).execute()
+    except Exception as e:
+        print(f"[Push] alert_log persist failed: {e}")
+
     if not VAPID_PRIVATE_KEY:
         print("[Push] VAPID_PRIVATE_KEY not set — skipping push")
         return
