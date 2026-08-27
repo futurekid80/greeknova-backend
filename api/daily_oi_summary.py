@@ -278,7 +278,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if open_oi > 0:
                 fut_oi_chg_map_next[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
 
-        # ── Add fut_vol, fut_oi_chg_pct (+next) and fut_signal to rows ───
+        # ── Add fut_vol, fut_oi_chg_pct (+next), fut_oi_close (+next), fut_signal ───
         for row in rows:
             sym = row["symbol"]
             fut_oi = fut_oi_chg_map.get(sym, 0)
@@ -286,6 +286,10 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             row["fut_vol"]        = fut_vol_map.get(sym, 0)
             row["fut_oi_chg_pct"] = fut_oi
             row["fut_oi_chg_pct_next"] = fut_oi_chg_map_next.get(sym, None)
+            # (Aug 27 2026): absolute OI was always computed above but
+            # never persisted -- only the derived % change was stored.
+            row["fut_oi_close"] = fut_close_oi_map.get(sym, None)
+            row["fut_oi_close_next"] = fut_close_oi_map_next.get(sym, None)
             # Classify FUT signal — same logic as OI Buildup chart
             if fut_oi >= 2.0 and price >= 0.3:
                 row["fut_signal"] = "LONG_BUILDUP"

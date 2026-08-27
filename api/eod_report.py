@@ -24,7 +24,7 @@ def get_eod_report(supabase, date: str = None):
     # ── 1. FUT OI Movers ─────────────────────────────────────────────────────
     try:
         movers_res = supabase.from_("daily_oi_summary")\
-            .select("symbol, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, fut_signal, close_price, fut_vol, ce_oi, pe_oi")\
+            .select("symbol, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, fut_signal, close_price, fut_vol, ce_oi, pe_oi")\
             .eq("trade_date", date)\
             .not_.is_("fut_signal", "null")\
             .neq("fut_signal", "NEUTRAL")\
@@ -80,7 +80,7 @@ def get_eod_report(supabase, date: str = None):
     # ── 3. Stealth Buildup EOD ────────────────────────────────────────────────
     try:
         stealth_res = supabase.from_("daily_oi_summary")\
-            .select("symbol, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price, fut_signal")\
+            .select("symbol, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_signal")\
             .eq("trade_date", date)\
             .gte("fut_oi_chg_pct", 1.5)\
             .limit(200)\
@@ -108,6 +108,8 @@ def get_eod_report(supabase, date: str = None):
             "fut_oi_chg_pct": round(oi, 2),
             "fut_oi_chg_pct_next": round(oi_next, 2) if oi_next is not None else None,
             "fut_oi_chg_pct_combined": round(oi + oi_next, 2) if oi_next is not None else None,
+            "fut_oi_close": r.get("fut_oi_close"),
+            "fut_oi_close_next": r.get("fut_oi_close_next"),
             "price_chg_pct": round(price, 2),
             "close_price": float(r.get("close_price") or 0),
             "tier": tier,
@@ -140,7 +142,7 @@ def get_eod_report(supabase, date: str = None):
     # ── 6. Series Buildup snapshot ────────────────────────────────────────────
     try:
         series_res = supabase.from_("daily_oi_summary")\
-            .select("symbol, fut_signal, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price")\
+            .select("symbol, fut_signal, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price")\
             .eq("trade_date", date)\
             .in_("fut_signal", ["LONG_BUILDUP", "SHORT_BUILDUP"])\
             .gte("fut_oi_chg_pct", 2.0)\
@@ -276,6 +278,8 @@ def get_eod_report(supabase, date: str = None):
             "fut_oi_chg_pct": round(oi_now, 2),
             "fut_oi_chg_pct_next": round(oi_next, 2) if oi_next is not None else None,
             "fut_oi_chg_pct_combined": round(oi_now + oi_next, 2) if oi_next is not None else None,
+            "fut_oi_close": r.get("fut_oi_close"),
+            "fut_oi_close_next": r.get("fut_oi_close_next"),
             "price_chg_pct": round(float(r.get("price_chg_pct") or 0), 2),
             "close_price": float(r.get("close_price") or 0),
             "fut_signal": r.get("fut_signal"),

@@ -334,7 +334,7 @@ def _get_eod_pulse(supabase):
         last_trading_day = now_ist.date().isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
-        .select("symbol, oi_chg_pct, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price, fut_vol")\
+        .select("symbol, oi_chg_pct, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_vol")\
         .eq("trade_date", last_trading_day)\
         .limit(200)\
         .execute()
@@ -396,6 +396,8 @@ def _get_eod_pulse(supabase):
             "oi_chg_pct":    oi_chg,
             "fut_oi_chg_pct_next": fut_oi_chg_next,
             "fut_oi_chg_pct_combined": fut_oi_chg_combined,
+            "fut_oi_close":  r.get("fut_oi_close"),
+            "fut_oi_close_next": r.get("fut_oi_close_next"),
             "price_chg_pct": price_chg,
             "ltp":           ltp,
             "signal":        signal,
@@ -586,9 +588,11 @@ def get_oi_pulse():
         # (Aug 22 2026): next-month OI change + combined, same pattern as
         # the near-month figure above.
         fut_oi_chg_pct_next = None
+        fut_oi_next_close = None
         if not is_index and sym in fut_oi_new_next:
             fn_old = fut_oi_old_next.get(sym, 0)
             fn_new = fut_oi_new_next.get(sym, 0)
+            fut_oi_next_close = fn_new
             if fn_old > 0:
                 fut_oi_chg_pct_next = round((fn_new - fn_old) / fn_old * 100, 2)
         fut_oi_chg_pct_combined = (
@@ -605,6 +609,8 @@ def get_oi_pulse():
             "oi_chg_pct":        display_oi_chg_pct,
             "fut_oi_chg_pct_next": fut_oi_chg_pct_next,
             "fut_oi_chg_pct_combined": fut_oi_chg_pct_combined,
+            "fut_oi_close":      fut_oi_now,
+            "fut_oi_close_next": fut_oi_next_close,
             "fut_oi_now":        fut_oi_now,
             "fut_oi_prev":       fut_oi_prev,
             "has_fut_data":      has_futures_data and not is_index and sym in fut_oi_new,

@@ -109,7 +109,7 @@ def get_positional_intelligence(min_consec: int = 0):
     hist_start = (today - timedelta(days=25)).isoformat()
     try:
         hist_res = supabase.from_("daily_oi_summary")\
-            .select("symbol, trade_date, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price, fut_signal")\
+            .select("symbol, trade_date, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_signal")\
             .gte("trade_date", hist_start)\
             .lte("trade_date", today_str)\
             .order("trade_date", desc=False)\
@@ -282,6 +282,9 @@ def get_positional_intelligence(min_consec: int = 0):
                         "fut_oi_chg_pct": round(oi_chg, 2),
                         "price_chg_pct": round(price_chg, 2),
                         "fut_oi_chg_pct_next": oi_chg_next,
+                        # (Aug 27 2026): absolute OI, not just % change
+                        "fut_oi_close": latest_oi.get(s),
+                        "fut_oi_close_next": latest_oi_next.get(s),
                     }
         except Exception as e:
             print(f"[PI] Live OI fetch failed: {e}")
@@ -442,6 +445,8 @@ def get_positional_intelligence(min_consec: int = 0):
                 today_oi = live_oi_map[sym].get("fut_oi_chg_pct", 0)
                 today_price = live_oi_map[sym].get("price_chg_pct", 0)
                 today_oi_next = live_oi_map[sym].get("fut_oi_chg_pct_next", None)
+                today_oi_abs = live_oi_map[sym].get("fut_oi_close")
+                today_oi_abs_next = live_oi_map[sym].get("fut_oi_close_next")
             else:
                 today_data = next((h for h in reversed(last_15) if h["trade_date"] == today_str), None)
                 if not today_data:
@@ -449,6 +454,8 @@ def get_positional_intelligence(min_consec: int = 0):
                 today_oi = float((today_data or {}).get("fut_oi_chg_pct") or 0)
                 _next_raw = (today_data or {}).get("fut_oi_chg_pct_next")
                 today_oi_next = float(_next_raw) if _next_raw is not None else None
+                today_oi_abs = (today_data or {}).get("fut_oi_close")
+                today_oi_abs_next = (today_data or {}).get("fut_oi_close_next")
                 _raw_price_chg = (today_data or {}).get("price_chg_pct")
                 if _raw_price_chg is None:
                     continue  # Skip new stocks with no previous day close
@@ -478,6 +485,8 @@ def get_positional_intelligence(min_consec: int = 0):
                                 "today_oi_chg": round(today_oi, 2),
                                 "next_month_oi_chg": round(today_oi_next, 2) if today_oi_next is not None else None,
                                 "combined_oi_chg": today_oi_combined,
+                                "today_oi_abs": today_oi_abs,
+                                "next_month_oi_abs": today_oi_abs_next,
                                 "price_chg": round(today_price, 2),
                                 "net_delta": net_delta_map.get(sym, None),
                                 "delivery_pct": delivery_map.get(sym, None),

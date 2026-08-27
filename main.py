@@ -1574,7 +1574,7 @@ def stock_intel(symbol: str):
     # ── 1. FUT Signal (today) ─────────────────────────────────────────
     try:
         fut_res = supabase.from_("daily_oi_summary")\
-            .select("trade_date, fut_signal, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, close_price, fut_vol")\
+            .select("trade_date, fut_signal, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_vol")\
             .eq("symbol", sym)\
             .eq("trade_date", last_trading_day)\
             .limit(1).execute()
