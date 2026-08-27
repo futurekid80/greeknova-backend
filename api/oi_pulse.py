@@ -192,6 +192,26 @@ def fetch_avg_vol_5d(supabase, before_date: str) -> dict:
     return {s: sum(v[:5]) / len(v[:5]) for s, v in vol_hist_map.items() if v}
 
 
+def _has_stock_data_at(supabase, timestamp: str) -> bool:
+    """(Aug 27 2026): checks whether a representative stock (not just
+    NIFTY) actually has options data at this exact timestamp. Used to
+    fix a bug where get_prev_market_timestamp/get_latest_market_timestamp
+    picked whatever timestamp NIFTY's own capture landed on, then
+    fetch_oi_for_timestamp did an EXACT match against that timestamp for
+    every stock too -- but on days where the (much larger) stock batch
+    takes a bit longer than the 3 indices to land, that exact timestamp
+    genuinely has zero stock rows, silently zeroing out oi_prev/oi_now
+    for every single stock while indices kept working fine."""
+    result = supabase.from_("oi_snapshots")\
+        .select("symbol")\
+        .eq("symbol", "RELIANCE")\
+        .eq("timestamp", timestamp)\
+        .in_("option_type", ["CE", "PE"])\
+        .limit(1)\
+        .execute()
+    return bool(result.data)
+
+
 def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = None):
     all_rows = []
     for offset in range(0, 500000, 1000):
@@ -234,7 +254,10 @@ def get_latest_market_timestamp(supabase):
             .limit(100)\
             .execute()
         for r in (result.data or []):
-            if is_market_ts(r["timestamp"]):
+            # BUG FIX (Aug 27 2026): was returning as soon as an index
+            # timestamp passed is_market_ts, even if stocks hadn't landed
+            # for that exact timestamp yet -- see _has_stock_data_at doc.
+            if is_market_ts(r["timestamp"]) and _has_stock_data_at(supabase, r["timestamp"]):
                 return r["timestamp"]
     return None
 
@@ -250,7 +273,10 @@ def get_prev_market_timestamp(supabase, current_date: str):
         .limit(10)\
         .execute()
     for r in (result.data or []):
-        if is_market_ts(r["timestamp"]):
+        # BUG FIX (Aug 27 2026): same fix as get_latest_market_timestamp --
+        # was picking NIFTY's own first timestamp even when stocks (a much
+        # larger batch) hadn't finished landing for that exact moment yet.
+        if is_market_ts(r["timestamp"]) and _has_stock_data_at(supabase, r["timestamp"]):
             return r["timestamp"]
     # Fallback to previous day EOD
     result2 = supabase.from_("oi_snapshots")\
