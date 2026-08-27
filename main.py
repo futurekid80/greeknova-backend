@@ -13,35 +13,23 @@ from api.daily_oi_summary import compute_daily_summary
 
 
 INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
-TOP30 = [
-    # Original 30
-    "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK",
-    "HINDUNILVR","ITC","SBIN","BHARTIARTL","KOTAKBANK",
-    "LT","AXISBANK","ASIANPAINT","MARUTI","TITAN",
-    "SUNPHARMA","ULTRACEMCO","BAJFINANCE","WIPRO","HCLTECH",
-    "TATACONSUM","TATASTEEL","ADANIENT","POWERGRID","NTPC",
-    "ONGC","JSWSTEEL","COALINDIA","BAJAJFINSV","TECHM",
-    # Nifty 50 additions
-    "APOLLOHOSP","BAJAJ-AUTO","BPCL","BRITANNIA","CIPLA",
-    "DRREDDY","EICHERMOT","GRASIM","HEROMOTOCO","HINDALCO",
-    "HDFCLIFE","INDUSINDBK","JIOFIN","M&M","NESTLEIND",
-    "SBILIFE","SHRIRAMFIN","TRENT",
-    # High-liquidity F&O additions
-    "ADANIPORTS","BANKBARODA","BEL","CANBK","CHOLAFIN",
-    "DLF","GAIL","HAVELLS","HAL","INDIGO",
-    "PFC","RECLTD","SAIL","TATAPOWER","VEDL",
-    # Week 1 additions — Jun 15
-    "PAYTM","NYKAA","PERSISTENT","DIXON",
-    # Jul 2026 additions
-    "BSE","MCX","TMPV","GODREJPROP","DIVISLAB","COFORGE","ANGELONE","CDSL","OIL",
-    # Jul 18 2026 expansion — added to backfill.py/positional_radar.py/iv_analysis.py
-    # but missed here, capping live capture at 80 symbols instead of 100
-    # Jul 20 2026: ZOMATO renamed to ETERNAL on NSE; ESCORTS, IRCTC, LTIM, UBL
-    # removed — no live F&O contracts found under these tickers on Kite
-    "TVSMOTOR","BHARATFORG","MOTHERSON","LUPIN","TORNTPHARM","AUROPHARMA",
-    "GODREJCP","MARICO","DABUR","PIDILITIND","MUTHOOTFIN","SBICARD","ICICIPRULI",
-    "IDFCFIRSTB","FEDERALBNK","ETERNAL","POLYCAB","VOLTAS","IEX","ASTRAL",
-]
+# BUG FIX (Aug 27 2026): TOP30 was a hardcoded, independently-maintained
+# copy of the symbol list -- this is the list that actually drives the
+# live options-chain capture loop (INDICES + TOP30), so every time a new
+# batch of symbols got added elsewhere (iv_analysis.py, STOCK_NSE_MAP,
+# etc.) but this specific list got missed, those new symbols silently
+# got ZERO options data captured, even though futures/CMP capture for
+# them worked fine (that part correctly reads from the canonical list).
+# This has happened before -- see the old comment below, kept for
+# history -- and happened again with today's 21-symbol addition (PNB,
+# SIEMENS, and 19 others had zero CE/PE rows captured all day as a
+# result). Now derived from the single canonical list so it can't drift
+# out of sync again.
+#   Old comment (Jul 18 2026): "expansion — added to backfill.py/
+#   positional_radar.py/iv_analysis.py but missed here, capping live
+#   capture at 80 symbols instead of 100"
+from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
+TOP30 = [s for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY")]
 INDEX_NSE_MAP = {"NIFTY":"NSE:NIFTY 50","BANKNIFTY":"NSE:NIFTY BANK","FINNIFTY":"NSE:NIFTY FIN SERVICE"}
 STOCK_NSE_MAP = {
     "RELIANCE":"NSE:RELIANCE","TCS":"NSE:TCS","HDFCBANK":"NSE:HDFCBANK",
