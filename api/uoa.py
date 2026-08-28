@@ -1,5 +1,5 @@
 from utils.db import get_supabase
-from datetime import datetime, timezone, date as date_type
+from datetime import datetime, timezone, timedelta, date as date_type
 import time as time_module
 
 # Persistence cache
@@ -106,11 +106,26 @@ def get_uoa(date: str = None):
 
     # ── Fetch snapshots — capped at 10000 rows (more than enough for 66 stocks)
     def fetch_snapshot(ts):
+        # BUG FIX (Aug 28 2026): was an exact-timestamp match, but capture
+        # writes each symbol's options chain at a slightly different
+        # sub-second timestamp within the same ~5min cycle -- not every
+        # symbol lands in the same instant. An exact match against one
+        # anchor timestamp (derived from NIFTY's own capture time)
+        # silently excluded whichever symbols didn't happen to align to
+        # it, making live-active signals for those symbols appear to
+        # vanish even though nothing about the market pattern had
+        # actually changed. Now widens to a window and keeps only the
+        # latest row per (symbol, option_type, strike), so every symbol
+        # gets its own true latest data instead of being excluded by a
+        # timing coincidence.
+        ts_dt = datetime.fromisoformat(ts.replace('+00:00', '')).replace(tzinfo=timezone.utc)
+        window_start = (ts_dt - timedelta(minutes=4)).isoformat()
         rows = []
-        for offset in range(0, 10000, 1000):
+        for offset in range(0, 200000, 1000):
             batch = supabase.from_("oi_snapshots")\
                 .select("*")\
-                .eq("timestamp", ts)\
+                .gte("timestamp", window_start)\
+                .lte("timestamp", ts)\
                 .range(offset, offset + 999)\
                 .execute()
             if not batch.data:
@@ -118,7 +133,12 @@ def get_uoa(date: str = None):
             rows.extend(batch.data)
             if len(batch.data) < 1000:
                 break
-        return rows
+        latest_by_key: dict = {}
+        for r in rows:
+            key = (r.get("symbol"), r.get("option_type"), r.get("strike"))
+            if key not in latest_by_key or r["timestamp"] > latest_by_key[key]["timestamp"]:
+                latest_by_key[key] = r
+        return list(latest_by_key.values())
 
     new_data_raw   = fetch_snapshot(ts_new)
     open_data_raw  = fetch_snapshot(ts_open)
