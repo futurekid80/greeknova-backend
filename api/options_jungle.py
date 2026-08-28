@@ -94,7 +94,14 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
                 break
         latest_by_key: dict = {}
         for r in rows:
-            key = (r.get("symbol"), r.get("option_type"), r.get("strike"))
+            # BUG FIX (Aug 28 2026): key was missing expiry -- a strike
+            # can have multiple expiries active at once (e.g. Sep and Oct
+            # contracts at the same strike), and collapsing them into one
+            # row here (before nearest_expiry_map/filter_to_nearest_expiry
+            # even runs) could arbitrarily discard the real near-month
+            # contract in favor of a near-empty far-month one, making a
+            # strike's OI look like it randomly collapsed some cycles.
+            key = (r.get("symbol"), r.get("option_type"), r.get("strike"), r.get("expiry"))
             if key not in latest_by_key or r["timestamp"] > latest_by_key[key]["timestamp"]:
                 latest_by_key[key] = r
         return list(latest_by_key.values())
