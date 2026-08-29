@@ -126,16 +126,27 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     days = PERIOD_DAYS.get(period, 5)
     today = datetime.now().date()
 
+    # BUG FIX (Aug 29 2026): series_start was only looked up for
+    # "monthly" -- but a plain 5-trading-day rolling window for
+    # "weekly" can ALSO cross a series rollover whenever expiry falls
+    # within the last 5 trading days (same artificial-huge-single-day-%
+    # problem the monthly path was already protected against, just
+    # rarer). Confirmed live: Aug's series expired inside the
+    # 24-28 Aug weekly window, showing ~-50 to -60% "OI collapse" on
+    # many stocks simultaneously that was really just the new
+    # September contract's naturally-low starting OI being compared
+    # against August's built-up OI, not genuine unwinding. Now looked
+    # up for both periods; used below to trim (not just anchor) the
+    # weekly window so it never straddles two different contracts.
     series_start = None
-    if period == "monthly":
-        try:
-            from api.positional_radar import get_current_expiry, get_series_start
-            expiry = get_current_expiry(today)
-            series_start = get_series_start(expiry)
-        except Exception as e:
-            print(f"[OIBuildup] Series start lookup failed, falling back to rolling window: {e}")
+    try:
+        from api.positional_radar import get_current_expiry, get_series_start
+        expiry = get_current_expiry(today)
+        series_start = get_series_start(expiry)
+    except Exception as e:
+        print(f"[OIBuildup] Series start lookup failed, falling back to rolling window: {e}")
 
-    if series_start:
+    if period == "monthly" and series_start:
         lookback_start = series_start
     else:
         lookback_start = (today - timedelta(days=int(days * 4.4) + 7)).isoformat()
@@ -154,7 +165,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         by_symbol.setdefault(r["symbol"], []).append(r)
 
     prev_by_symbol: dict = {}
-    if series_start:
+    if period == "monthly" and series_start:
         try:
             prev_start = _prev_month_series_start(today)
             prev_end = (datetime.strptime(series_start, "%Y-%m-%d").date() - timedelta(days=1)).isoformat()
@@ -173,8 +184,22 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     results = []
     for sym, rows in by_symbol.items():
         rows_sorted = sorted(rows, key=lambda r: r["trade_date"])
-        window = rows_sorted if series_start else rows_sorted[-days:]
-        min_days = 3 if series_start else days
+        if series_start:
+            same_series_rows = [r for r in rows_sorted if r["trade_date"] >= series_start]
+        else:
+            same_series_rows = rows_sorted
+        if period == "monthly":
+            window = same_series_rows
+            min_days = 3
+        else:
+            # BUG FIX (Aug 29 2026): was rows_sorted[-days:] with no
+            # series awareness -- trim to same-series rows first, THEN
+            # take the last `days` of those. Right after a rollover this
+            # naturally yields a shorter-than-5-day window (all from the
+            # new series) instead of a 5-day window that silently spans
+            # two different contracts.
+            window = same_series_rows[-days:]
+            min_days = 2
         if len(window) < min_days:
             continue
 
@@ -202,7 +227,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         avg_vol = vol_total / actual_days if actual_days else 0
 
         prev_avg_vol = None
-        if series_start:
+        if period == "monthly" and series_start:
             prev_rows = prev_by_symbol.get(sym, [])
             if prev_rows:
                 prev_total = sum(int(r.get("fut_vol") or 0) for r in prev_rows)
