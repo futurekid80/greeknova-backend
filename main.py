@@ -153,10 +153,29 @@ def run_full_capture():
             fut_expiries = sorted(set(i["expiry"] for i in fut_instruments))
             num_expiries = 3 if is_index else 2
 
+            # BUG FIX (Aug 31 2026): was expiries[:num_expiries] -- a naive
+            # nearest-N-by-date slice. For an index with several weekly
+            # expiries ahead of the monthly (e.g. NIFTY with 3 weeklies
+            # before its Sep-29 monthly), this silently pushed the monthly
+            # expiry's OPTIONS out of the captured set entirely -- only its
+            # FUTURES contract got captured (via fut_expiries below, which
+            # only ever contains monthly dates), so OI Profile and anything
+            # else requesting the monthly expiry's options got "No strike
+            # data" even though the expiry itself showed up as selectable
+            # (a row existed for it, just the lone FUT row). fut_expiries[0]
+            # is always the nearest monthly (futures have no weeklies), so
+            # it's now explicitly included even when it falls outside the
+            # naive nearest-N-by-date options slice.
+            selected_expiries = list(expiries[:num_expiries])
+            if is_index and fut_expiries:
+                nearest_monthly = fut_expiries[0]
+                if nearest_monthly in expiries and nearest_monthly not in selected_expiries:
+                    selected_expiries.append(nearest_monthly)
+
             current_price = _last_cmp.get(symbol, 0)
 
             nearest = []
-            for exp in expiries[:num_expiries]:
+            for exp in selected_expiries:
                 exp_instruments = [i for i in found if i["expiry"] == exp]
                 if not exp_instruments:
                     continue
