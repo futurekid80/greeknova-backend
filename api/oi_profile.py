@@ -45,19 +45,43 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     # This broke the dropdown after the very first auto-triggered re-fetch
     # (page loads with expiry=None -> gets full list -> sets expiry state ->
     # re-fetches WITH that expiry -> list collapses to 1).
-    all_rows_unfiltered = []
+    #
+    # BUG FIX (Aug 31 2026): the fetch below was .eq("timestamp", eod_ts) --
+    # an exact match. Monthly (and far-month) expiries have far more strikes
+    # than the nearest weekly, so their rows can take noticeably longer to
+    # capture within the same ~5min cycle and land at a slightly different
+    # sub-timestamp than whatever "latest overall" happened to be at that
+    # instant. An exact match against one anchor timestamp then silently
+    # excludes that expiry's rows entirely -- confirmed live: requesting
+    # NIFTY's Sep-29 monthly returned "No strike data" while the Sep-01
+    # weekly (captured faster, fewer strikes) worked fine, even though both
+    # were genuinely present in the database. Same bug class already fixed
+    # this week in uoa.py/options_jungle.py. Now widens to a window and
+    # keeps only the latest row per (strike, option_type, expiry).
+    from_dt = datetime.fromisoformat(eod_ts.replace('+00:00', '')).replace(tzinfo=timezone.utc)
+    window_start = (from_dt - timedelta(minutes=5)).isoformat()
+
+    raw_rows = []
     for offset in range(0, 50000, 1000):
         batch = supabase.from_("oi_snapshots")\
-            .select("strike, option_type, oi, expiry")\
+            .select("strike, option_type, oi, expiry, timestamp")\
             .eq("symbol", symbol)\
-            .eq("timestamp", eod_ts)\
+            .gte("timestamp", window_start)\
+            .lte("timestamp", eod_ts)\
             .range(offset, offset + 999)\
             .execute()
         if not batch.data:
             break
-        all_rows_unfiltered.extend(batch.data)
+        raw_rows.extend(batch.data)
         if len(batch.data) < 1000:
             break
+
+    latest_by_key: dict = {}
+    for r in raw_rows:
+        key = (r.get("strike"), r.get("option_type"), r.get("expiry"))
+        if key not in latest_by_key or r["timestamp"] > latest_by_key[key]["timestamp"]:
+            latest_by_key[key] = r
+    all_rows_unfiltered = list(latest_by_key.values())
 
     if not all_rows_unfiltered:
         return {"error": "No OI data found"}
