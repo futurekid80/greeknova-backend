@@ -403,6 +403,19 @@ async def lifespan(app: FastAPI):
         _run_spot_volume_eod, "cron", hour=16, minute=0, timezone="Asia/Kolkata",
         id="spot_volume_eod", misfire_grace_time=600
     )
+
+    def _run_sector_index_eod():
+        try:
+            from services.kite_auth import get_kite_client
+            from utils.db import get_supabase
+            from services.sector_index_capture import append_todays_sector_index_bar
+            append_todays_sector_index_bar(get_supabase(), get_kite_client())
+        except Exception as e:
+            print(f"[SECTOR_IDX] EOD job failed: {e}")
+    scheduler.add_job(
+        _run_sector_index_eod, "cron", hour=16, minute=5, timezone="Asia/Kolkata",
+        id="sector_index_eod", misfire_grace_time=600
+    )
     # FIX (Aug 8 2026): removed weekly_archive from the in-process
     # scheduler -- see /run-archive-watchdog docstring for the full
     # incident and rationale. Now triggered externally via Railway Cron
