@@ -416,6 +416,28 @@ async def lifespan(app: FastAPI):
         _run_sector_index_eod, "cron", hour=16, minute=5, timezone="Asia/Kolkata",
         id="sector_index_eod", misfire_grace_time=600
     )
+
+    def _run_sector_index_live():
+        from datetime import datetime, timezone, timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(ist)
+        if now.weekday() >= 5: return
+        from utils.market_calendar import is_trading_day
+        if not is_trading_day(now.date()): return
+        if not (9 <= now.hour <= 15): return
+        if now.hour == 9 and now.minute < 15: return
+        if now.hour == 15 and now.minute > 40: return
+        try:
+            from services.kite_auth import get_kite_client
+            from utils.db import get_supabase
+            from services.sector_index_capture import capture_live_sector_index_snapshot
+            capture_live_sector_index_snapshot(get_supabase(), get_kite_client())
+        except Exception as e:
+            print(f"[SECTOR_IDX] Live job failed: {e}")
+    scheduler.add_job(
+        _run_sector_index_live, "interval", minutes=5,
+        id="sector_index_live", misfire_grace_time=120
+    )
     # FIX (Aug 8 2026): removed weekly_archive from the in-process
     # scheduler -- see /run-archive-watchdog docstring for the full
     # incident and rationale. Now triggered externally via Railway Cron

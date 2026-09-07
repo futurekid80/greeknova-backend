@@ -62,3 +62,46 @@ def append_todays_sector_index_bar(supabase, kite):
             .upsert(rows, on_conflict="index_symbol,trade_date").execute()
     print(f"[SECTOR_IDX] EOD append — {len(rows)} sector index bars added for {today}")
     return {"status": "complete", "bars_added": len(rows), "date": today}
+
+
+def capture_live_sector_index_snapshot(supabase, kite):
+    """Intraday sector-index update — meant to run every 5 min during
+    market hours, same cadence as the main OI capture. Uses Kite's live
+    quote (which already carries today's running open/high/low + last
+    traded price for each index) rather than historical_data, so it's a
+    single lightweight batched call instead of 18 separate historical
+    calls. Upserts today's row for every index, so the Sector Strength
+    page's ranking updates live through the day instead of only once
+    after close."""
+    today = time.strftime("%Y-%m-%d")
+    quote_symbols = [f"NSE:{symbol}" for symbol in SECTOR_INDEX_TOKENS]
+
+    try:
+        quotes = kite.quote(quote_symbols)
+    except Exception as e:
+        print(f"[SECTOR_IDX] Live quote fetch failed: {e}")
+        return {"status": "error", "error": str(e)}
+
+    rows = []
+    for symbol in SECTOR_INDEX_TOKENS:
+        key = f"NSE:{symbol}"
+        q = quotes.get(key)
+        if not q:
+            continue
+        ohlc = q.get("ohlc", {})
+        try:
+            rows.append({
+                "index_symbol": symbol,
+                "trade_date": today,
+                "open": float(ohlc.get("open") or q.get("last_price", 0)),
+                "high": float(ohlc.get("high") or q.get("last_price", 0)),
+                "low": float(ohlc.get("low") or q.get("last_price", 0)),
+                "close": float(q.get("last_price", 0)),
+            })
+        except Exception as e:
+            print(f"[SECTOR_IDX] Live parse {symbol} failed: {e}")
+
+    if rows:
+        supabase.table("sector_index_daily_bars")\
+            .upsert(rows, on_conflict="index_symbol,trade_date").execute()
+    return {"status": "complete", "bars_updated": len(rows), "date": today}
