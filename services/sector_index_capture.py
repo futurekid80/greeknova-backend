@@ -74,18 +74,17 @@ def capture_live_sector_index_snapshot(supabase, kite):
     page's ranking updates live through the day instead of only once
     after close."""
     today = time.strftime("%Y-%m-%d")
-    quote_symbols = [f"NSE:{symbol}" for symbol in SECTOR_INDEX_TOKENS]
+    tokens = list(SECTOR_INDEX_TOKENS.values())
 
     try:
-        quotes = kite.quote(quote_symbols)
+        quotes = kite.quote(tokens)
     except Exception as e:
         print(f"[SECTOR_IDX] Live quote fetch failed: {e}")
         return {"status": "error", "error": str(e)}
 
     rows = []
-    for symbol in SECTOR_INDEX_TOKENS:
-        key = f"NSE:{symbol}"
-        q = quotes.get(key)
+    for symbol, token in SECTOR_INDEX_TOKENS.items():
+        q = quotes.get(str(token)) or quotes.get(token)
         if not q:
             continue
         ohlc = q.get("ohlc", {})
@@ -104,4 +103,5 @@ def capture_live_sector_index_snapshot(supabase, kite):
     if rows:
         supabase.table("sector_index_daily_bars")\
             .upsert(rows, on_conflict="index_symbol,trade_date").execute()
+    print(f"[SECTOR_IDX] Live update — {len(rows)}/{len(SECTOR_INDEX_TOKENS)} sector indices updated for {today}")
     return {"status": "complete", "bars_updated": len(rows), "date": today}
