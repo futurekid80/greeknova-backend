@@ -169,6 +169,8 @@ def get_gamma_squeeze(date: str = None):
     # — this IS the support/resistance level per the strategy ──────────────
     key_strikes: dict = {}  # (symbol, option_type) -> row with max OI
     for row in new_data:
+        if row.get("option_type") not in ("CE", "PE"):
+            continue  # skip futures rows — this strategy is options-only
         oi = row.get("oi") or 0
         if oi < MIN_OPEN_OI:
             continue
