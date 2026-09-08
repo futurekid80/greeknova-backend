@@ -69,7 +69,7 @@ def get_gamma_squeeze(date: str = None):
 
     timestamps = sorted(set(r["timestamp"] for r in all_ts_rows))
     if len(timestamps) < 2:
-        return {"signals": [], "total": 0, "date": today}
+        return {"signals": [], "total": 0, "date": today, "watchlist": []}
 
     ts_open   = timestamps[0]
     ts_new    = timestamps[-1]
@@ -188,6 +188,7 @@ def get_gamma_squeeze(date: str = None):
     mins_30min_to_new  = elapsed_minutes(ts_30min, ts_new)
 
     squeezes = []
+    watchlist = []
     for (sym, opt_type), row in key_strikes.items():
         ts_sym = row["tradingsymbol"]
         key    = f"{sym}_{ts_sym}"
@@ -228,8 +229,13 @@ def get_gamma_squeeze(date: str = None):
             ltp_chg_30min_pct > LTP_RISE_30MIN_PCT and
             vol_spike_ratio >= VOL_SPIKE_RATIO_MIN
         )
-        if not triggered:
-            continue
+
+        # How close each leg is to firing (0-100%), so a near-miss is visibly
+        # near-miss rather than lumped in with something nowhere close.
+        oi_leg_pct  = round(min(100, max(0, (-oi_chg_30min_pct / -OI_DECLINE_30MIN_PCT) * 100)), 0)
+        ltp_leg_pct = round(min(100, max(0, (ltp_chg_30min_pct / LTP_RISE_30MIN_PCT) * 100)), 0)
+        vol_leg_pct = round(min(100, max(0, (vol_spike_ratio / VOL_SPIKE_RATIO_MIN) * 100)), 0)
+        legs_met = int(oi_chg_30min_pct < OI_DECLINE_30MIN_PCT) + int(ltp_chg_30min_pct > LTP_RISE_30MIN_PCT) + int(vol_spike_ratio >= VOL_SPIKE_RATIO_MIN)
 
         cmp = cmp_map.get(sym, 0)
         dte = dte_map.get(sym, None)
@@ -263,7 +269,7 @@ def get_gamma_squeeze(date: str = None):
             expiry_weight
         )
 
-        squeezes.append({
+        row_out = {
             "symbol":              sym,
             "tradingsymbol":       ts_sym,
             "strike":              float(strike),
@@ -284,9 +290,22 @@ def get_gamma_squeeze(date: str = None):
             "bias":                bias,
             "label":               label,
             "desc":                desc,
-        })
+            "triggered":           triggered,
+            "legs_met":            legs_met,
+            "oi_leg_pct":          oi_leg_pct,
+            "ltp_leg_pct":         ltp_leg_pct,
+            "vol_leg_pct":         vol_leg_pct,
+        }
+        watchlist.append(row_out)
+        if triggered:
+            squeezes.append(row_out)
 
     squeezes.sort(key=lambda x: x["squeeze_score"], reverse=True)
+    # Watchlist: everything NOT already triggered (those are in "signals"),
+    # ranked by how close it is to qualifying — most legs met first, then by
+    # score, so a 2-of-3 near-miss always sits above a 0-of-3 non-starter.
+    watchlist = [w for w in watchlist if not w["triggered"]]
+    watchlist.sort(key=lambda x: (x["legs_met"], x["squeeze_score"]), reverse=True)
 
     def to_ist(ts):
         try:
@@ -304,6 +323,7 @@ def get_gamma_squeeze(date: str = None):
         "close_time":     to_ist(ts_new),
         "total":          len(squeezes),
         "signals":        squeezes[:40],
+        "watchlist":      watchlist[:60],
         "is_post_market": post_market,
     }
 
