@@ -124,7 +124,12 @@ def get_gamma_squeeze(date: str = None):
         except Exception:
             dte_map[sym] = 999
 
-    eligible_symbols = {sym for sym, dte in dte_map.items() if 0 <= dte <= MAX_DAYS_TO_EXPIRY}
+    # No longer a hard cutoff — every symbol with a valid upcoming expiry is
+    # eligible. Days-to-expiry instead becomes a conviction tag + score weight
+    # (near-expiry setups match the podcast's stated conditions best; early-
+    # cycle ones can still be real moves, just lower conviction per their own
+    # caveat, so we surface them tagged rather than hiding them).
+    eligible_symbols = {sym for sym, dte in dte_map.items() if dte >= 0}
 
     def filter_rows(rows):
         return [
@@ -228,6 +233,14 @@ def get_gamma_squeeze(date: str = None):
 
         cmp = cmp_map.get(sym, 0)
         dte = dte_map.get(sym, None)
+        near_expiry = dte is not None and dte <= MAX_DAYS_TO_EXPIRY
+        conviction = "HIGH" if near_expiry else "LOW"
+        conviction_note = (
+            f"Within {MAX_DAYS_TO_EXPIRY} days of expiry — matches the strategy's conditions"
+            if near_expiry else
+            f"{dte} days to expiry — outside the last-{MAX_DAYS_TO_EXPIRY}-day window the strategy "
+            f"is built for, so writers may not be under real pressure to cover yet; treat as lower conviction"
+        )
 
         bias  = "BULLISH" if opt_type == "CE" else "BEARISH"
         level_kind = "Resistance" if opt_type == "CE" else "Support"
@@ -240,11 +253,14 @@ def get_gamma_squeeze(date: str = None):
             f"writers being forced to cover"
         )
 
+        # Near-expiry setups score meaningfully higher (per the strategy's own
+        # caveat); far-from-expiry ones still surface, just lower-ranked.
+        expiry_weight = max(0, MAX_DAYS_TO_EXPIRY - dte) * 0.4 if near_expiry else -5
         squeeze_score = (
             abs(oi_chg_30min_pct) * 0.6 +
             ltp_chg_30min_pct * 0.8 +
             min(vol_spike_ratio, 5) * 3 +
-            (max(0, MAX_DAYS_TO_EXPIRY - dte) * 0.4 if dte is not None else 0)
+            expiry_weight
         )
 
         squeezes.append({
@@ -262,6 +278,8 @@ def get_gamma_squeeze(date: str = None):
             "volume":              new_vol,
             "vol_spike_ratio":     round(vol_spike_ratio, 2),
             "days_to_expiry":      dte,
+            "conviction":          conviction,
+            "conviction_note":     conviction_note,
             "squeeze_score":       round(squeeze_score, 1),
             "bias":                bias,
             "label":               label,
