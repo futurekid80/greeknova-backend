@@ -1203,6 +1203,11 @@ def uoa(date: str = None):
     from api.uoa import get_uoa
     return get_uoa(date)
 
+@app.get("/gamma-squeeze")
+def gamma_squeeze(date: str = None):
+    from services.gamma_squeeze import get_gamma_squeeze
+    return get_gamma_squeeze(date)
+
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
