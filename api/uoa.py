@@ -422,7 +422,14 @@ def get_uoa(date: str = None):
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
 
     # Persistence tracking
-    total_snaps = 1
+    # Lightweight exact-count query (replaces the removed full timestamps list)
+    count_res = supabase.from_("oi_snapshots")\
+        .select("timestamp", count="exact")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .limit(1).execute()
+    total_snaps = count_res.count or 0
     for sig in uoa_signals:
         ts_key = sig["tradingsymbol"]
         if ts_key not in _signal_history:
@@ -451,7 +458,7 @@ def get_uoa(date: str = None):
         "date":              today,
         "total":             len(uoa_signals),
         "signals":           uoa_signals[:50],
-        "snapshot_count":    len(timestamps),
+        "snapshot_count":    total_snaps,
         "mins_to_close":     max(0, mins_to_close),
         "is_post_market":    post_market,
         "market_close_time": "15:40",
