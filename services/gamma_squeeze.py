@@ -275,14 +275,25 @@ def get_gamma_squeeze(date: str = None):
         ltp_chg_30min_pct = (new_ltp - min30_ltp) / min30_ltp * 100
         oi_chg_from_open_pct = ((new_oi - open_oi) / open_oi * 100) if open_oi > 0 else 0
 
-        baseline_rate = max(0.0, (min30_vol - open_vol)) / mins_open_to_30min
-        recent_rate   = max(0.0, (new_vol - min30_vol)) / mins_30min_to_new
-        if baseline_rate > 0:
-            vol_spike_ratio = recent_rate / baseline_rate
+        if using_open_fallback:
+            # No real "prior 30 min" exists yet to split into baseline vs.
+            # recent — min30 IS open here, so baseline_rate would always be
+            # exactly 0 and (with the eased vol threshold starting at 1.2x,
+            # not below 1.0x) that used to make the volume leg impossible to
+            # clear during this whole window regardless of actual volume.
+            # There's nothing meaningful to compare against yet, so don't
+            # gate on it here — the OI-unwind + premium-rise combination is
+            # already the real signal this early.
+            vol_spike_ratio = vol_thresh_now
         else:
-            # No real baseline yet (early session) — fall back to whether
-            # there's at least real recent activity, don't just pass everyone.
-            vol_spike_ratio = 1.0 if recent_rate > 0 else 0.0
+            baseline_rate = max(0.0, (min30_vol - open_vol)) / mins_open_to_30min
+            recent_rate   = max(0.0, (new_vol - min30_vol)) / mins_30min_to_new
+            if baseline_rate > 0:
+                vol_spike_ratio = recent_rate / baseline_rate
+            else:
+                # No real baseline yet — fall back to whether there's at
+                # least real recent activity, don't just pass everyone.
+                vol_spike_ratio = 1.0 if recent_rate > 0 else 0.0
 
         triggered = (
             oi_chg_30min_pct < oi_thresh_now and
