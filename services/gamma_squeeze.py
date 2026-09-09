@@ -27,14 +27,41 @@ _gs_cache: dict = {}
 _gs_cache_time: float = 0
 GS_CACHE_TTL = 240  # 4 minutes
 
-from api.uoa import is_market_hours, is_post_market
+from api.uoa import is_market_hours, is_post_market, MARKET_OPEN_UTC
 
 # ── Tunable thresholds ────────────────────────────────────────────────────
+# These are the STANDARD (steady-state) thresholds, in force from
+# EASE_WINDOW_MINUTES after market open onward.
 OI_DECLINE_30MIN_PCT = -4.0   # key strike's OI must have fallen at least this much in ~30 min
 LTP_RISE_30MIN_PCT   = 3.0    # key strike's own premium must have risen at least this much in ~30 min
 VOL_SPIKE_RATIO_MIN  = 1.5    # recent 30-min volume rate vs. the session's baseline rate before that
 MAX_DAYS_TO_EXPIRY   = 14     # podcast: avoid the first ~2 weeks of a fresh monthly contract
 MIN_OPEN_OI          = 5000   # ignore illiquid strikes so "highest OI" isn't noise
+
+# ── Opening-window easing ──────────────────────────────────────────────────
+# Right at 9:15 IST there's simply been less time for a real 30-min OI/vol/
+# premium move to build up, so the standard thresholds under-fire near the
+# open even when a genuine squeeze is forming (e.g. TATASTEEL's OI was down
+# 30%+ for the whole day, but any single 30-min slice early on looked mild).
+# Start looser at the open and linearly tighten back up to the standard
+# thresholds by EASE_WINDOW_MINUTES in.
+EASE_WINDOW_MINUTES     = 75    # 9:15 -> ~10:30 IST
+OI_DECLINE_30MIN_PCT_OPEN = -2.0
+LTP_RISE_30MIN_PCT_OPEN   = 1.5
+VOL_SPIKE_RATIO_MIN_OPEN  = 1.2
+
+
+def _eased_thresholds(ts_new_dt: datetime):
+    """Returns (oi_threshold, ltp_threshold, vol_threshold) for the given
+    capture time — loosest right at market open, linearly reaching the
+    standard thresholds by EASE_WINDOW_MINUTES after open, unchanged after
+    that."""
+    mins_since_open = (ts_new_dt.hour * 60 + ts_new_dt.minute) - MARKET_OPEN_UTC
+    frac = max(0.0, min(1.0, mins_since_open / EASE_WINDOW_MINUTES))
+    oi_thresh  = OI_DECLINE_30MIN_PCT_OPEN + (OI_DECLINE_30MIN_PCT - OI_DECLINE_30MIN_PCT_OPEN) * frac
+    ltp_thresh = LTP_RISE_30MIN_PCT_OPEN   + (LTP_RISE_30MIN_PCT   - LTP_RISE_30MIN_PCT_OPEN)   * frac
+    vol_thresh = VOL_SPIKE_RATIO_MIN_OPEN  + (VOL_SPIKE_RATIO_MIN  - VOL_SPIKE_RATIO_MIN_OPEN)  * frac
+    return oi_thresh, ltp_thresh, vol_thresh
 
 
 def get_gamma_squeeze(date: str = None):
@@ -201,6 +228,10 @@ def get_gamma_squeeze(date: str = None):
     mins_open_to_30min = elapsed_minutes(ts_open, ts_30min)
     mins_30min_to_new  = elapsed_minutes(ts_30min, ts_new)
 
+    # Thresholds for THIS request, eased if we're still within the opening
+    # window — computed once per request/capture, not per strike.
+    oi_thresh_now, ltp_thresh_now, vol_thresh_now = _eased_thresholds(ts_new_dt)
+
     squeezes = []
     watchlist = []
     for (sym, opt_type), row in key_strikes.items():
@@ -239,17 +270,17 @@ def get_gamma_squeeze(date: str = None):
             vol_spike_ratio = 1.0 if recent_rate > 0 else 0.0
 
         triggered = (
-            oi_chg_30min_pct < OI_DECLINE_30MIN_PCT and
-            ltp_chg_30min_pct > LTP_RISE_30MIN_PCT and
-            vol_spike_ratio >= VOL_SPIKE_RATIO_MIN
+            oi_chg_30min_pct < oi_thresh_now and
+            ltp_chg_30min_pct > ltp_thresh_now and
+            vol_spike_ratio >= vol_thresh_now
         )
 
         # How close each leg is to firing (0-100%), so a near-miss is visibly
         # near-miss rather than lumped in with something nowhere close.
-        oi_leg_pct  = round(min(100, max(0, (-oi_chg_30min_pct / -OI_DECLINE_30MIN_PCT) * 100)), 0)
-        ltp_leg_pct = round(min(100, max(0, (ltp_chg_30min_pct / LTP_RISE_30MIN_PCT) * 100)), 0)
-        vol_leg_pct = round(min(100, max(0, (vol_spike_ratio / VOL_SPIKE_RATIO_MIN) * 100)), 0)
-        legs_met = int(oi_chg_30min_pct < OI_DECLINE_30MIN_PCT) + int(ltp_chg_30min_pct > LTP_RISE_30MIN_PCT) + int(vol_spike_ratio >= VOL_SPIKE_RATIO_MIN)
+        oi_leg_pct  = round(min(100, max(0, (-oi_chg_30min_pct / -oi_thresh_now) * 100)), 0)
+        ltp_leg_pct = round(min(100, max(0, (ltp_chg_30min_pct / ltp_thresh_now) * 100)), 0)
+        vol_leg_pct = round(min(100, max(0, (vol_spike_ratio / vol_thresh_now) * 100)), 0)
+        legs_met = int(oi_chg_30min_pct < oi_thresh_now) + int(ltp_chg_30min_pct > ltp_thresh_now) + int(vol_spike_ratio >= vol_thresh_now)
 
         cmp = cmp_map.get(sym, 0)
         dte = dte_map.get(sym, None)
