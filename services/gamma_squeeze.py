@@ -49,31 +49,43 @@ def get_gamma_squeeze(date: str = None):
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     post_market = is_post_market()
 
-    # ── Distinct capture timestamps for today (anchored on NIFTY, which is
-    # written every cycle) ────────────────────────────────────────────────
-    all_ts_rows = []
-    for offset in range(0, 50000, 1000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .lt("timestamp",  f"{today}T23:59:59+00:00")\
-            .order("timestamp", desc=False)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        all_ts_rows.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+    # ── First and last capture today for NIFTY (written every cycle) ───────
+    # NOTE: previously this paginated through every row with .range() ordered
+    # only by `timestamp` to build a de-duplicated list of distinct capture
+    # times. That's unsafe — dozens of NIFTY strikes share the exact same
+    # timestamp per capture cycle, so ordering with no tie-breaker makes
+    # Supabase's offset pagination non-deterministic: a page can come back
+    # short mid-way through the day, the "stop when a page has <1000 rows"
+    # check reads that as reaching the end, and the real latest captures
+    # (everything after that point) get silently dropped — which is exactly
+    # why this was stuck reporting a stale "latest" time for hours. Two
+    # direct MIN/MAX queries can't have that failure mode.
+    open_row = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(1).execute()
+    new_row = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
 
-    timestamps = sorted(set(r["timestamp"] for r in all_ts_rows))
-    if len(timestamps) < 2:
+    if not open_row.data or not new_row.data:
         return {"signals": [], "total": 0, "date": today, "watchlist": []}
 
-    ts_open   = timestamps[0]
-    ts_new    = timestamps[-1]
-    ts_30min  = timestamps[max(0, len(timestamps) - 7)]  # ~30 min back at 5-min cadence
+    ts_open = open_row.data[0]["timestamp"]
+    ts_new  = new_row.data[0]["timestamp"]
+    if ts_open == ts_new:
+        return {"signals": [], "total": 0, "date": today, "watchlist": []}
+
+    ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
+    ts_30min  = (ts_new_dt - timedelta(minutes=30)).isoformat()  # fetch_snapshot below
+    # widens this into a search window anyway, so an approximate anchor is fine.
 
     def fetch_snapshot(ts):
         ts_dt = datetime.fromisoformat(ts.replace('+00:00', '')).replace(tzinfo=timezone.utc)

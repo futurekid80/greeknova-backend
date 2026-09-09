@@ -56,47 +56,54 @@ def get_uoa(date: str = None):
     live = is_market_hours()
     post_market = is_post_market()
 
-    # ── Get ALL distinct timestamps ───────────────────────────────────────────
-    all_ts_rows = []
-    for offset in range(0, 50000, 1000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .lt("timestamp",  f"{today}T23:59:59+00:00")\
-            .order("timestamp", desc=False)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        all_ts_rows.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+    # ── First and last capture today for NIFTY ──────────────────────────────
+    # NOTE: previously this paginated through every row with .range() ordered
+    # only by `timestamp` to build a de-duplicated list of distinct capture
+    # times. That's unsafe — many strikes share the exact same timestamp per
+    # capture cycle, so ordering with no tie-breaker makes Supabase's offset
+    # pagination non-deterministic: a page can come back short mid-way
+    # through the day, the "stop when a page has <1000 rows" check reads
+    # that as reaching the end, and the real latest captures (everything
+    # after that point) get silently dropped — causing this feed to get
+    # stuck reporting a stale "latest" time for hours. Two direct MIN/MAX
+    # queries can't have that failure mode.
+    open_row = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=False)\
+        .limit(1).execute()
+    new_row = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", "NIFTY")\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
 
-    timestamps = sorted(set(r["timestamp"] for r in all_ts_rows))
+    if not open_row.data or not new_row.data:
+        # Fallback: no NIFTY rows today at all — fall back to the most
+        # recent captures across any symbol (same intent as the old
+        # fallback block, just without the fragile pagination).
+        fb_open = supabase.from_("oi_snapshots")\
+            .select("timestamp").order("timestamp", desc=False).limit(1).execute()
+        fb_new = supabase.from_("oi_snapshots")\
+            .select("timestamp").order("timestamp", desc=True).limit(1).execute()
+        if not fb_open.data or not fb_new.data:
+            return {"signals": [], "total": 0}
+        open_row, new_row = fb_open, fb_new
 
-    if len(timestamps) < 2:
-        fallback_rows = []
-        for offset in range(0, 50000, 1000):
-            batch = supabase.from_("oi_snapshots")\
-                .select("timestamp")\
-                .eq("symbol", "NIFTY")\
-                .order("timestamp", desc=True)\
-                .range(offset, offset + 999)\
-                .execute()
-            if not batch.data:
-                break
-            fallback_rows.extend(batch.data)
-            if len(batch.data) < 1000:
-                break
-        timestamps = sorted(set(r["timestamp"] for r in fallback_rows))
-
-    if len(timestamps) < 2:
+    ts_open = open_row.data[0]["timestamp"]
+    ts_new  = new_row.data[0]["timestamp"]
+    if ts_open == ts_new:
         return {"signals": [], "total": 0}
 
-    ts_open  = timestamps[0]
-    ts_new   = timestamps[-1]
-    ts_30min = timestamps[max(0, len(timestamps) - 7)]
+    ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
+    ts_30min  = (ts_new_dt - timedelta(minutes=30)).isoformat()
+    # fetch_snapshot() below widens this into a ±4-min search window anyway,
+    # so an approximate anchor (rather than a guaranteed real captured row)
+    # is fine — same approach as gamma_squeeze.py.
 
     now_utc = datetime.now(timezone.utc)
     market_close = now_utc.replace(hour=10, minute=0, second=0, microsecond=0)
