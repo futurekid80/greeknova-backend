@@ -422,7 +422,7 @@ def get_uoa(date: str = None):
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
 
     # Persistence tracking
-    total_snaps = len(timestamps)
+    total_snaps = 1
     for sig in uoa_signals:
         ts_key = sig["tradingsymbol"]
         if ts_key not in _signal_history:
