@@ -184,6 +184,7 @@ def get_gamma_squeeze(date: str = None):
     open_map  = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in open_data}
     min30_map = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in min30_data}
 
+
     # ── CMP map (for spot reference only, not used as a gate) ──────────────
     cmp_raw = []
     for offset in range(0, 10000, 1000):
@@ -227,6 +228,20 @@ def get_gamma_squeeze(date: str = None):
 
     mins_open_to_30min = elapsed_minutes(ts_open, ts_30min)
     mins_30min_to_new  = elapsed_minutes(ts_30min, ts_new)
+
+    # ── Early-session fallback ───────────────────────────────────────────────
+    # ts_30min (= ts_new - 30min) can fall before market open (9:15 IST) in the
+    # first ~30 min of the day, in which case min30_data_raw came back empty
+    # for everyone — this used to silently zero out the whole scanner until
+    # 9:45 IST, independent of any threshold. If that's the situation, fall
+    # back to using the opening snapshot as the reference point instead, so
+    # the strategy can still catch a fast move right from market open (just
+    # measured against "since open" rather than a true trailing 30 min).
+    using_open_fallback = len(min30_map) == 0 and len(open_map) > 0
+    if using_open_fallback:
+        min30_map = open_map
+        mins_open_to_30min = 1.0  # reference point IS the open — no baseline window yet
+        mins_30min_to_new  = elapsed_minutes(ts_open, ts_new)
 
     # Thresholds for THIS request, eased if we're still within the opening
     # window — computed once per request/capture, not per strike.
@@ -370,6 +385,7 @@ def get_gamma_squeeze(date: str = None):
         "signals":        squeezes[:40],
         "watchlist":      watchlist[:60],
         "is_post_market": post_market,
+        "using_open_fallback": using_open_fallback,
     }
 
     _gs_cache = result
