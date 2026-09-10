@@ -116,7 +116,7 @@ def get_gamma_squeeze(date: str = None):
 
     def fetch_snapshot(ts):
         ts_dt = datetime.fromisoformat(ts.replace('+00:00', '')).replace(tzinfo=timezone.utc)
-        window_start = (ts_dt - timedelta(minutes=4)).isoformat()
+        window_start = (ts_dt - timedelta(minutes=7)).isoformat()  # widened from 4min: 4min was too narrow vs ~5min capture cadence, causing min30 to come back fully empty on drift and wrongly stay in open-fallback long past 30min
         rows = []
         for offset in range(0, 200000, 1000):
             batch = supabase.from_("oi_snapshots")\
