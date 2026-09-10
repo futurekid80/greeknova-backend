@@ -46,7 +46,12 @@ MIN_OPEN_OI = 5000      # ignore illiquid strikes — same floor as before
 MAX_STRIKE_MONEYNESS = 0.35  # ignore strikes more than 35% away from spot —
                               # deep OTM/ITM legs have near-zero gamma and
                               # unreliable IV solves (thin/stale quotes)
-PROXIMITY_PCT = 1.5     # "near a wall / the flip point" = within this % of it
+PROXIMITY_PCT = 1.5     # "on the verge" = within this % of a wall, not yet crossed
+BREAKOUT_RANGE_PCT = 8.0  # "actively squeezing" = already past the wall, up to this
+                           # far beyond it — further than that and it's just an old
+                           # move, not a live squeeze event anymore
+ALERT_LOOKBACK_MIN = 45   # how far back to pull live Alerts-feed events for
+                           # confirming a squeeze at its exact wall strike
 
 
 def _eligible_expiry_map(new_data_raw, today_date):
@@ -147,7 +152,31 @@ def get_gamma_exposure(date: str = None):
             cmp_map[c["symbol"]] = c["cmp"]
             seen_cmp.add(c["symbol"])
 
-    # ── Group option-chain rows by symbol ───────────────────────────────────
+    # ── Recent live Alerts-feed events, for confirming a squeeze with actual
+    # order flow at its exact wall strike (not just the modeled gamma) ──────
+    alert_cutoff = (ts_new_dt - timedelta(minutes=ALERT_LOOKBACK_MIN)).isoformat()
+    alert_raw = []
+    for offset in range(0, 20000, 1000):
+        batch = supabase.from_("alert_log")\
+            .select("symbol,signal,strike,option_type,oi_pct,vol_pct,ltp,created_at")\
+            .gte("created_at", alert_cutoff)\
+            .order("created_at", desc=True)\
+            .range(offset, offset + 999)\
+            .execute()
+        if not batch.data:
+            break
+        alert_raw.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+    alerts_by_strike: dict = {}
+    for a in alert_raw:
+        try:
+            key = (a["symbol"], float(a["strike"]), a.get("option_type"))
+        except (TypeError, ValueError):
+            continue
+        alerts_by_strike.setdefault(key, []).append(a)
+
+    # ── Group option-chain rows by symbol ──────────────────────────────────
     by_symbol: dict = {}
     for r in chain_rows:
         by_symbol.setdefault(r["symbol"], []).append(r)
@@ -248,23 +277,58 @@ def get_gamma_exposure(date: str = None):
         pct_to_flip = round((spot - flip_point) / flip_point * 100, 2) if flip_point else None
 
         squeeze = False
+        stage = None       # "ACTIVE_SQUEEZE" | "ON_THE_VERGE"
         bias = None
         label = ""
         desc = ""
+        squeeze_strike = None
+        squeeze_option_type = None
+        confirmations = []
 
         if regime == "SHORT_GAMMA":
-            near_call_wall = pct_to_call_wall is not None and -PROXIMITY_PCT <= pct_to_call_wall <= PROXIMITY_PCT
-            near_put_wall = pct_to_put_wall is not None and -PROXIMITY_PCT <= pct_to_put_wall <= PROXIMITY_PCT
-            if near_call_wall:
+            # pct_to_call_wall > 0  -> wall still above spot (approaching)
+            # pct_to_call_wall < 0  -> spot already pushed past the wall (live squeeze)
+            near_call_wall = pct_to_call_wall is not None and -BREAKOUT_RANGE_PCT <= pct_to_call_wall <= PROXIMITY_PCT
+            near_put_wall = pct_to_put_wall is not None and -BREAKOUT_RANGE_PCT <= pct_to_put_wall <= PROXIMITY_PCT
+            # If both walls are somehow in range (tight chain, walls close together),
+            # prefer whichever is actually being broken right now over one merely approached.
+            call_active = near_call_wall and pct_to_call_wall < 0
+            put_active = near_put_wall and pct_to_put_wall < 0
+            if call_active or (near_call_wall and not put_active):
                 squeeze = True
                 bias = "BULLISH"
-                label = f"{sym}: pressing into the call wall ({call_wall_strike:g}) while dealers are net short gamma"
-                desc = "Dealers short gamma here means their hedging BUYS into strength as price pushes up toward this strike — a break above can accelerate rather than stall."
+                squeeze_strike, squeeze_option_type = call_wall_strike, "CE"
+                stage = "ACTIVE_SQUEEZE" if call_active else "ON_THE_VERGE"
+                if stage == "ACTIVE_SQUEEZE":
+                    label = f"{sym}: ACTIVE squeeze — price already through the call wall ({call_wall_strike:g}) while dealers are net short gamma"
+                    desc = "Dealers short gamma here means their hedging BUYS into strength as price keeps pushing up through this strike — the move can keep accelerating rather than stall."
+                else:
+                    label = f"{sym}: on the verge — pressing into the call wall ({call_wall_strike:g}) while dealers are net short gamma"
+                    desc = "Dealers short gamma here means their hedging BUYS into strength as price approaches this strike — a break above can accelerate rather than stall."
             elif near_put_wall:
                 squeeze = True
                 bias = "BEARISH"
-                label = f"{sym}: pressing into the put wall ({put_wall_strike:g}) while dealers are net short gamma"
-                desc = "Dealers short gamma here means their hedging SELLS into weakness as price pushes down toward this strike — a break below can accelerate rather than find support."
+                squeeze_strike, squeeze_option_type = put_wall_strike, "PE"
+                stage = "ACTIVE_SQUEEZE" if put_active else "ON_THE_VERGE"
+                if stage == "ACTIVE_SQUEEZE":
+                    label = f"{sym}: ACTIVE squeeze — price already through the put wall ({put_wall_strike:g}) while dealers are net short gamma"
+                    desc = "Dealers short gamma here means their hedging SELLS into weakness as price keeps pushing down through this strike — the move can keep accelerating rather than find support."
+                else:
+                    label = f"{sym}: on the verge — pressing into the put wall ({put_wall_strike:g}) while dealers are net short gamma"
+                    desc = "Dealers short gamma here means their hedging SELLS into weakness as price approaches this strike — a break below can accelerate rather than find support."
+
+        if squeeze_strike is not None:
+            matches = alerts_by_strike.get((sym, squeeze_strike, squeeze_option_type), [])
+            confirmations = [
+                {
+                    "signal": a.get("signal"),
+                    "oi_pct": a.get("oi_pct"),
+                    "vol_pct": a.get("vol_pct"),
+                    "ltp": a.get("ltp"),
+                    "created_at": a.get("created_at"),
+                }
+                for a in matches[:3]
+            ]
 
         row_out = {
             "symbol": sym,
@@ -283,6 +347,11 @@ def get_gamma_exposure(date: str = None):
             "pct_to_put_wall": pct_to_put_wall,
             "pct_to_flip": pct_to_flip,
             "squeeze": squeeze,
+            "stage": stage,
+            "squeeze_strike": squeeze_strike,
+            "squeeze_option_type": squeeze_option_type,
+            "confirmed_by_alerts": len(confirmations) > 0,
+            "confirmations": confirmations,
             "bias": bias,
             "label": label,
             "desc": desc,
@@ -297,7 +366,8 @@ def get_gamma_exposure(date: str = None):
         closest = min(
             [abs(v) for v in (r["pct_to_call_wall"], r["pct_to_put_wall"]) if v is not None] or [999]
         )
-        return (0 if r["squeeze"] else 1, closest)
+        stage_rank = 0 if r["stage"] == "ACTIVE_SQUEEZE" else 1 if r["stage"] == "ON_THE_VERGE" else 2
+        return (stage_rank, closest)
     symbols_out.sort(key=_sort_key)
 
     as_of_dt = ts_new_dt + timedelta(hours=5, minutes=30)  # display in IST
