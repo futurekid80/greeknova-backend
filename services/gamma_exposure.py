@@ -176,6 +176,38 @@ def get_gamma_exposure(date: str = None):
             continue
         alerts_by_strike.setdefault(key, []).append(a)
 
+    # ── Day's opening OI at each strike (for the OI-trend check below) —
+    # only the nearest/eligible expiry per symbol, same filter as chain_rows,
+    # so a symbol's two expiries never get mixed into one trend number ─────
+    oi_open_raw = []
+    for offset in range(0, 200000, 1000):
+        batch = supabase.from_("oi_snapshots")\
+            .select("symbol,strike,option_type,expiry,timestamp,oi")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .lte("timestamp", ts_new)\
+            .order("timestamp")\
+            .range(offset, offset + 999)\
+            .execute()
+        if not batch.data:
+            break
+        oi_open_raw.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+    oi_open_by_key: dict = {}
+    for r in oi_open_raw:
+        if nearest_expiry_map.get(r.get("symbol")) != r.get("expiry"):
+            continue
+        key = (r.get("symbol"), float(r["strike"]), r.get("option_type"))
+        if key not in oi_open_by_key:   # ascending order -> first hit = day's open
+            oi_open_by_key[key] = r.get("oi") or 0
+
+    # Latest OI (raw, not gamma-weighted) per strike, same nearest-expiry
+    # chain_rows already used for the gamma calc above.
+    latest_oi_lookup: dict = {}
+    for r in chain_rows:
+        key = (r["symbol"], float(r["strike"]), r.get("option_type"))
+        latest_oi_lookup[key] = r.get("oi") or 0
+
     # ── Group option-chain rows by symbol ──────────────────────────────────
     by_symbol: dict = {}
     for r in chain_rows:
@@ -317,6 +349,26 @@ def get_gamma_exposure(date: str = None):
                     label = f"{sym}: on the verge — pressing into the put wall ({put_wall_strike:g}) while dealers are net short gamma"
                     desc = "Dealers short gamma here means their hedging SELLS into weakness as price approaches this strike — a break below can accelerate rather than find support."
 
+        # ── OI trend at the exact squeeze strike, single (nearest) expiry only:
+        # is the wall being unwound (confirms the break, dealers/writers
+        # capitulating) or still being built (fresh writing re-defending the
+        # level -> watch for a trap/rebound rather than continuation)? ─────
+        oi_open = None
+        oi_current = None
+        oi_trend_pct = None
+        oi_trend_label = None
+        if squeeze_strike is not None:
+            oi_open = oi_open_by_key.get((sym, squeeze_strike, squeeze_option_type))
+            oi_current = latest_oi_lookup.get((sym, squeeze_strike, squeeze_option_type))
+            if oi_open and oi_current:
+                oi_trend_pct = round((oi_current - oi_open) / oi_open * 100, 1)
+                if oi_trend_pct <= -25:
+                    oi_trend_label = "UNWINDING"   # OI draining out -> wall dissolving, break looks real
+                elif oi_trend_pct >= 15:
+                    oi_trend_label = "BUILDING"    # OI still being added -> wall being defended, rebound risk
+                else:
+                    oi_trend_label = "STEADY"
+
         if squeeze_strike is not None:
             matches = alerts_by_strike.get((sym, squeeze_strike, squeeze_option_type), [])
             confirmations = [
@@ -352,6 +404,10 @@ def get_gamma_exposure(date: str = None):
             "squeeze_option_type": squeeze_option_type,
             "confirmed_by_alerts": len(confirmations) > 0,
             "confirmations": confirmations,
+            "oi_open": oi_open,
+            "oi_current": oi_current,
+            "oi_trend_pct": oi_trend_pct,
+            "oi_trend_label": oi_trend_label,
             "bias": bias,
             "label": label,
             "desc": desc,
