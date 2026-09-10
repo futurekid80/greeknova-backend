@@ -1205,8 +1205,12 @@ def uoa(date: str = None):
 
 @app.get("/gamma-squeeze")
 def gamma_squeeze(date: str = None):
-    from services.gamma_squeeze import get_gamma_squeeze
-    return get_gamma_squeeze(date)
+    # Replaced the old single-strike OI-unwind heuristic with real Gamma
+    # Exposure (GEX): per-strike IV solved from traded premium, Black-Scholes
+    # gamma, call/put walls, and the near-spot short/long-gamma regime.
+    # Same route/URL so the frontend and any bookmarks keep working.
+    from services.gamma_exposure import get_gamma_exposure
+    return get_gamma_exposure(date)
 
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
