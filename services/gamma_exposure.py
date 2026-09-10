@@ -362,9 +362,9 @@ def get_gamma_exposure(date: str = None):
             oi_current = latest_oi_lookup.get((sym, squeeze_strike, squeeze_option_type))
             if oi_open and oi_current:
                 oi_trend_pct = round((oi_current - oi_open) / oi_open * 100, 1)
-                if oi_trend_pct <= -25:
+                if oi_trend_pct <= -45:
                     oi_trend_label = "UNWINDING"   # OI draining out -> wall dissolving, break looks real
-                elif oi_trend_pct >= 15:
+                elif oi_trend_pct >= 45:
                     oi_trend_label = "BUILDING"    # OI still being added -> wall being defended, rebound risk
                 else:
                     oi_trend_label = "STEADY"
