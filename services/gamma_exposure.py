@@ -199,30 +199,44 @@ def get_gamma_exposure(date: str = None):
 
         net_gex = sum(net_per_strike.values())
 
-        # ── Flip point: walk strikes low -> high, find where the cumulative
-        # net GEX changes sign. That crossing strike is the "zero gamma"
-        # level. If the whole chain is one-signed, there's no flip in range.
+        # ── Regime (short/long gamma): driven by the LOCAL gamma balance
+        # around spot (+-5% moneyness), not the full-chain cumulative sum.
+        # Cumulative-from-the-lowest-strike is what public "gamma flip"
+        # charts usually plot, but on real data it can cross sign once far
+        # out in a thin, near-worthless tail strike and then never cross
+        # again — comparing spot to THAT crossing mislabels the regime even
+        # though the near-the-money gamma (the part that actually drives
+        # dealer hedging flow) is unambiguous. The near-spot sign is the
+        # reliable read of whether dealers are net short or long gamma
+        # right now.
+        LOCAL_BAND_PCT = 0.05
+        local_net_gex = sum(
+            v for k, v in net_per_strike.items() if abs(k - spot) / spot <= LOCAL_BAND_PCT
+        )
+        regime = "SHORT_GAMMA" if local_net_gex < 0 else "LONG_GAMMA"
+
+        # ── Flip point: walk strikes low -> high, collect every sign
+        # crossing of the cumulative net GEX, then report whichever
+        # crossing sits closest to spot (if any is within a plausible
+        # range) — a real level, not just an artifact of chain noise.
         flip_point = None
+        crossings = []
         cum = 0.0
         prev_strike, prev_cum = None, None
         for k in strikes_sorted:
             cum += net_per_strike[k]
             if prev_cum is not None and ((prev_cum < 0 <= cum) or (prev_cum > 0 >= cum)):
-                # linear interpolation between the two straddling strikes
                 span = k - prev_strike
                 if span > 0 and (cum - prev_cum) != 0:
                     frac = (0 - prev_cum) / (cum - prev_cum)
-                    flip_point = round(prev_strike + frac * span, 2)
+                    crossings.append(round(prev_strike + frac * span, 2))
                 else:
-                    flip_point = k
-                break
+                    crossings.append(k)
             prev_strike, prev_cum = k, cum
-
-        regime = None
-        if flip_point is not None:
-            regime = "SHORT_GAMMA" if spot < flip_point else "LONG_GAMMA"
-        else:
-            regime = "SHORT_GAMMA" if net_gex < 0 else "LONG_GAMMA"
+        if crossings:
+            nearest = min(crossings, key=lambda f: abs(f - spot))
+            if abs(nearest - spot) / spot <= 0.06:  # only report a flip that's plausibly in play
+                flip_point = nearest
 
         call_wall_strike = call_wall[0] if call_wall else None
         call_wall_gamma_oi = round(call_wall[1]["CE"], 2) if call_wall else None
@@ -263,6 +277,7 @@ def get_gamma_exposure(date: str = None):
             "put_wall_gamma_oi": put_wall_gamma_oi,
             "flip_point": flip_point,
             "net_gex": round(net_gex, 2),
+            "net_gex_near_spot": round(local_net_gex, 2),
             "regime": regime,
             "pct_to_call_wall": pct_to_call_wall,
             "pct_to_put_wall": pct_to_put_wall,
