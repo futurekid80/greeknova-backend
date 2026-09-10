@@ -436,6 +436,45 @@ def get_gamma_exposure(date: str = None):
         "is_post_market": post_market,
     }
 
+    # ── Persist every squeeze-relevant row to gex_signal_log so history
+    # doesn't just vanish with the next 4-min cache refresh — needed for
+    # after-the-fact case studies ("what did the tool actually show at
+    # the time?") rather than relying on alert_log alone. Best-effort:
+    # never let a logging failure break the live page. ────────────────
+    try:
+        log_rows = [
+            {
+                "as_of_data_ts": ts_new,
+                "symbol": r["symbol"],
+                "cmp": r["cmp"],
+                "expiry": r["expiry"],
+                "days_to_expiry": r["days_to_expiry"],
+                "call_wall_strike": r["call_wall_strike"],
+                "put_wall_strike": r["put_wall_strike"],
+                "flip_point": r["flip_point"],
+                "net_gex": r["net_gex"],
+                "net_gex_near_spot": r["net_gex_near_spot"],
+                "regime": r["regime"],
+                "pct_to_call_wall": r["pct_to_call_wall"],
+                "pct_to_put_wall": r["pct_to_put_wall"],
+                "stage": r["stage"],
+                "squeeze_strike": r["squeeze_strike"],
+                "squeeze_option_type": r["squeeze_option_type"],
+                "bias": r["bias"],
+                "confirmed_by_alerts": r["confirmed_by_alerts"],
+                "oi_open": r["oi_open"],
+                "oi_current": r["oi_current"],
+                "oi_trend_pct": r["oi_trend_pct"],
+                "oi_trend_label": r["oi_trend_label"],
+            }
+            for r in symbols_out
+            if r["stage"] is not None
+        ]
+        if log_rows:
+            supabase.from_("gex_signal_log").insert(log_rows).execute()
+    except Exception as e:
+        print(f"[gex_signal_log] failed to persist snapshot: {e}")
+
     _gex_cache = result
     _gex_cache_time = time_module.time()
     return result
