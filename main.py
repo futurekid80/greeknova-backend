@@ -364,6 +364,13 @@ async def lifespan(app: FastAPI):
 
     # ── GreekNova jobs (unchanged) ─────────────────────────────────────────
     scheduler.add_job(run_full_capture, "interval", minutes=5, id="full_capture")
+    def _run_cas_indicative_job():
+        try:
+            from services.cas_indicative import capture_cas_indicative
+            capture_cas_indicative()
+        except Exception as e:
+            print(f"[CAS] indicative capture job failed: {e}")
+    scheduler.add_job(_run_cas_indicative_job, "interval", seconds=3, id="cas_indicative")
     def _run_push_checks_job():
         try:
             from services.push_checker import run_push_checks
@@ -573,6 +580,34 @@ def health(): return {"status": "ok"}
 
 @app.get("/capture-now")
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
+
+
+@app.get("/cas-indicative")
+def cas_indicative(symbol: str = None):
+    """Live indicative closing price during the 15:15-15:35 IST Closing
+    Auction Session, approximated from Kite market depth (see
+    services/cas_indicative.py). Returns the latest snapshot per symbol
+    for today's trade date. Optional `symbol` filters to one.
+    """
+    try:
+        from datetime import datetime, timezone, timedelta
+        ist = timezone(timedelta(hours=5, minutes=30))
+        trade_date = datetime.now(ist).date().isoformat()
+        supabase = get_supabase()
+        q = supabase.from_("cas_indicative").select("*").eq("trade_date", trade_date)
+        if symbol:
+            q = q.eq("symbol", symbol.upper())
+        rows = q.execute().data or []
+        now = datetime.now(ist)
+        cas_start = now.replace(hour=15, minute=15, second=0, microsecond=0)
+        cas_end = now.replace(hour=15, minute=35, second=0, microsecond=0)
+        return {
+            "rows": rows,
+            "cas_active": cas_start <= now <= cas_end,
+            "server_time": now.isoformat(),
+        }
+    except Exception as e:
+        return {"rows": [], "cas_active": False, "error": str(e)}
 
 @app.get("/test-telegram")
 def test_telegram():
