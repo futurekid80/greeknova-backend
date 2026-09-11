@@ -621,15 +621,25 @@ def force_login():
         return {"status": "error", "detail": str(e)}
 
 @app.get("/alerts")
-def get_alerts(limit: int = 100, since_id: int = None):
+def get_alerts(limit: int = 100, since_id: int = None, signal: str = None):
     """(Aug 26 2026): serves real alert history from alert_log so the
     in-app Alerts panel can catch up on load, rather than depending
-    entirely on the live SW->open-tab postMessage relay."""
+    entirely on the live SW->open-tab postMessage relay.
+
+    (Sept 2026): optional `signal` filter (comma-separated signal names) --
+    high-volume signal types like OI_SPIKE push everything else out of a
+    plain top-100 window within minutes, so a rarer/high-conviction type
+    like NEAR_STRIKE_UNWIND needs its own dedicated query to not get
+    silently buried before anyone sees it."""
     try:
         supabase = get_supabase()
         q = supabase.from_("alert_log").select("*").order("id", desc=True)
         if since_id is not None:
             q = q.gt("id", since_id)
+        if signal:
+            signals = [s.strip() for s in signal.split(",") if s.strip()]
+            if signals:
+                q = q.in_("signal", signals)
         rows = q.limit(min(limit, 200)).execute().data or []
         alerts = [{
             "id":         r["id"],
