@@ -1,6 +1,6 @@
 import logging
 from datetime import date
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from utils.db import get_supabase
 
 logger = logging.getLogger(__name__)
