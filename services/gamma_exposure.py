@@ -36,6 +36,40 @@ import math
 from api.uoa import is_market_hours, is_post_market
 from services.black_scholes import implied_vol, bs_gamma
 
+import httpx
+
+
+def _paginated_fetch(build_query, page_size=1000, max_offset=200000, max_retries=3):
+    """Runs `build_query(offset, offset+page_size-1)` in a loop, paging through
+    a Supabase query via .range(), until a short page signals the end.
+
+    Wrapped with a small retry-with-backoff on each page: Supabase's
+    connection pool occasionally drops mid-loop with an
+    httpx.RemoteProtocolError / ConnectionTerminated when a lot of .range()
+    calls fire back-to-back on the same client — retrying that one page
+    (rather than failing the whole endpoint) clears it almost every time.
+    """
+    rows = []
+    for offset in range(0, max_offset, page_size):
+        batch = None
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                batch = build_query(offset, offset + page_size - 1).execute()
+                break
+            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout) as e:
+                last_err = e
+                time_module.sleep(0.4 * (attempt + 1))
+        if batch is None:
+            raise last_err
+        if not batch.data:
+            break
+        rows.extend(batch.data)
+        if len(batch.data) < page_size:
+            break
+    return rows
+
+
 _gex_cache: dict = {}
 _gex_cache_time: float = 0
 GEX_CACHE_TTL = 240  # 4 minutes, same cadence as the old scanner
@@ -76,6 +110,22 @@ def get_gamma_exposure(date: str = None):
     if _gex_cache and (time_module.time() - _gex_cache_time) < cache_ttl:
         return _gex_cache
 
+    try:
+        return _compute_gamma_exposure(date)
+    except Exception as e:
+        # Supabase connection blips (RemoteProtocolError etc.) happen
+        # intermittently under the pagination load this endpoint does.
+        # _paginated_fetch already retries each page; if it still fails,
+        # prefer serving the last good (even if stale) result over a 500 —
+        # a few-minutes-old GEX snapshot is far more useful to the frontend
+        # than "Failed to fetch".
+        print(f"[gamma_exposure] compute failed: {e}")
+        if _gex_cache:
+            return _gex_cache
+        raise
+
+
+def _compute_gamma_exposure(date: str = None):
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     post_market = is_post_market()
@@ -99,19 +149,11 @@ def get_gamma_exposure(date: str = None):
     from datetime import timedelta
     window_start = (ts_new_dt - timedelta(minutes=7)).isoformat()
 
-    rows = []
-    for offset in range(0, 200000, 1000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("*")\
-            .gte("timestamp", window_start)\
-            .lte("timestamp", ts_new)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        rows.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+    rows = _paginated_fetch(lambda lo, hi: supabase.from_("oi_snapshots")
+        .select("*")
+        .gte("timestamp", window_start)
+        .lte("timestamp", ts_new)
+        .range(lo, hi))
 
     latest_by_key: dict = {}
     for r in rows:
@@ -133,19 +175,11 @@ def get_gamma_exposure(date: str = None):
     ]
 
     # ── Spot price per symbol ───────────────────────────────────────────────
-    cmp_raw = []
-    for offset in range(0, 10000, 1000):
-        batch = supabase.from_("cmp_prices")\
-            .select("*")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .order("timestamp", desc=True)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        cmp_raw.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+    cmp_raw = _paginated_fetch(lambda lo, hi: supabase.from_("cmp_prices")
+        .select("*")
+        .gte("timestamp", f"{today}T00:00:00+00:00")
+        .order("timestamp", desc=True)
+        .range(lo, hi), max_offset=10000)
     cmp_map, seen_cmp = {}, set()
     for c in cmp_raw:
         if c["symbol"] not in seen_cmp:
@@ -155,19 +189,11 @@ def get_gamma_exposure(date: str = None):
     # ── Recent live Alerts-feed events, for confirming a squeeze with actual
     # order flow at its exact wall strike (not just the modeled gamma) ──────
     alert_cutoff = (ts_new_dt - timedelta(minutes=ALERT_LOOKBACK_MIN)).isoformat()
-    alert_raw = []
-    for offset in range(0, 20000, 1000):
-        batch = supabase.from_("alert_log")\
-            .select("symbol,signal,strike,option_type,oi_pct,vol_pct,ltp,created_at")\
-            .gte("created_at", alert_cutoff)\
-            .order("created_at", desc=True)\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        alert_raw.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+    alert_raw = _paginated_fetch(lambda lo, hi: supabase.from_("alert_log")
+        .select("symbol,signal,strike,option_type,oi_pct,vol_pct,ltp,created_at")
+        .gte("created_at", alert_cutoff)
+        .order("created_at", desc=True)
+        .range(lo, hi), max_offset=20000)
     alerts_by_strike: dict = {}
     for a in alert_raw:
         try:
@@ -179,20 +205,12 @@ def get_gamma_exposure(date: str = None):
     # ── Day's opening OI at each strike (for the OI-trend check below) —
     # only the nearest/eligible expiry per symbol, same filter as chain_rows,
     # so a symbol's two expiries never get mixed into one trend number ─────
-    oi_open_raw = []
-    for offset in range(0, 200000, 1000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("symbol,strike,option_type,expiry,timestamp,oi")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
-            .lte("timestamp", ts_new)\
-            .order("timestamp")\
-            .range(offset, offset + 999)\
-            .execute()
-        if not batch.data:
-            break
-        oi_open_raw.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+    oi_open_raw = _paginated_fetch(lambda lo, hi: supabase.from_("oi_snapshots")
+        .select("symbol,strike,option_type,expiry,timestamp,oi")
+        .gte("timestamp", f"{today}T00:00:00+00:00")
+        .lte("timestamp", ts_new)
+        .order("timestamp")
+        .range(lo, hi))
     oi_open_by_key: dict = {}
     for r in oi_open_raw:
         if nearest_expiry_map.get(r.get("symbol")) != r.get("expiry"):
