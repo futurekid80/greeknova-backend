@@ -20,7 +20,39 @@ def get_max_pain_all():
     
     symbols = list(set(r["symbol"] for r in data))
     results = []
-    
+
+    # PERF FIX (Sep 12 2026): this used to fire one cmp_prices query PER
+    # symbol inside the loop below -- ~186 sequential network round trips,
+    # which alone accounted for ~28s of this endpoint's ~29s total (this is
+    # what made Pre-Market Report, which calls this function, so slow).
+    # Fetch the latest CMP for every symbol in one bulk query instead
+    # (order by timestamp desc, keep the first/latest row seen per symbol).
+    # A handful of symbols can be too stale to fall inside that window --
+    # top the map up with one query per symbol that's still missing, same
+    # as the old per-symbol fallback, just only for the rare gaps instead
+    # of every symbol every time.
+    cmp_rows = supabase.from_("cmp_prices")\
+        .select("symbol, cmp, timestamp")\
+        .order("timestamp", desc=True)\
+        .limit(3000)\
+        .execute().data or []
+    cmp_map: dict = {}
+    for r in cmp_rows:
+        if r["symbol"] not in cmp_map:
+            cmp_map[r["symbol"]] = r["cmp"]
+
+    missing = [s for s in symbols if s not in cmp_map]
+    if missing:
+        for symbol in missing:
+            cmp_data = supabase.from_("cmp_prices")\
+                .select("cmp")\
+                .eq("symbol", symbol)\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
+            if cmp_data.data:
+                cmp_map[symbol] = cmp_data.data[0]["cmp"]
+
     for symbol in symbols:
         rows = [r for r in data if r["symbol"] == symbol]
         ce_rows = [r for r in rows if r["option_type"] == "CE"]
@@ -56,14 +88,8 @@ def get_max_pain_all():
             except:
                 pass
         
-        # Get CMP
-        cmp_data = supabase.from_("cmp_prices")\
-            .select("cmp")\
-            .eq("symbol", symbol)\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-        cmp = cmp_data.data[0]["cmp"] if cmp_data.data else 0
+        # Get CMP (from the single upfront fetch above, not a per-symbol query)
+        cmp = cmp_map.get(symbol, 0)
         
         dist_from_mp = round(((cmp - max_pain) / max_pain * 100), 2) if max_pain > 0 and cmp > 0 else 0
         
