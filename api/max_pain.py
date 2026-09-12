@@ -54,7 +54,20 @@ def get_max_pain_all():
                 cmp_map[symbol] = cmp_data.data[0]["cmp"]
 
     for symbol in symbols:
-        rows = [r for r in data if r["symbol"] == symbol]
+        all_rows = [r for r in data if r["symbol"] == symbol]
+
+        # BUG FIX (Sep 12 2026): this used to compute max pain across every
+        # expiry for the symbol combined -- summing near-week OI together
+        # with far-month OI into one strike-loss calculation, which is not
+        # how max pain is normally read and skews the number away from what
+        # the homepage/EOD History show (both of which correctly restrict
+        # to the nearest expiry only). Same fix for the expiry/DTE shown
+        # alongside it, which used to just be whichever row happened to be
+        # first in an unsorted list.
+        expiries = sorted(set(r["expiry"] for r in all_rows if r.get("expiry")))
+        nearest_expiry = expiries[0] if expiries else None
+        rows = [r for r in all_rows if r.get("expiry") == nearest_expiry] if nearest_expiry else all_rows
+
         ce_rows = [r for r in rows if r["option_type"] == "CE"]
         pe_rows = [r for r in rows if r["option_type"] == "PE"]
         

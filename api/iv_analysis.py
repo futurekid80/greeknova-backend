@@ -169,7 +169,26 @@ def get_iv_analysis(symbol: str = None, date: str = None):
     - As history grows toward 252d, IVR/IVP becomes increasingly reliable
     """
     supabase = get_supabase()
-    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    # BUG FIX (Sep 12 2026): this used to label persisted IV rows with the
+    # raw calendar date (datetime.now()) instead of the last trading day.
+    # Called over a weekend/holiday, that computes IV from Friday's stale
+    # option data but files it under Saturday's date -- leaving Friday's
+    # row in iv_history missing entirely, which is what left EOD Report's
+    # NIFTY/BANKNIFTY/FINNIFTY IV cards blank for Sep 11. Every other
+    # date-stamped endpoint in this codebase (premarket_brief, eod_report)
+    # already uses is_trading_day() to roll back to the last real trading
+    # day -- this just brings iv_analysis in line with that.
+    if date:
+        today = date
+    else:
+        from utils.market_calendar import is_trading_day
+        import pytz
+        check = datetime.now(pytz.timezone("Asia/Kolkata")).date()
+        if not is_trading_day(check):
+            check -= timedelta(days=1)
+            while not is_trading_day(check):
+                check -= timedelta(days=1)
+        today = check.isoformat()
     symbols = [symbol.upper()] if symbol else SYMBOLS
 
     cache_key = f"iv_{','.join(symbols)}_{today}"

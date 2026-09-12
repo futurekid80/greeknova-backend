@@ -1812,8 +1812,8 @@ def stock_intel(symbol: str):
 
     # ── 7. Max Pain ───────────────────────────────────────────────────────
     try:
-        from api.max_pain import get_max_pain
-        mp_data = get_max_pain()
+        from api.max_pain import get_max_pain_all
+        mp_data = get_max_pain_all()
         mp_item = next((s for s in (mp_data.get("symbols") or []) if s.get("symbol") == sym), None)
         result["max_pain"] = mp_item
     except:
