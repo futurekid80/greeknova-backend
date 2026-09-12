@@ -8,23 +8,12 @@ _radar_cache = {}
 _radar_cache_time = 0.0
 _CACHE_TTL = 300  # 5 minutes during market hours, longer post-market
 
-SYMBOLS = [
-    "NIFTY", "BANKNIFTY", "FINNIFTY",
-    "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
-    "BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","TITAN",
-    "SUNPHARMA","ULTRACEMCO","BAJFINANCE","WIPRO","HCLTECH","TATACONSUM",
-    "TATASTEEL","ADANIENT","POWERGRID","NTPC","ONGC","JSWSTEEL","COALINDIA",
-    "BAJAJFINSV","TECHM","APOLLOHOSP","BAJAJ-AUTO","BPCL","BRITANNIA","CIPLA",
-    "DRREDDY","EICHERMOT","GRASIM","HEROMOTOCO","HINDALCO","HDFCLIFE",
-    "INDUSINDBK","JIOFIN","M&M","NESTLEIND","SBILIFE","SHRIRAMFIN","TRENT",
-    "ADANIPORTS","BANKBARODA","BEL","CANBK","CHOLAFIN","DLF","GAIL","HAVELLS",
-    "HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL",
-    "PAYTM","NYKAA","PERSISTENT","DIXON",
-    "BSE","MCX","TMPV","GODREJPROP","DIVISLAB","COFORGE","ANGELONE","CDSL","OIL",
-    "TVSMOTOR","BHARATFORG","MOTHERSON","LUPIN","TORNTPHARM","AUROPHARMA",
-    "GODREJCP","MARICO","DABUR","PIDILITIND","MUTHOOTFIN","SBICARD","ICICIPRULI",
-    "IDFCFIRSTB","FEDERALBNK","ETERNAL","POLYCAB","VOLTAS","IEX","ASTRAL",
-]
+from api.iv_analysis import SYMBOLS
+# BUG FIX (Sep 12 2026): was an independently hardcoded, stale copy of
+# the symbol list (same recurring class of bug as TOP30/STOCK_NSE_MAP in
+# main.py) -- missing both the Aug 26 (21-symbol) and Sep 12 (63-symbol)
+# batches, so Positional Radar silently covered only 108 of 186 tracked
+# symbols. Now imported from the single canonical list.
 
 
 def get_monthly_expiry(year: int, month: int) -> str:
