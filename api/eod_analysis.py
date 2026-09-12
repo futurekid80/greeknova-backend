@@ -1,5 +1,31 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
+from concurrent.futures import ThreadPoolExecutor
+
+
+# PERF FIX (Sep 12 2026): this endpoint used to page through oi_snapshots
+# 1000 rows at a time, sequentially -- each page waiting on the last --
+# across three separate loops (day timestamps, open/close snapshots, full
+# intraday journey). For a busy trading day that's easily 100-200+ back-
+# to-back network round trips for a single symbol, which is what made
+# EOD History slow to load. This helper gets the exact row count on the
+# first page (Postgres COUNT via count="exact"), then fires every
+# remaining page concurrently instead of one-after-another.
+def _fetch_paginated_parallel(build_query, page_size=1000, max_workers=6):
+    """build_query(offset) -> an unexecuted postgrest query for that page
+    (must include count="exact" on its .select(...))."""
+    first = build_query(0).execute()
+    rows = list(first.data or [])
+    total = getattr(first, "count", None)
+    if not rows or total is None or total <= page_size:
+        return rows
+    offsets = list(range(page_size, total, page_size))
+    def _get(off):
+        return build_query(off).execute().data or []
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(offsets))) as ex:
+        for batch in ex.map(_get, offsets):
+            rows.extend(batch)
+    return rows
 
 
 def fmtoi(n: int) -> str:
@@ -41,20 +67,15 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
                 break
 
     # ── Paginated timestamp fetch (fixes close_time showing wrong time) ───────
-    all_ts_data = []
-    for offset in range(0, 50000, 1000):
-        batch = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
+    def _ts_page(offset):
+        return supabase.from_("oi_snapshots")\
+            .select("timestamp", count="exact")\
             .eq("symbol", "NIFTY")\
             .gte("timestamp", f"{active_date}T00:00:00+00:00")\
             .lt("timestamp",  f"{active_date}T23:59:59+00:00")\
             .order("timestamp", desc=False)\
-            .range(offset, offset + 999).execute()
-        if not batch.data:
-            break
-        all_ts_data.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+            .range(offset, offset + 999)
+    all_ts_data = _fetch_paginated_parallel(_ts_page)
 
     if not all_ts_data:
         return {"symbol": symbol, "dates": sorted_dates, "date": active_date, "rows": []}
@@ -94,46 +115,45 @@ def get_eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None
 
     # ── Fetch open/close snapshots ────────────────────────────────────────────
     def fetch_snap(ts):
-        all_data = []
-        for offset in range(0, 10000, 1000):
+        def _page(offset):
             q = supabase.from_("oi_snapshots")\
-                .select("strike, option_type, oi")\
+                .select("strike, option_type, oi", count="exact")\
                 .eq("symbol", symbol)\
                 .eq("timestamp", ts)
             if active_expiry:
                 q = q.eq("expiry", active_expiry)
-            batch = q.range(offset, offset + 999).execute()
-            if not batch.data:
-                break
-            all_data.extend(batch.data)
-            if len(batch.data) < 1000:
-                break
+            return q.range(offset, offset + 999)
+        all_data = _fetch_paginated_parallel(_page)
         result = {}
         for r in all_data:
             result[(r["strike"], r["option_type"])] = r["oi"] or 0
         return result
 
-    snap_open  = fetch_snap(first_ts)
-    snap_close = fetch_snap(last_ts)
-    all_strikes = sorted(set(k[0] for k in list(snap_open.keys()) + list(snap_close.keys())))
-
     # ── Intraday journey ──────────────────────────────────────────────────────
-    journey_raw = []
-    journey_q = supabase.from_("oi_snapshots")\
-        .select("timestamp, option_type, oi, strike")\
-        .eq("symbol", symbol)\
-        .gte("timestamp", f"{active_date}T00:00:00+00:00")\
-        .lt("timestamp",  f"{active_date}T23:59:59+00:00")
-    if active_expiry:
-        journey_q = journey_q.eq("expiry", active_expiry)
+    def fetch_journey():
+        def _page(offset):
+            q = supabase.from_("oi_snapshots")\
+                .select("timestamp, option_type, oi, strike", count="exact")\
+                .eq("symbol", symbol)\
+                .gte("timestamp", f"{active_date}T00:00:00+00:00")\
+                .lt("timestamp",  f"{active_date}T23:59:59+00:00")
+            if active_expiry:
+                q = q.eq("expiry", active_expiry)
+            return q.range(offset, offset + 999)
+        return _fetch_paginated_parallel(_page, max_workers=8)
 
-    for offset in range(0, 200000, 1000):
-        batch = journey_q.range(offset, offset + 999).execute()
-        if not batch.data:
-            break
-        journey_raw.extend(batch.data)
-        if len(batch.data) < 1000:
-            break
+    # snap_open, snap_close and the journey fetch are all independent of one
+    # another once first_ts/last_ts/active_expiry are known -- run them
+    # concurrently instead of three sequential blocking calls.
+    with ThreadPoolExecutor(max_workers=3) as _ex:
+        _f_open    = _ex.submit(fetch_snap, first_ts)
+        _f_close   = _ex.submit(fetch_snap, last_ts)
+        _f_journey = _ex.submit(fetch_journey)
+        snap_open   = _f_open.result()
+        snap_close  = _f_close.result()
+        journey_raw = _f_journey.result()
+
+    all_strikes = sorted(set(k[0] for k in list(snap_open.keys()) + list(snap_close.keys())))
 
     ts_groups: dict = {}
     for r in journey_raw:

@@ -15,6 +15,7 @@ licensed institutional feed — fine for a quick glance, not for anything missio
 critical.
 """
 from datetime import datetime, timedelta
+from concurrent.futures import ThreadPoolExecutor
 
 
 def _get_gift_nifty():
@@ -54,27 +55,36 @@ def _get_commodities():
         "Crude (Brent)": "BZ=F",
         "Crude (WTI)": "CL=F",
     }
-    results = []
-    for name, ticker in tickers.items():
+    # PERF FIX (Sep 12 2026): these 4 yfinance calls used to run one after
+    # another -- each is its own blocking network round trip to Yahoo
+    # Finance, so this alone could take several seconds. They're
+    # independent of each other, so fetch them concurrently instead.
+    def _fetch_one(item):
+        name, ticker = item
         try:
             t = yf.Ticker(ticker)
             info = dict(t.fast_info)
             ltp = info.get("lastPrice")
             prev_close = info.get("previousClose")
             if ltp is None or prev_close is None:
-                continue
+                return None
             change = round(ltp - prev_close, 2)
             pct = round(change / prev_close * 100, 2) if prev_close else 0
-            results.append({
+            return {
                 "name": name,
                 "ticker": ticker,
                 "ltp": round(ltp, 2),
                 "change": change,
                 "pct_change": pct,
-            })
+            }
         except Exception as e:
             print(f"[Premarket] Commodity fetch failed for {name} ({ticker}): {e}")
-    return results
+            return None
+
+    order = list(tickers.keys())
+    with ThreadPoolExecutor(max_workers=len(tickers)) as ex:
+        fetched = dict(zip(order, ex.map(_fetch_one, tickers.items())))
+    return [fetched[name] for name in order if fetched[name] is not None]
 
 
 def get_premarket_brief(supabase) -> dict:
@@ -91,70 +101,97 @@ def get_premarket_brief(supabase) -> dict:
             check -= timedelta(days=1)
     last_trading_day = check.isoformat()
 
-    gift_nifty = _get_gift_nifty()
-    commodities = _get_commodities()
+    # PERF FIX (Sep 12 2026): GIFT Nifty, commodities, EOD-report reuse,
+    # positional-intelligence reuse, and index levels are five independent
+    # data pulls that used to run strictly one after another -- each
+    # waiting on the last even though none of them depend on each other's
+    # result. This was the main reason Pre-Market Report was slow to load.
+    # Run them concurrently instead.
 
-    fii_dii = None
-    high_delivery = []
-    try:
-        from api.eod_report import get_eod_report
-        eod = get_eod_report(supabase, last_trading_day)
-        cash_flow = eod.get("cash_flow", {})
-        if cash_flow.get("FII") or cash_flow.get("DII"):
-            fii_dii = {
-                "fii_net": cash_flow.get("FII", {}).get("net"),
-                "dii_net": cash_flow.get("DII", {}).get("net"),
-                "date": last_trading_day,
-            }
-        high_delivery = eod.get("delivery", {}).get("high_delivery", [])[:8]
-    except Exception as e:
-        print(f"[Premarket] EOD report reuse failed: {e}")
+    def _fetch_fii_dii():
+        try:
+            from api.eod_report import get_eod_report
+            eod = get_eod_report(supabase, last_trading_day)
+            cash_flow = eod.get("cash_flow", {})
+            fii_dii = None
+            if cash_flow.get("FII") or cash_flow.get("DII"):
+                fii_dii = {
+                    "fii_net": cash_flow.get("FII", {}).get("net"),
+                    "dii_net": cash_flow.get("DII", {}).get("net"),
+                    "date": last_trading_day,
+                }
+            high_delivery = eod.get("delivery", {}).get("high_delivery", [])[:8]
+            return fii_dii, high_delivery
+        except Exception as e:
+            print(f"[Premarket] EOD report reuse failed: {e}")
+            return None, []
 
-    overnight_conviction = []
-    try:
-        from api.positional_intelligence import get_positional_intelligence
-        pi = get_positional_intelligence(min_consec=2)
-        overnight_conviction = [
-            {
-                "symbol": r["symbol"],
-                "cmp": r["cmp"],
-                "signal": r["signal"],
-                "consec_days": r["consec_days"],
-                "consistency_pct": r["consistency_pct"],
-                "cpr_position": r.get("cpr_position"),
-            }
-            for r in (pi.get("active_conviction") or [])
-        ][:8]
-    except Exception as e:
-        print(f"[Premarket] Positional intelligence reuse failed: {e}")
+    def _fetch_overnight_conviction():
+        try:
+            from api.positional_intelligence import get_positional_intelligence
+            pi = get_positional_intelligence(min_consec=2)
+            return [
+                {
+                    "symbol": r["symbol"],
+                    "cmp": r["cmp"],
+                    "signal": r["signal"],
+                    "consec_days": r["consec_days"],
+                    "consistency_pct": r["consistency_pct"],
+                    "cpr_position": r.get("cpr_position"),
+                }
+                for r in (pi.get("active_conviction") or [])
+            ][:8]
+        except Exception as e:
+            print(f"[Premarket] Positional intelligence reuse failed: {e}")
+            return []
 
-    index_levels = []
-    try:
-        from api.max_pain import get_max_pain_all
-        from api.oi_profile import get_oi_profile
-        mp = get_max_pain_all()
-        indices = [s for s in (mp.get("symbols") or []) if s.get("is_index")]
-        for idx in indices:
-            sym = idx["symbol"]
-            entry = {
-                "symbol": sym,
-                "cmp": idx["cmp"],
-                "pcr": idx["pcr"],
-                "max_pain": idx["max_pain"],
-                "dist_from_mp": idx["dist_from_mp"],
-                "days_to_expiry": idx["days_to_expiry"],
-                "ce_wall": None,
-                "pe_wall": None,
-            }
-            try:
-                profile = get_oi_profile(sym)
-                entry["ce_wall"] = profile.get("ce_wall")
-                entry["pe_wall"] = profile.get("pe_wall")
-            except Exception as e:
-                print(f"[Premarket] OI profile failed for {sym}: {e}")
-            index_levels.append(entry)
-    except Exception as e:
-        print(f"[Premarket] Index levels fetch failed: {e}")
+    def _fetch_index_levels():
+        index_levels = []
+        try:
+            from api.max_pain import get_max_pain_all
+            from api.oi_profile import get_oi_profile
+            mp = get_max_pain_all()
+            indices = [s for s in (mp.get("symbols") or []) if s.get("is_index")]
+
+            def _with_profile(idx):
+                sym = idx["symbol"]
+                entry = {
+                    "symbol": sym,
+                    "cmp": idx["cmp"],
+                    "pcr": idx["pcr"],
+                    "max_pain": idx["max_pain"],
+                    "dist_from_mp": idx["dist_from_mp"],
+                    "days_to_expiry": idx["days_to_expiry"],
+                    "ce_wall": None,
+                    "pe_wall": None,
+                }
+                try:
+                    profile = get_oi_profile(sym)
+                    entry["ce_wall"] = profile.get("ce_wall")
+                    entry["pe_wall"] = profile.get("pe_wall")
+                except Exception as e:
+                    print(f"[Premarket] OI profile failed for {sym}: {e}")
+                return entry
+
+            if indices:
+                with ThreadPoolExecutor(max_workers=len(indices)) as ex:
+                    index_levels = list(ex.map(_with_profile, indices))
+        except Exception as e:
+            print(f"[Premarket] Index levels fetch failed: {e}")
+        return index_levels
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        f_gift        = ex.submit(_get_gift_nifty)
+        f_commodities = ex.submit(_get_commodities)
+        f_fii_dii     = ex.submit(_fetch_fii_dii)
+        f_conviction  = ex.submit(_fetch_overnight_conviction)
+        f_levels      = ex.submit(_fetch_index_levels)
+
+        gift_nifty = f_gift.result()
+        commodities = f_commodities.result()
+        fii_dii, high_delivery = f_fii_dii.result()
+        overnight_conviction = f_conviction.result()
+        index_levels = f_levels.result()
 
     return {
         "date": last_trading_day,
