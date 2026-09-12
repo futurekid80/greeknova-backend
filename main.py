@@ -544,6 +544,55 @@ def health(): return {"status": "ok"}
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
 
+# ONE-OFF (Sep 12 2026): run_full_capture() correctly gates itself to
+# weekdays + trading hours, which is right for the automatic 5-min job --
+# but that also means it won't run over a weekend even to just refresh
+# CMP. The Sep 2026 63-symbol batch landed in STOCK_NSE_MAP too late for
+# Friday's last capture, so those symbols have no CMP row at all right
+# now. Kite's quote() endpoint still returns last-traded price outside
+# market hours, so this fetches CMP for every symbol (skipping the
+# weekday/hours gate) without touching options-chain/OI capture --
+# that genuinely has no data for the new symbols until Monday's capture
+# runs, and there's no way to backfill history that was never captured.
+@app.get("/admin/backfill-cmp")
+def backfill_cmp():
+    from services.kite_auth import get_kite_client
+    from datetime import datetime, timezone
+    kite = get_kite_client()
+    supabase = get_supabase()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    cmp_records = []
+    errors = []
+    try:
+        idx_quotes = kite.quote(list(INDEX_NSE_MAP.values()))
+        for sym, key in INDEX_NSE_MAP.items():
+            q = idx_quotes.get(key, {})
+            price = q.get("last_price", 0)
+            if price:
+                cmp_records.append({
+                    "timestamp": timestamp, "symbol": sym, "cmp": float(price),
+                    "volume": int(q.get("volume", 0)),
+                })
+    except Exception as e:
+        errors.append(f"index: {e}")
+    try:
+        stk_quotes = kite.quote(list(STOCK_NSE_MAP.values()))
+        for sym, key in STOCK_NSE_MAP.items():
+            q = stk_quotes.get(key, {})
+            price = q.get("last_price", 0)
+            if price:
+                cmp_records.append({
+                    "timestamp": timestamp, "symbol": sym, "cmp": float(price),
+                    "volume": int(q.get("volume", 0)),
+                })
+    except Exception as e:
+        errors.append(f"stocks: {e}")
+    if cmp_records:
+        for i in range(0, len(cmp_records), 500):
+            supabase.table("cmp_prices").insert(cmp_records[i:i+500]).execute()
+    return {"status": "done", "records": len(cmp_records), "errors": errors}
+
+
 @app.get("/cas-indicative")
 def cas_indicative(symbol: str = None):
     """Live indicative closing price during the 15:15-15:35 IST Closing
@@ -1302,19 +1351,35 @@ def index_data():
 
         # Fetch index OI data + CMP in parallel
         from concurrent.futures import ThreadPoolExecutor
+        # BUG FIX (Sep 12 2026): the ts_res retry above wasn't enough -- the
+        # ConnectionTerminated reset was actually landing here just as often,
+        # in these parallel batch queries, which had no retry at all. Each
+        # one now retries once on its own thread.
         def fetch_oi_batch(rng):
-            return supabase.from_("oi_snapshots")\
-                .select("symbol,strike,option_type,oi,volume,last_price,expiry")\
-                .eq("timestamp", ts)\
-                .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY"])\
-                .range(rng[0], rng[1])\
-                .execute()
+            def _q():
+                return supabase.from_("oi_snapshots")\
+                    .select("symbol,strike,option_type,oi,volume,last_price,expiry")\
+                    .eq("timestamp", ts)\
+                    .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY"])\
+                    .range(rng[0], rng[1])\
+                    .execute()
+            try:
+                return _q()
+            except Exception as e:
+                print(f"[INDEX-DATA] oi_batch {rng} failed, retrying once: {e}")
+                return _q()
         def fetch_cmps():
-            return supabase.from_("cmp_prices")\
-                .select("symbol,cmp")\
-                .order("timestamp", desc=True)\
-                .limit(200)\
-                .execute()
+            def _q():
+                return supabase.from_("cmp_prices")\
+                    .select("symbol,cmp")\
+                    .order("timestamp", desc=True)\
+                    .limit(200)\
+                    .execute()
+            try:
+                return _q()
+            except Exception as e:
+                print(f"[INDEX-DATA] cmps failed, retrying once: {e}")
+                return _q()
 
         with ThreadPoolExecutor(max_workers=3) as ex:
             f1 = ex.submit(fetch_oi_batch, (0, 999))
