@@ -1269,14 +1269,33 @@ def index_data():
 
     supabase = get_supabase()
     try:
-        # Get last available trading timestamp for NIFTY FUT
-        ts_res = supabase.from_("oi_snapshots")\
-            .select("timestamp")\
-            .eq("symbol", "NIFTY")\
-            .eq("option_type", "FUT")\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
+        # BUG FIX (Sep 12 2026): this query intermittently throws
+        # httpx.RemoteProtocolError (ConnectionTerminated) -- a transient
+        # Supabase/PostgREST connection reset, unrelated to query cost (this
+        # is a simple indexed lookup). Previously any such failure fell all
+        # the way to the outer except and returned an empty-but-200 payload,
+        # which is indistinguishable from "no data" to the frontend and left
+        # the Market Pulse homepage stuck on "Loading index data..." even
+        # though the underlying oi_snapshots rows were there all along. One
+        # retry clears it in practice since the reset doesn't repeat back
+        # to back.
+        try:
+            ts_res = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", "NIFTY")\
+                .eq("option_type", "FUT")\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
+        except Exception as e:
+            print(f"[INDEX-DATA] timestamp query failed, retrying once: {e}")
+            ts_res = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", "NIFTY")\
+                .eq("option_type", "FUT")\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
         if not ts_res.data:
             return {"timestamp": None, "rows": [], "cmps": []}
         ts = ts_res.data[0]["timestamp"]

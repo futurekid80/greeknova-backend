@@ -67,20 +67,37 @@ def get_uoa(date: str = None):
     # after that point) get silently dropped — causing this feed to get
     # stuck reporting a stale "latest" time for hours. Two direct MIN/MAX
     # queries can't have that failure mode.
-    open_row = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .lt("timestamp",  f"{today}T23:59:59+00:00")\
-        .order("timestamp", desc=False)\
-        .limit(1).execute()
-    new_row = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .lt("timestamp",  f"{today}T23:59:59+00:00")\
-        .order("timestamp", desc=True)\
-        .limit(1).execute()
+    # BUG FIX (Sep 12 2026): oi_snapshots reads intermittently raise
+    # httpx.RemoteProtocolError (ConnectionTerminated) -- a transient
+    # Supabase/PostgREST connection reset unrelated to query cost. This was
+    # crashing the whole endpoint (500) even though a same retried query
+    # succeeds a moment later. One retry per query clears it in practice.
+    def _q_open():
+        return supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .lt("timestamp",  f"{today}T23:59:59+00:00")\
+            .order("timestamp", desc=False)\
+            .limit(1).execute()
+    def _q_new():
+        return supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .lt("timestamp",  f"{today}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1).execute()
+    try:
+        open_row = _q_open()
+    except Exception as e:
+        print(f"[UOA] open_row query failed, retrying once: {e}")
+        open_row = _q_open()
+    try:
+        new_row = _q_new()
+    except Exception as e:
+        print(f"[UOA] new_row query failed, retrying once: {e}")
+        new_row = _q_new()
 
     if not open_row.data or not new_row.data:
         # Fallback: no NIFTY rows today at all — fall back to the most

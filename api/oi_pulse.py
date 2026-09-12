@@ -333,11 +333,21 @@ def _get_eod_pulse(supabase):
     except:
         last_trading_day = now_ist.date().isoformat()
 
-    rows = supabase.from_("daily_oi_summary")\
-        .select("symbol, oi_chg_pct, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_vol")\
-        .eq("trade_date", last_trading_day)\
-        .limit(200)\
-        .execute()
+    # BUG FIX (Sep 12 2026): intermittent httpx.RemoteProtocolError
+    # (ConnectionTerminated) -- a transient Supabase/PostgREST connection
+    # reset, hits this even though daily_oi_summary is a small/fast table.
+    # One retry clears it since the reset doesn't repeat back to back.
+    def _q_rows():
+        return supabase.from_("daily_oi_summary")\
+            .select("symbol, oi_chg_pct, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_vol")\
+            .eq("trade_date", last_trading_day)\
+            .limit(200)\
+            .execute()
+    try:
+        rows = _q_rows()
+    except Exception as e:
+        print(f"[OI-PULSE] rows query failed, retrying once: {e}")
+        rows = _q_rows()
 
     # Fetch 5-day avg volume for vol_ratio computation
     from datetime import timedelta

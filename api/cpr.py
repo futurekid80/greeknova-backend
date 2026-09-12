@@ -673,11 +673,21 @@ def get_cpr_scanner():
     else:
         query_date = now_ist.date().isoformat()
 
-    cpr_rows = supabase.from_("cpr_levels")\
-        .select("*")\
-        .eq("trade_date", query_date)\
-        .limit(500)\
-        .execute()
+    # BUG FIX (Sep 12 2026): intermittent httpx.RemoteProtocolError
+    # (ConnectionTerminated) -- a transient Supabase/PostgREST connection
+    # reset, unrelated to this table's size. One retry clears it since the
+    # reset doesn't repeat back to back.
+    def _q_cpr():
+        return supabase.from_("cpr_levels")\
+            .select("*")\
+            .eq("trade_date", query_date)\
+            .limit(500)\
+            .execute()
+    try:
+        cpr_rows = _q_cpr()
+    except Exception as e:
+        print(f"[CPR] cpr_rows query failed, retrying once: {e}")
+        cpr_rows = _q_cpr()
 
     if not cpr_rows.data:
         # Query not found — get last available date from DB
