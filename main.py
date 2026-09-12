@@ -2436,6 +2436,19 @@ def run_archive_watchdog():
     except Exception as e:
         return {"status": "error", "detail": str(e)}
 
+@app.get("/52-week-high")
+def week52_high():
+    """52-week high per symbol, computed from spot_daily_bars (see
+    api/week52_high.py). Flags stocks trading at/near their 52-week high
+    so the Market Pulse Feed can surface them at a glance."""
+    try:
+        from api.week52_high import compute_52_week_high
+        supabase = get_supabase()
+        rows = compute_52_week_high(supabase, dict(_last_cmp))
+        return {"rows": rows, "count": len(rows)}
+    except Exception as e:
+        return {"rows": [], "count": 0, "error": str(e)}
+
 @app.get("/spot-volume/backfill")
 def spot_volume_backfill(days_back: int = 180):
     from services.kite_auth import get_kite_client
