@@ -167,16 +167,8 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     ce_wall = max(all_strikes, key=lambda s: ce_oi.get(s, 0)) if all_strikes else None
     pe_wall = max(all_strikes, key=lambda s: pe_oi.get(s, 0)) if all_strikes else None
 
-    # PCR using ATM ±10 strikes only (standardized)
-    strike_interval = 100 if symbol == "BANKNIFTY" else 50
-    if atm_strike:
-        atm_lower = atm_strike - (10 * strike_interval)
-        atm_upper = atm_strike + (10 * strike_interval)
-        atm_ce = sum(ce_oi.get(s, 0) for s in all_strikes if atm_lower <= s <= atm_upper)
-        atm_pe = sum(pe_oi.get(s, 0) for s in all_strikes if atm_lower <= s <= atm_upper)
-        pcr_value = round(atm_pe / atm_ce, 2) if atm_ce > 0 else 0
-    else:
-        pcr_value = round(total_pe / total_ce, 2) if total_ce > 0 else 0
+    # PCR: full option chain (nearest expiry) — realistic, matches NSE-style PCR
+    pcr_value = round(total_pe / total_ce, 2) if total_ce > 0 else 0
 
     # Value area
     va_threshold = total_oi * 0.70

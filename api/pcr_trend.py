@@ -65,12 +65,10 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
             all_data = [r for r in all_data if r["expiry"] == nearest_expiry]
             expiry = nearest_expiry
 
-    # ── Filter to ATM ±10 strikes for stable PCR ──────────────────────────────
-    if strike_lower and strike_upper:
-        all_data = [
-            r for r in all_data
-            if r.get("strike") and strike_lower <= float(r["strike"]) <= strike_upper
-        ]
+    # ── Use full option chain (nearest expiry) for realistic PCR ─────────────
+    # (previously restricted to ATM ±10 strikes, which skews heavily due to
+    # natural moneyness-driven OI concentration — full chain matches
+    # NSE-style whole-chain PCR and stays stable through the session)
 
     # ── Group by timestamp — compute both OI PCR and Vol PCR ─────────────────
     ts_map: dict = {}

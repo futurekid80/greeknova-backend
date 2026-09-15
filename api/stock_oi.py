@@ -73,16 +73,9 @@ def get_stock_oi(symbol: str):
             "is_atm":    abs(strike - cmp) == min(abs(s - cmp) for s in strikes) if cmp > 0 else False,
         })
 
-    # ── PCR: use ATM ±10 strikes only (matches Sensibull methodology) ─────────
-    if cmp > 0 and strikes:
-        atm_strike = min(strikes, key=lambda s: abs(s - cmp))
-        atm_idx = strikes.index(atm_strike)
-        pcr_strike_set = set(strikes[max(0, atm_idx - 10):atm_idx + 11])
-        total_ce = sum(r["ce_oi"] for r in strike_data if r["strike"] in pcr_strike_set)
-        total_pe = sum(r["pe_oi"] for r in strike_data if r["strike"] in pcr_strike_set)
-    else:
-        total_ce = sum(r["ce_oi"] for r in strike_data)
-        total_pe = sum(r["pe_oi"] for r in strike_data)
+    # ── PCR: full option chain (nearest expiry) — realistic, matches NSE-style PCR ─────────
+    total_ce = sum(r["ce_oi"] for r in strike_data)
+    total_pe = sum(r["pe_oi"] for r in strike_data)
 
     pcr = round(total_pe / total_ce, 3) if total_ce > 0 else 0
 

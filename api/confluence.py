@@ -110,17 +110,9 @@ def get_confluence():
 
         cmp = cmp_map.get(symbol, 0)
 
-        # PCR: ATM ±10 strikes only
-        strikes = sorted(set(r["strike"] for r in rows))
-        if cmp > 0 and strikes:
-            atm = min(strikes, key=lambda s: abs(s - cmp))
-            atm_idx = strikes.index(atm)
-            pcr_set = set(strikes[max(0, atm_idx - 10):atm_idx + 11])
-            pcr_ce = sum(r["oi"] for r in ce_rows if r["strike"] in pcr_set)
-            pcr_pe = sum(r["oi"] for r in pe_rows if r["strike"] in pcr_set)
-        else:
-            pcr_ce = total_ce
-            pcr_pe = total_pe
+        # PCR: full option chain (nearest expiry) — realistic, matches NSE-style PCR
+        pcr_ce = total_ce
+        pcr_pe = total_pe
 
         pcr = pcr_pe / pcr_ce if pcr_ce > 0 else 0
 
