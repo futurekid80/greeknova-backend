@@ -104,10 +104,16 @@ def _eligible_expiry_map(new_data_raw, today_date):
 
 
 def get_gamma_exposure(date: str = None):
+    """Serve the gamma-exposure snapshot. A background scheduler job
+    (refresh_gamma_exposure_cache, wired up in main.py) keeps _gex_cache
+    warm every few minutes, so this just serves whatever is cached — no
+    request should ever pay for the full ~150-stock Black-Scholes scan
+    inline. We only fall back to a synchronous compute in the narrow
+    window right after a fresh deploy/restart, before the background
+    job has run for the first time."""
     global _gex_cache, _gex_cache_time
 
-    cache_ttl = GEX_CACHE_TTL if is_market_hours() else 600
-    if _gex_cache and (time_module.time() - _gex_cache_time) < cache_ttl:
+    if _gex_cache:
         return _gex_cache
 
     try:
@@ -123,6 +129,20 @@ def get_gamma_exposure(date: str = None):
         if _gex_cache:
             return _gex_cache
         raise
+
+
+def refresh_gamma_exposure_cache():
+    """Background job: recompute the gamma-exposure snapshot and update
+    the module-level cache. Runs on a schedule from main.py so requests
+    to /gamma-squeeze never trigger the slow ~150-stock scan themselves."""
+    global _gex_cache, _gex_cache_time
+    try:
+        result = _compute_gamma_exposure()
+        _gex_cache = result
+        _gex_cache_time = time_module.time()
+        print(f"[gamma_exposure] background refresh OK — {len(result.get('watchlist', []))} stocks")
+    except Exception as e:
+        print(f"[gamma_exposure] background refresh failed: {e}")
 
 
 def _compute_gamma_exposure(date: str = None):

@@ -333,6 +333,22 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[CAS] indicative capture job failed: {e}")
     scheduler.add_job(_run_cas_indicative_job, "interval", seconds=3, id="cas_indicative")
+
+    def _run_gamma_exposure_refresh_job():
+        try:
+            from services.gamma_exposure import refresh_gamma_exposure_cache
+            refresh_gamma_exposure_cache()
+        except Exception as e:
+            print(f"[gamma_exposure] refresh job failed: {e}")
+    # Keeps /gamma-squeeze fast: recomputes the ~150-stock scan in the
+    # background every 3 minutes so requests just read the cache instead
+    # of triggering the (30-85s) computation inline. next_run_time=now
+    # kicks off the first run immediately on boot instead of waiting 3 min.
+    from datetime import datetime as _gex_job_now
+    scheduler.add_job(
+        _run_gamma_exposure_refresh_job, "interval", minutes=3,
+        id="gamma_exposure_refresh", next_run_time=_gex_job_now.now()
+    )
     def _run_push_checks_job():
         try:
             from services.push_checker import run_push_checks
