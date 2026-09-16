@@ -1273,6 +1273,12 @@ def gamma_squeeze(date: str = None):
     from services.gamma_exposure import get_gamma_exposure
     return get_gamma_exposure(date)
 
+
+@app.get("/gamma-by-strike/{symbol}")
+def gamma_by_strike(symbol: str, date: str = None):
+    from services.gamma_exposure import get_gex_by_strike
+    return get_gex_by_strike(symbol.upper(), date)
+
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain

@@ -496,3 +496,134 @@ def _compute_gamma_exposure(date: str = None):
     _gex_cache = result
     _gex_cache_time = time_module.time()
     return result
+
+
+def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
+    """Per-strike GEX breakdown for one symbol's nearest expiry — powers the
+    GEX-by-strike chart. Reuses the same IV-solve + Black-Scholes gamma
+    approach as _compute_gamma_exposure, scoped to a single symbol so it's
+    cheap to call directly (no multi-symbol pagination)."""
+    supabase = get_supabase()
+    symbol = symbol.upper()
+    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    today_date = date_type.fromisoformat(today) if date else datetime.now(timezone.utc).date()
+
+    new_row = supabase.from_("oi_snapshots")\
+        .select("timestamp")\
+        .eq("symbol", symbol)\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
+
+    if not new_row.data:
+        return {"symbol": symbol, "strikes": [], "spot": None, "error": "no data"}
+
+    ts_new = new_row.data[0]["timestamp"]
+
+    chain_raw = supabase.from_("oi_snapshots")\
+        .select("strike,option_type,expiry,oi,last_price")\
+        .eq("symbol", symbol)\
+        .eq("timestamp", ts_new)\
+        .execute().data or []
+
+    expiries = sorted(set(
+        r["expiry"] for r in chain_raw
+        if r.get("expiry") and r["expiry"] >= today_date.isoformat()
+    ))
+    if not expiries:
+        return {"symbol": symbol, "strikes": [], "spot": None, "error": "no active expiry"}
+    expiry = expiries[0]
+
+    cmp_q = supabase.from_("cmp_prices")\
+        .select("cmp")\
+        .eq("symbol", symbol)\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=True)\
+        .limit(1).execute()
+    spot = float(cmp_q.data[0]["cmp"]) if cmp_q.data else None
+    if not spot:
+        return {"symbol": symbol, "strikes": [], "spot": None, "error": "no spot price"}
+
+    try:
+        dte = (date_type.fromisoformat(expiry) - today_date).days
+    except Exception:
+        dte = 0
+    T = max(dte, 0) / 365.0
+    if T <= 0:
+        T = 0.25 / 365.0
+
+    per_strike: dict = {}
+    for r in chain_raw:
+        if r.get("expiry") != expiry or r.get("option_type") not in ("CE", "PE"):
+            continue
+        strike = float(r["strike"])
+        if abs(strike - spot) / spot > MAX_STRIKE_MONEYNESS:
+            continue
+        opt = r["option_type"]
+        oi = r.get("oi") or 0
+        premium = r.get("last_price") or 0
+        if oi <= 0 or premium <= 0:
+            continue
+        iv = implied_vol(premium, spot, strike, T, RISK_FREE_RATE, opt)
+        if iv is None:
+            continue
+        gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
+        gex = gamma * oi
+        per_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})
+        per_strike[strike][opt] += gex
+
+    if not per_strike:
+        return {"symbol": symbol, "strikes": [], "spot": spot, "error": "no strikes solved"}
+
+    strikes_sorted = sorted(per_strike.keys())
+    net_per_strike = {k: (v["CE"] - v["PE"]) for k, v in per_strike.items()}
+
+    call_wall = max(per_strike.items(), key=lambda kv: kv[1]["CE"]) if any(v["CE"] > 0 for v in per_strike.values()) else None
+    put_wall = max(per_strike.items(), key=lambda kv: kv[1]["PE"]) if any(v["PE"] > 0 for v in per_strike.values()) else None
+
+    LOCAL_BAND_PCT = 0.05
+    local_net_gex = sum(v for k, v in net_per_strike.items() if abs(k - spot) / spot <= LOCAL_BAND_PCT)
+    regime = "SHORT_GAMMA" if local_net_gex < 0 else "LONG_GAMMA"
+
+    flip_point = None
+    crossings = []
+    cum = 0.0
+    prev_strike, prev_cum = None, None
+    for k in strikes_sorted:
+        cum += net_per_strike[k]
+        if prev_cum is not None and ((prev_cum < 0 <= cum) or (prev_cum > 0 >= cum)):
+            span = k - prev_strike
+            if span > 0 and (cum - prev_cum) != 0:
+                frac = (0 - prev_cum) / (cum - prev_cum)
+                crossings.append(round(prev_strike + frac * span, 2))
+            else:
+                crossings.append(k)
+        prev_strike, prev_cum = k, cum
+    if crossings:
+        nearest = min(crossings, key=lambda f: abs(f - spot))
+        if abs(nearest - spot) / spot <= 0.06:
+            flip_point = nearest
+
+    strikes_out = [
+        {
+            "strike": k,
+            "ce_gex": round(per_strike[k]["CE"], 2),
+            "pe_gex": round(-per_strike[k]["PE"], 2),
+            "net_gex": round(net_per_strike[k], 2),
+        }
+        for k in strikes_sorted
+    ]
+
+    return {
+        "symbol": symbol,
+        "expiry": expiry,
+        "days_to_expiry": dte,
+        "spot": spot,
+        "regime": regime,
+        "call_wall_strike": call_wall[0] if call_wall else None,
+        "put_wall_strike": put_wall[0] if put_wall else None,
+        "flip_point": flip_point,
+        "strikes": strikes_out,
+        "as_of": ts_new,
+    }
