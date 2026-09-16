@@ -682,6 +682,11 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None):
         q = supabase.from_("alert_log").select("*").order("id", desc=True)
         if since_id is not None:
             q = q.gt("id", since_id)
+        else:
+            from datetime import datetime, timezone, timedelta
+            ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+            ist_today_start_utc = ist_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=5, minutes=30)
+            q = q.gte("created_at", ist_today_start_utc.isoformat())
         if signal:
             signals = [s.strip() for s in signal.split(",") if s.strip()]
             if signals:
