@@ -407,6 +407,30 @@ def _compute_gamma_exposure(date: str = None):
                 else:
                     oi_trend_label = "STEADY"
 
+        # ── "Clear Runway": is there room to run past the wall that's being
+        # broken, or is another wall parked right on top of it? Finds the
+        # next major gamma-weighted wall beyond the squeeze strike, in the
+        # direction of the move, and whether that gap is wide enough
+        # (>=2% of spot) to call it clear rather than a trap.
+        next_wall_strike = None
+        next_wall_gamma_oi = None
+        runway_pct = None
+        runway_clear = None
+        if squeeze_option_type == "CE" and call_wall_strike is not None:
+            beyond = [(k, v["CE"]) for k, v in per_strike.items() if v["CE"] > 0 and k > call_wall_strike]
+            if beyond:
+                next_wall_strike, _next_gex = max(beyond, key=lambda kv: kv[1])
+                next_wall_gamma_oi = round(_next_gex, 2)
+                runway_pct = round((next_wall_strike - call_wall_strike) / spot * 100, 2)
+        elif squeeze_option_type == "PE" and put_wall_strike is not None:
+            beyond = [(k, v["PE"]) for k, v in per_strike.items() if v["PE"] > 0 and k < put_wall_strike]
+            if beyond:
+                next_wall_strike, _next_gex = max(beyond, key=lambda kv: kv[1])
+                next_wall_gamma_oi = round(_next_gex, 2)
+                runway_pct = round((put_wall_strike - next_wall_strike) / spot * 100, 2)
+        if runway_pct is not None:
+            runway_clear = runway_pct >= 2.0
+
         if squeeze_strike is not None:
             matches = alerts_by_strike.get((sym, squeeze_strike, squeeze_option_type), [])
             confirmations = [
@@ -446,6 +470,10 @@ def _compute_gamma_exposure(date: str = None):
             "oi_current": oi_current,
             "oi_trend_pct": oi_trend_pct,
             "oi_trend_label": oi_trend_label,
+            "next_wall_strike": next_wall_strike,
+            "next_wall_gamma_oi": next_wall_gamma_oi,
+            "runway_pct": runway_pct,
+            "runway_clear": runway_clear,
             "bias": bias,
             "label": label,
             "desc": desc,
