@@ -83,7 +83,18 @@ RISK_FREE_RATE = 0.065  # 6.5% India 10yr Gsec
 # IVR 50-75  = Elevated IV  → above average, mild selling edge
 # IVR 75-100 = High IV      → expensive, strong premium selling environment
 
-SYMBOLS = [
+# BUG FIX (Sep 16 2026): SYMBOLS used to be a hand-maintained hardcoded
+# list, edited manually every time a stock got added to (or dropped from)
+# NSE F&O -- which is how RAYMOND (delisted from F&O since 2013) stayed in
+# this list for years, and why 30 stocks NSE quietly dropped from F&O
+# eligibility (plus TATAMOTORS's 2025 demerger into TMPV/TMCV) kept getting
+# silently zero-captured with no error anywhere. Kept below as
+# _FALLBACK_SYMBOLS -- used only if Kite can't be reached yet (e.g. the
+# instant after a fresh deploy, before login has completed). The real
+# SYMBOLS value is now asked from Kite directly (see services/fno_universe.py)
+# at import time below, and refreshed daily in place by a scheduled job in
+# main.py so a mid-day NSE change doesn't even need a redeploy to take effect.
+_FALLBACK_SYMBOLS = [
     "NIFTY", "BANKNIFTY", "FINNIFTY",
     "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
     "BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","TITAN",
@@ -99,14 +110,20 @@ SYMBOLS = [
     "TVSMOTOR","BHARATFORG","MOTHERSON","LUPIN","TORNTPHARM","AUROPHARMA",
     "GODREJCP","MARICO","DABUR","PIDILITIND","MUTHOOTFIN","SBICARD","ICICIPRULI",
     "IDFCFIRSTB","FEDERALBNK","ETERNAL","POLYCAB","VOLTAS","IEX","ASTRAL",
-    # Added Aug 26 2026: top-liquidity F&O stocks (by FUT OI, price >= Rs 100)
-    # not previously tracked, plus SIEMENS per active personal trading interest.
     "PNB","ADANIPOWER","IOC","ASHOKLEY","BANDHANBNK","INDUSTOWER","IREDA",
     "UNIONBANK","AMBUJACEM","BANKINDIA","BHEL","SWIGGY","CROMPTON","VBL",
     "MANAPPURAM","BIOCON","VMM","LICI","LTF","HINDPETRO","SIEMENS",
-    # Added Sep 2026: phase-1 capacity expansion batch (60 stocks)
     "TATAMOTORS","BOSCHLTD","BALKRISIND","APOLLOTYRE","EXIDEIND","LTIM","MPHASIS","LTTS","TATAELXSI","KPITTECH","ALKEM","GLENMARK","ZYDUSLIFE","LAURUSLABS","GRANULES","IPCALAB","AUBANK","RBLBANK","YESBANK","CANFINHOME","LICHSGFIN","PNBHOUSING","MFSL","RVNL","IRCTC","IRFC","CONCOR","NHPC","NLCINDIA","HUDCO","NBCC","NMDC","JINDALSTEL","HINDCOPPER","NATIONALUM","IGL","MGL","PETRONET","GUJGASLTD","ADANIGREEN","ADANIENSOL","TORNTPOWER","JSWENERGY","ACC","DALBHARAT","JKCEMENT","RAMCOCEM","DEEPAKNTR","NAVINFLUOR","AARTIIND","GNFC","UPL","COROMANDEL","SUZLON","IDEA","PVRINOX","KFINTECH","CAMS","ABCAPITAL","ABFRL","KALYANKJIL","RAYMONDLSL","RRKABEL",
 ]
+
+try:
+    from services.fno_universe import get_live_fno_symbols, INDICES as _FNO_INDICES
+    _live = get_live_fno_symbols()
+    SYMBOLS = (_FNO_INDICES + _live) if _live else _FALLBACK_SYMBOLS
+    print(f"[iv_analysis] loaded {len(SYMBOLS)} live F&O symbols from Kite")
+except Exception as _e:
+    print(f"[iv_analysis] could not load live F&O universe ({_e}), using fallback list of {len(_FALLBACK_SYMBOLS)} symbols")
+    SYMBOLS = _FALLBACK_SYMBOLS
 
 # How many trading days to look back for IVR/IVP
 # Market standard = 252 (1 year). We use whatever history exists,

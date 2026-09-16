@@ -9,6 +9,12 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import pytz
 
+# BUG FIX (Sep 16 2026): this file used SYMBOLS below without ever importing
+# it -- a real NameError waiting to happen every time this code path ran
+# (compute_daily_summary is called live from main.py). Found while auditing
+# every SYMBOLS usage in the repo as part of the live-F&O-universe fix.
+from api.iv_analysis import SYMBOLS
+
 IST = pytz.timezone("Asia/Kolkata")
 
 def compute_daily_summary(supabase, trade_date: str = None) -> dict:

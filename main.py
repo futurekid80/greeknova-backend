@@ -364,6 +364,37 @@ async def lifespan(app: FastAPI):
             print(f"[Push] Scheduled check failed: {e}")
     scheduler.add_job(_run_push_checks_job, "interval", minutes=5, id="push_checks")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
+
+    def _run_fno_universe_refresh_job():
+        # Re-asks Kite which stocks currently have live F&O contracts and
+        # updates SYMBOLS/TOP30/STOCK_NSE_MAP IN PLACE (mutating the same
+        # list/dict objects other modules already imported), so a stock
+        # NSE drops from F&O -- or a demerger like RAYMOND/TATAMOTORS --
+        # falls out of (or a new one falls into) GreekNova's capture
+        # universe the same day, with no redeploy needed. Runs 5 min after
+        # the daily token refresh so the Kite session is guaranteed fresh.
+        try:
+            from services.fno_universe import get_live_fno_symbols, INDICES as _fno_indices
+            live = get_live_fno_symbols()
+            if not live:
+                print("[fno_universe] daily refresh got nothing back from Kite — leaving universe unchanged")
+                return
+            import api.iv_analysis as _iv
+            old_set = set(TOP30)
+            new_symbols = _fno_indices + live
+            _iv.SYMBOLS[:] = new_symbols
+            TOP30[:] = [s for s in new_symbols if s not in INDICES]
+            STOCK_NSE_MAP.clear()
+            STOCK_NSE_MAP.update({s: f"NSE:{s}" for s in TOP30})
+            new_set = set(TOP30)
+            added, removed = new_set - old_set, old_set - new_set
+            print(f"[fno_universe] daily refresh: {len(TOP30)} stocks tracked "
+                  f"(+{len(added)}/-{len(removed)})"
+                  + (f" added={sorted(added)}" if added else "")
+                  + (f" removed={sorted(removed)}" if removed else ""))
+        except Exception as e:
+            print(f"[fno_universe] daily refresh job failed: {e}")
+    scheduler.add_job(_run_fno_universe_refresh_job, "cron", hour=8, minute=35, timezone="Asia/Kolkata", id="fno_universe_refresh")
     scheduler.add_job(
         lambda: __import__('api.cpr', fromlist=['compute_and_store_cpr']).compute_and_store_cpr(),
         "cron", hour=16, minute=45, timezone="Asia/Kolkata", id="eod_cpr_compute",
