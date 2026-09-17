@@ -587,6 +587,16 @@ def root(): return {"status": "GreekNova API running", "version": "0.1.0"}
 @app.get("/health")
 def health(): return {"status": "ok"}
 
+# TEMP DEBUG (Sep 17 2026) -- audit endpoint to dump the true live F&O
+# universe for reconciling it against the frontend/sector-map lists.
+# Safe to delete after the audit is done.
+@app.get("/admin/live-symbols-debug")
+def live_symbols_debug():
+    from api.iv_analysis import SYMBOLS
+    from services.fno_universe import INDICES
+    stocks = sorted(s for s in SYMBOLS if s not in INDICES)
+    return {"count": len(stocks), "symbols": stocks}
+
 @app.get("/capture-now")
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
