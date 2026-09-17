@@ -597,6 +597,15 @@ def live_symbols_debug():
     stocks = sorted(s for s in SYMBOLS if s not in INDICES)
     return {"count": len(stocks), "symbols": stocks}
 
+@app.get("/admin/dropped-underlyings-debug")
+def dropped_underlyings_debug():
+    """TEMP (Sep 17 2026) -- shows what get_live_fno_symbols() is currently
+    excluding as "not a real equity", so we can tell real missing stocks
+    apart from genuine indices/SGBs/etc. Safe to delete after the audit."""
+    from services.fno_universe import get_live_fno_symbols_debug
+    stocks, dropped = get_live_fno_symbols_debug()
+    return {"stock_count": len(stocks), "dropped_count": len(dropped), "dropped": dropped}
+
 # TEMP DEBUG (Sep 17 2026) -- manually fire the same live-universe refresh
 # the 8:35am daily cron runs, but on-demand and outside the boot-time
 # login+capture race that was shrinking the tracked universe. Kite session

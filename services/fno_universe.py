@@ -32,6 +32,13 @@ def get_live_fno_symbols():
     Kite's own NSE equity listing: if it isn't a real listed stock there,
     it's not a stock here either -- whatever index NSE launches next is
     excluded automatically, with nothing to maintain."""
+    return get_live_fno_symbols_debug()[0]
+
+
+def get_live_fno_symbols_debug():
+    """Same as get_live_fno_symbols() but also returns the excluded-underlying
+    breakdown for auditing. TEMP (Sep 17 2026) -- remove alongside the debug
+    endpoints once the symbol count is fully reconciled."""
     try:
         from services.kite_auth import get_kite_client
         kite = get_kite_client()
@@ -77,7 +84,7 @@ def get_live_fno_symbols():
 
         if dropped:
             print(f"[fno_universe] excluded {len(dropped)} non-equity F&O underlyings (indices etc): {dropped}")
-        return stocks
+        return stocks, dropped
     except Exception as e:
         print(f"[fno_universe] could not fetch live F&O symbols from Kite: {e}")
-        return []
+        return [], []
