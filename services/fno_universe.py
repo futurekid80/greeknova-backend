@@ -47,6 +47,25 @@ def get_live_fno_symbols():
         }
         stocks = sorted(nfo_names & equity_names)
         dropped = sorted(nfo_names - equity_names - set(INDICES))
+
+        # SANITY FLOOR (Sep 17 2026): if Kite's NSE equity dump comes back
+        # incomplete or rate-limited (seen in production: a boot where the
+        # /NSE instruments call raced the startup login + immediate capture
+        # and returned too few rows), almost every real stock fails the
+        # equity cross-reference and gets wrongly treated as "not a stock" --
+        # silently shrinking the tracked universe to ~24-27 symbols with no
+        # error anywhere. NSE has consistently had 190+ F&O-eligible stocks
+        # for years, so anything drastically below that means this response
+        # can't be trusted -- treat it the same as "Kite unreachable" and let
+        # the caller fall back to the last-known-good list instead of
+        # accepting an implausibly small one.
+        MIN_PLAUSIBLE_STOCKS = 150
+        if len(stocks) < MIN_PLAUSIBLE_STOCKS:
+            print(f"[fno_universe] got only {len(stocks)} stocks (need >={MIN_PLAUSIBLE_STOCKS}) -- "
+                  f"Kite's NSE equity response looks incomplete/rate-limited, discarding this "
+                  f"result and falling back instead of shrinking the tracked universe")
+            return []
+
         if dropped:
             print(f"[fno_universe] excluded {len(dropped)} non-equity F&O underlyings (indices etc): {dropped}")
         return stocks
