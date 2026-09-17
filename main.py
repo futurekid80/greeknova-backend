@@ -597,6 +597,33 @@ def live_symbols_debug():
     stocks = sorted(s for s in SYMBOLS if s not in INDICES)
     return {"count": len(stocks), "symbols": stocks}
 
+# TEMP DEBUG (Sep 17 2026) -- manually fire the same live-universe refresh
+# the 8:35am daily cron runs, but on-demand and outside the boot-time
+# login+capture race that was shrinking the tracked universe. Kite session
+# is already warm at this point (not competing with startup login), so
+# this should get the true, complete list. Safe to delete after the audit.
+@app.get("/admin/refresh-fno-universe-debug")
+def refresh_fno_universe_debug():
+    from services.fno_universe import get_live_fno_symbols, INDICES as _fno_indices
+    live = get_live_fno_symbols()
+    if not live:
+        return {"ok": False, "message": "got nothing back from Kite (still rate-limited or unreachable right now)"}
+    import api.iv_analysis as _iv
+    old_set = set(TOP30)
+    new_symbols = _fno_indices + live
+    _iv.SYMBOLS[:] = new_symbols
+    TOP30[:] = [s for s in new_symbols if s not in INDICES]
+    STOCK_NSE_MAP.clear()
+    STOCK_NSE_MAP.update({s: f"NSE:{s}" for s in TOP30})
+    new_set = set(TOP30)
+    return {
+        "ok": True,
+        "count": len(TOP30),
+        "added": sorted(new_set - old_set),
+        "removed": sorted(old_set - new_set),
+        "symbols": sorted(TOP30),
+    }
+
 @app.get("/capture-now")
 def capture_now(): run_full_capture(); return {"status": "capture triggered"}
 
