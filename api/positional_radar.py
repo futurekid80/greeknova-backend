@@ -387,7 +387,7 @@ def get_positional_radar(min_consec: int = 0):
     # ── CPR data — for ignition quality score ─────────────────────────────────
     # Use latest available CPR (handles weekends — Mon CPR computed Sunday night)
     try:
-        cpr_rows = supabase.from_("cpr_levels")            .select("symbol, tc, bc, cpr_trend, is_virgin, trade_date")            .order("trade_date", desc=True)            .limit(200).execute()
+        cpr_rows = supabase.from_("cpr_levels")            .select("symbol, tc, bc, cpr_trend, is_virgin, trade_date")            .order("trade_date", desc=True)            .limit(500).execute()
         cpr_map = {r["symbol"]: r for r in (cpr_rows.data or [])}
         print(f"[Positional Radar] CPR data fetched for {len(cpr_map)} symbols")
     except Exception as e:
