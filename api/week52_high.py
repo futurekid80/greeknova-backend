@@ -65,14 +65,29 @@ def compute_52_week_high(supabase, cmp_map: dict):
         rows = _fetch_all_bars(supabase, cutoff)
         highs: dict = {}
         high_dates: dict = {}
+        day_counts: dict = {}
         for r in rows:
             sym = r["symbol"]
             h = r.get("high")
+            day_counts[sym] = day_counts.get(sym, 0) + 1
             if h is None:
                 continue
             if sym not in highs or h > highs[sym]:
                 highs[sym] = h
                 high_dates[sym] = r["trade_date"]
+
+        # BUG FIX (Sep 17 2026): a symbol newly added to the tracked universe
+        # (e.g. today's ABB/DELHIVERY/KEI/BDL/360ONE/etc audit) only just
+        # started getting daily bars backfilled here -- with 1-3 days of
+        # history, "52-week high" was literally just today's price, so
+        # every brand-new symbol trivially showed as "at its 52-week high"
+        # with nothing real to compare against (confirmed live: several
+        # symbols had only 1 day of spot_daily_bars rows vs 274 for
+        # long-tracked names like RELIANCE/TCS/HDFCBANK). Require a
+        # meaningful amount of real history before trusting this number.
+        MIN_TRADING_DAYS = 200
+        highs = {s: h for s, h in highs.items() if day_counts.get(s, 0) >= MIN_TRADING_DAYS}
+        high_dates = {s: d for s, d in high_dates.items() if s in highs}
         _cache = (highs, high_dates)
         _cache_time = now
 
