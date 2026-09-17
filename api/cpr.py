@@ -542,7 +542,7 @@ def get_cpr_scanner_timeframe(timeframe: str = "daily"):
         .select("*")\
         .eq("trade_date", query_date)\
         .eq("timeframe", timeframe)\
-        .limit(200).execute()
+        .limit(500).execute()
 
     if not rows.data:
         return {"data": [], "total": 0, "trade_date": query_date,

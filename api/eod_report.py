@@ -28,7 +28,7 @@ def get_eod_report(supabase, date: str = None):
             .eq("trade_date", date)\
             .not_.is_("fut_signal", "null")\
             .neq("fut_signal", "NEUTRAL")\
-            .limit(200)\
+            .limit(500)\
             .execute()
         all_movers = movers_res.data or []
     except Exception as e:
@@ -60,7 +60,7 @@ def get_eod_report(supabase, date: str = None):
         breadth_res = supabase.from_("daily_oi_summary")\
             .select("symbol, fut_signal")\
             .eq("trade_date", date)\
-            .limit(200)\
+            .limit(500)\
             .execute()
         breadth_data = breadth_res.data or []
     except:
@@ -83,7 +83,7 @@ def get_eod_report(supabase, date: str = None):
             .select("symbol, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_signal")\
             .eq("trade_date", date)\
             .gte("fut_oi_chg_pct", 1.5)\
-            .limit(200)\
+            .limit(500)\
             .execute()
         stealth_raw = stealth_res.data or []
     except:

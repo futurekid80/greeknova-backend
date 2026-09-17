@@ -177,7 +177,7 @@ def get_rollover(supabase):
         sig_res = supabase.from_("daily_oi_summary")\
             .select("symbol, fut_signal, price_chg_pct, close_price")\
             .eq("trade_date", last_trading_date)\
-            .limit(200)\
+            .limit(500)\
             .execute()
         sig_map = {r["symbol"]: r for r in (sig_res.data or [])}
     except:

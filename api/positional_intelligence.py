@@ -166,7 +166,7 @@ def get_positional_intelligence(min_consec: int = 0):
             .select("symbol, tc, bc, width_label, width_emoji, cpr_trend, trade_date")\
             .gte("trade_date", today_str)\
             .order("trade_date", desc=False)\
-            .limit(200)\
+            .limit(500)\
             .execute()
         cpr_map = {r["symbol"]: r for r in (cpr_res.data or [])}
     except:

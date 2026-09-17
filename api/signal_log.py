@@ -398,7 +398,7 @@ def get_signal_log(date: str = None):
     cpr_result = supabase.from_("cpr_levels")\
         .select("symbol, tc, bc, width_pct, width_emoji, is_virgin")\
         .gte("trade_date", today)\
-        .limit(200)\
+        .limit(500)\
         .execute()
     cpr_map: dict = {}
     for r in (cpr_result.data or []):

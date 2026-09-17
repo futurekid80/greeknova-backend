@@ -404,7 +404,7 @@ def _get_eod_pulse(supabase):
         return supabase.from_("daily_oi_summary")\
             .select("symbol, oi_chg_pct, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_vol")\
             .eq("trade_date", last_trading_day)\
-            .limit(200)\
+            .limit(500)\
             .execute()
     try:
         rows = _q_rows()

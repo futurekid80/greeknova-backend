@@ -164,7 +164,7 @@ def _get_eod_from_summary(supabase, now_ist):
         .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price")\
         .eq("trade_date", trade_date)\
         .gt("fut_vol", 0)\
-        .limit(200)\
+        .limit(500)\
         .execute()
 
     hist_start = (now_ist.date() - timedelta(days=35)).isoformat()
