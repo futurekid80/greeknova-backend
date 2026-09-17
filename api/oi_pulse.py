@@ -253,7 +253,7 @@ def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = 
     return filtered
 
 
-def fetch_oi_window_summed(supabase, anchor_timestamp: str, nearest_expiry_map: dict = None, window_minutes: int = 6):
+def fetch_oi_window_summed(supabase, anchor_timestamp: str, nearest_expiry_map: dict = None, window_minutes: float = 1.5):
     """BUG FIX (Sep 17 2026): fetch_oi_for_timestamp() above does an EXACT
     match against one anchor timestamp -- but a ~210-stock capture cycle
     writes its rows one after another, not all at the identical second, so
