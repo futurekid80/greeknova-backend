@@ -11,16 +11,28 @@ PULSE_CACHE_TTL = 60  # seconds post-market, 15s during market
 # BUG FIX (Aug 26 2026): was a hardcoded, independently-maintained copy of
 # the symbol list -- silently drifted out of sync every time a symbol got
 # added elsewhere (found while adding 21 new F&O stocks; this file would
-# have kept excluding all of them from OI Pulse without this fix). Now
-# derived from the single canonical list so it can't drift again.
-from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
-STOCK_NSE_MAP = {s: f"NSE:{s}" for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY")}
+# have kept excluding all of them from OI Pulse without this fix).
+#
+# BUG FIX #2 (Sep 17 2026): the fix above only helped at import time -- it
+# built STOCK_NSE_MAP/ALL_SYMBOLS as one-off snapshots via dict/list
+# comprehension, which are brand new objects, NOT the same list api.iv_analysis
+# mutates in place. So the daily 8:35am refresh job (which updates
+# api.iv_analysis.SYMBOLS live, same trick main.py's TOP30 relies on) never
+# reached this file -- it would keep serving whatever universe existed at
+# the last full redeploy until the next one. Now computed fresh on every
+# call instead of frozen once at import.
 INDEX_NSE_MAP = {
     "NIFTY":     "NSE:NIFTY 50",
     "BANKNIFTY": "NSE:NIFTY BANK",
     "FINNIFTY":  "NSE:NIFTY FIN SERVICE",
 }
-ALL_SYMBOLS = list(INDEX_NSE_MAP.keys()) + list(STOCK_NSE_MAP.keys())
+
+def _stock_nse_map():
+    from api.iv_analysis import SYMBOLS as _live_symbols
+    return {s: f"NSE:{s}" for s in _live_symbols if s not in INDEX_NSE_MAP}
+
+def _all_symbols():
+    return list(INDEX_NSE_MAP.keys()) + list(_stock_nse_map().keys())
 
 MARKET_OPEN_UTC  = 3 * 60 + 45   # 03:45 UTC = 09:15 IST
 # BUG FIX (Aug 3 2026): was 10:00 UTC (15:30 IST) — CAS goes live today,
@@ -501,7 +513,7 @@ def get_oi_pulse():
         try:
             from services.kite_auth import get_kite_client
             kite = get_kite_client()
-            all_map = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
+            all_map = {**INDEX_NSE_MAP, **_stock_nse_map()}
             quotes = kite.quote(list(all_map.values()))
             for sym, key in all_map.items():
                 if key in quotes:
@@ -554,7 +566,7 @@ def get_oi_pulse():
 
     # Step 5: Build items
     items = []
-    for sym in ALL_SYMBOLS:
+    for sym in _all_symbols():
         is_index = sym in INDEX_NSE_MAP
         o_old = oi_old.get(sym, 0)
         o_new = oi_new.get(sym, 0)
