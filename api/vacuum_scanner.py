@@ -1,24 +1,9 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
 
-
-SYMBOLS = [
-    "NIFTY", "BANKNIFTY", "FINNIFTY",
-    "RELIANCE","TCS","HDFCBANK","INFY","ICICIBANK","HINDUNILVR","ITC","SBIN",
-    "BHARTIARTL","KOTAKBANK","LT","AXISBANK","ASIANPAINT","MARUTI","TITAN",
-    "SUNPHARMA","ULTRACEMCO","BAJFINANCE","WIPRO","HCLTECH","TATACONSUM",
-    "TATASTEEL","ADANIENT","POWERGRID","NTPC","ONGC","JSWSTEEL","COALINDIA",
-    "BAJAJFINSV","TECHM","APOLLOHOSP","BAJAJ-AUTO","BPCL","BRITANNIA","CIPLA",
-    "DRREDDY","EICHERMOT","GRASIM","HEROMOTOCO","HINDALCO","HDFCLIFE",
-    "INDUSINDBK","JIOFIN","M&M","NESTLEIND","SBILIFE","SHRIRAMFIN","TRENT",
-    "ADANIPORTS","BANKBARODA","BEL","CANBK","CHOLAFIN","DLF","GAIL","HAVELLS",
-    "HAL","INDIGO","PFC","RECLTD","SAIL","TATAPOWER","VEDL",
-    "PAYTM","NYKAA","PERSISTENT","DIXON",
-    "BSE","MCX","TMPV","GODREJPROP","DIVISLAB","COFORGE","ANGELONE","CDSL","OIL",
-    "TVSMOTOR","BHARATFORG","MOTHERSON","LUPIN","TORNTPHARM","AUROPHARMA",
-    "GODREJCP","MARICO","DABUR","PIDILITIND","MUTHOOTFIN","SBICARD","ICICIPRULI",
-    "IDFCFIRSTB","FEDERALBNK","ETERNAL","POLYCAB","VOLTAS","IEX","ASTRAL",
-]
+# BUG FIX (Sep 17 2026): standalone stale list replaced with the live,
+# daily-refreshed universe every other live endpoint already uses.
+from api.iv_analysis import SYMBOLS
 
 # Hard absolute cap — no strike with either side > 1L can be a vacuum
 # regardless of the stock's overall OI scale
