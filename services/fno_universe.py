@@ -15,21 +15,41 @@ INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
 
 def get_live_fno_symbols():
-    """Return the sorted list of stock symbols that currently have at least
+    """Return the sorted list of STOCK symbols that currently have at least
     one live options or futures contract on Kite's NFO segment. Returns an
     empty list (never raises) if Kite isn't reachable -- callers should
     treat an empty result as "couldn't check right now" and keep whatever
-    list they already had."""
+    list they already had.
+
+    BUG FIX (Sep 17 2026): originally this just excluded the 3 known index
+    names (NIFTY/BANKNIFTY/FINNIFTY). That missed MIDCPNIFTY, NIFTYNXT50,
+    and NIFTYFPI ("Nifty India FPI 150", launched Aug 2026) -- all real NSE
+    index derivatives, none of them stocks -- which leaked into the tracked
+    stock universe as if they were companies. A hardcoded index-name list is
+    exactly the fragile pattern this module was built to get away from (NSE
+    launches new index derivatives periodically), so instead of adding those
+    three names to a list, this now checks each F&O underlying against
+    Kite's own NSE equity listing: if it isn't a real listed stock there,
+    it's not a stock here either -- whatever index NSE launches next is
+    excluded automatically, with nothing to maintain."""
     try:
         from services.kite_auth import get_kite_client
         kite = get_kite_client()
-        instruments = kite.instruments("NFO")
-        names = {
-            i["name"] for i in instruments
-            if i.get("instrument_type") in ("CE", "PE", "FUT")
-            and i.get("name") not in INDICES
+        nfo_instruments = kite.instruments("NFO")
+        nse_instruments = kite.instruments("NSE")
+        equity_names = {
+            i["name"] for i in nse_instruments
+            if i.get("instrument_type") == "EQ"
         }
-        return sorted(names)
+        nfo_names = {
+            i["name"] for i in nfo_instruments
+            if i.get("instrument_type") in ("CE", "PE", "FUT")
+        }
+        stocks = sorted(nfo_names & equity_names)
+        dropped = sorted(nfo_names - equity_names - set(INDICES))
+        if dropped:
+            print(f"[fno_universe] excluded {len(dropped)} non-equity F&O underlyings (indices etc): {dropped}")
+        return stocks
     except Exception as e:
         print(f"[fno_universe] could not fetch live F&O symbols from Kite: {e}")
         return []
