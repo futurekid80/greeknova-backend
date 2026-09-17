@@ -253,6 +253,57 @@ def fetch_oi_for_timestamp(supabase, timestamp: str, nearest_expiry_map: dict = 
     return filtered
 
 
+def fetch_oi_window_summed(supabase, anchor_timestamp: str, nearest_expiry_map: dict = None, window_minutes: int = 6):
+    """BUG FIX (Sep 17 2026): fetch_oi_for_timestamp() above does an EXACT
+    match against one anchor timestamp -- but a ~210-stock capture cycle
+    writes its rows one after another, not all at the identical second, so
+    any strike whose row landed even a few seconds off the anchor was
+    silently missing. Downstream this zeroed out oi_now for whichever
+    stocks got unlucky on a given request, making Market Breadth's "N F&O
+    symbols" count flicker between a partial number and the true one
+    depending on exactly which timestamp a request happened to anchor on --
+    same root bug class already fixed this way in uoa.py/options_jungle.py/
+    oi_profile.py, just missed here.
+
+    Fix: pull every row in a window ending at the anchor, keep only the
+    LATEST row per (symbol, expiry, strike, option_type) so OI isn't
+    double-counted across multiple 5-min snapshots in that window, then sum
+    per symbol. Returns a plain {symbol: summed_oi} dict.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    anchor_dt = _dt.fromisoformat(anchor_timestamp.replace("Z", "+00:00"))
+    window_start = (anchor_dt - _td(minutes=window_minutes)).isoformat()
+
+    latest_by_key = {}
+    for offset in range(0, 1000000, 1000):
+        batch = supabase.from_("oi_snapshots")\
+            .select("symbol, oi, expiry, strike, option_type, timestamp")\
+            .gte("timestamp", window_start)\
+            .lte("timestamp", anchor_timestamp)\
+            .in_("option_type", ["CE", "PE"])\
+            .range(offset, offset + 999)\
+            .execute()
+        if not batch.data:
+            break
+        for r in batch.data:
+            sym = r["symbol"]
+            if nearest_expiry_map:
+                nearest = nearest_expiry_map.get(sym)
+                if nearest and r.get("expiry") != nearest:
+                    continue
+            key = (sym, r.get("expiry"), r.get("strike"), r.get("option_type"))
+            existing = latest_by_key.get(key)
+            if existing is None or r["timestamp"] > existing["timestamp"]:
+                latest_by_key[key] = r
+        if len(batch.data) < 1000:
+            break
+
+    summed: dict = defaultdict(int)
+    for r in latest_by_key.values():
+        summed[r["symbol"]] += r["oi"] or 0
+    return summed
+
+
 def get_latest_market_timestamp(supabase):
     """Find most recent trading day that has market-hours data"""
     for days_back in range(6):
@@ -495,15 +546,11 @@ def get_oi_pulse():
 
     # Step 3b: Options OI for activity display
     nearest_expiry_map = get_nearest_expiry_per_symbol(supabase, ts_new)
-    old_rows = fetch_oi_for_timestamp(supabase, ts_old, nearest_expiry_map)
-    new_rows = fetch_oi_for_timestamp(supabase, ts_new, nearest_expiry_map)
-
-    oi_old = defaultdict(int)
-    oi_new = defaultdict(int)
-    for r in old_rows:
-        oi_old[r["symbol"]] += r["oi"] or 0
-    for r in new_rows:
-        oi_new[r["symbol"]] += r["oi"] or 0
+    # BUG FIX (Sep 17 2026): was exact-timestamp matching (fetch_oi_for_timestamp),
+    # which silently dropped any stock whose row didn't land at the identical
+    # second as the chosen anchor. See fetch_oi_window_summed's docstring.
+    oi_old = fetch_oi_window_summed(supabase, ts_old, nearest_expiry_map)
+    oi_new = fetch_oi_window_summed(supabase, ts_new, nearest_expiry_map)
 
     has_futures_data = len(fut_oi_new) > 0
 
