@@ -37,16 +37,25 @@ def get_live_fno_symbols():
         kite = get_kite_client()
         nfo_instruments = kite.instruments("NFO")
         nse_instruments = kite.instruments("NSE")
-        equity_names = {
-            i["name"] for i in nse_instruments
+        # BUG FIX (Sep 17 2026, round 2): was matching by NSE's company
+        # "name" field (e.g. "ABB INDIA") against NFO's underlying "name"
+        # field (e.g. "ABB") -- these are NOT always the same string, so any
+        # stock whose full company name differs from its trading symbol
+        # (confirmed live: ABB) silently failed this match and got wrongly
+        # excluded from the tracked universe, exactly like the index-leakage
+        # bug this same cross-reference was built to fix. Matching against
+        # NSE's "tradingsymbol" field instead -- that's what Kite's F&O
+        # underlying names actually follow, so it doesn't have this gap.
+        equity_tradingsymbols = {
+            i["tradingsymbol"] for i in nse_instruments
             if i.get("instrument_type") == "EQ"
         }
         nfo_names = {
             i["name"] for i in nfo_instruments
             if i.get("instrument_type") in ("CE", "PE", "FUT")
         }
-        stocks = sorted(nfo_names & equity_names)
-        dropped = sorted(nfo_names - equity_names - set(INDICES))
+        stocks = sorted(nfo_names & equity_tradingsymbols)
+        dropped = sorted(nfo_names - equity_tradingsymbols - set(INDICES))
 
         # SANITY FLOOR (Sep 17 2026): if Kite's NSE equity dump comes back
         # incomplete or rate-limited (seen in production: a boot where the
