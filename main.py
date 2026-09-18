@@ -1375,14 +1375,14 @@ def gamma_by_strike(symbol: str, date: str = None):
 
 @app.get("/admin/gex-audit-debug")
 def gex_audit_debug():
-    """TEMP (Sep 18 2026) -- compares live Kite NFO F&O stock universe
-    against which symbols actually made it into the /gamma-squeeze
+    """TEMP (Sep 18 2026) -- compares the currently-loaded TOP30 universe
+    (fast, in-memory -- what every page in the app is actually using right
+    now) against which symbols actually made it into the /gamma-squeeze
     watchlist output, to find any that are silently getting dropped
     despite having live data. Remove after the audit."""
-    from services.fno_universe import get_live_fno_symbols
     from services.gamma_exposure import get_gamma_exposure
 
-    live_universe = set(get_live_fno_symbols())
+    live_universe = set(TOP30)
     gex = get_gamma_exposure()
     in_watchlist = set(r["symbol"] for r in gex.get("watchlist", []))
 
@@ -1390,10 +1390,10 @@ def gex_audit_debug():
     extra = sorted(in_watchlist - live_universe)
 
     return {
-        "live_universe_count": len(live_universe),
+        "top30_universe_count": len(live_universe),
         "watchlist_count": len(in_watchlist),
         "missing_from_watchlist": missing,
-        "in_watchlist_but_not_live_universe": extra,
+        "in_watchlist_but_not_top30": extra,
     }
 
 @app.get("/option-chain/{symbol}")
