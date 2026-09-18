@@ -13,6 +13,42 @@ asks Kite directly instead, so that gap can't happen again.
 
 INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
 
+# LOT_SIZES: symbol -> current NSE lot size, sourced live from Kite's NFO
+# instrument dump (the only place lot sizes actually live -- NSE revises
+# them quarterly and nothing in this codebase tracked them before Sep 18
+# 2026, so pages needing a lot size had to hardcode their own guesses).
+# Populated by refresh_lot_sizes() below, mutated in place like TOP30 is
+# elsewhere, so anything holding a reference to this dict sees updates.
+LOT_SIZES: dict = {}
+
+
+def refresh_lot_sizes():
+    """Refetches current lot sizes for every live F&O stock from Kite and
+    updates LOT_SIZES in place. Never raises -- leaves the existing map
+    untouched on any failure, same fail-safe pattern as
+    get_live_fno_symbols_debug() above."""
+    try:
+        from services.kite_auth import get_kite_client
+        kite = get_kite_client()
+        nfo_instruments = kite.instruments("NFO")
+        fresh: dict = {}
+        for i in nfo_instruments:
+            if i.get("instrument_type") not in ("CE", "PE", "FUT"):
+                continue
+            name = i.get("name")
+            lot = i.get("lot_size")
+            if name and lot:
+                fresh[name] = lot
+        if len(fresh) < 150:
+            print(f"[fno_universe] refresh_lot_sizes got only {len(fresh)} symbols -- "
+                  f"looks incomplete, keeping existing LOT_SIZES unchanged")
+            return
+        LOT_SIZES.clear()
+        LOT_SIZES.update(fresh)
+        print(f"[fno_universe] refreshed lot sizes for {len(LOT_SIZES)} symbols")
+    except Exception as e:
+        print(f"[fno_universe] refresh_lot_sizes failed: {e}")
+
 
 def get_live_fno_symbols():
     """Return the sorted list of STOCK symbols that currently have at least
