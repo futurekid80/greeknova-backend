@@ -206,18 +206,34 @@ def fetch_avg_vol_5d(supabase, before_date: str) -> dict:
 
 def _has_stock_data_at(supabase, timestamp: str) -> bool:
     """(Aug 27 2026): checks whether a representative stock (not just
-    NIFTY) actually has options data at this exact timestamp. Used to
-    fix a bug where get_prev_market_timestamp/get_latest_market_timestamp
+    NIFTY) actually has options data near this timestamp. Used to fix a
+    bug where get_prev_market_timestamp/get_latest_market_timestamp
     picked whatever timestamp NIFTY's own capture landed on, then
     fetch_oi_for_timestamp did an EXACT match against that timestamp for
     every stock too -- but on days where the (much larger) stock batch
     takes a bit longer than the 3 indices to land, that exact timestamp
     genuinely has zero stock rows, silently zeroing out oi_prev/oi_now
-    for every single stock while indices kept working fine."""
+    for every single stock while indices kept working fine.
+
+    BUG FIX (Sep 18 2026): this itself still used an EXACT timestamp
+    match against RELIANCE, which turned out to fail routinely -- NIFTY
+    and RELIANCE simply don't land on the identical timestamp string
+    within a capture cycle (confirmed live: 0 rows at RELIANCE for
+    NIFTY's own latest timestamp). That made get_latest_market_timestamp
+    fail this check for every one of today's candidate timestamps and
+    fall all the way back to yesterday's date -- Market Pulse/Breadth
+    showing "yesterday's data" despite today's captures running fine.
+    Widened to a small window around the anchor, same fix pattern
+    already applied to the OI-value fetch itself."""
+    from datetime import datetime as _dt, timedelta as _td
+    anchor_dt = _dt.fromisoformat(timestamp.replace("Z", "+00:00"))
+    window_start = (anchor_dt - _td(seconds=90)).isoformat()
+    window_end = (anchor_dt + _td(seconds=90)).isoformat()
     result = supabase.from_("oi_snapshots")\
         .select("symbol")\
         .eq("symbol", "RELIANCE")\
-        .eq("timestamp", timestamp)\
+        .gte("timestamp", window_start)\
+        .lte("timestamp", window_end)\
         .in_("option_type", ["CE", "PE"])\
         .limit(1)\
         .execute()
