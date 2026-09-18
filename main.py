@@ -395,6 +395,21 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[fno_universe] daily refresh job failed: {e}")
     scheduler.add_job(_run_fno_universe_refresh_job, "cron", hour=8, minute=35, timezone="Asia/Kolkata", id="fno_universe_refresh")
+
+    def _run_lot_size_refresh_job():
+        try:
+            from services.fno_universe import refresh_lot_sizes
+            refresh_lot_sizes()
+        except Exception as e:
+            print(f"[fno_universe] lot size refresh job failed: {e}")
+    from datetime import datetime as _lot_job_now
+    # next_run_time=now kicks off an immediate first run on boot/deploy so
+    # LOT_SIZES isn't empty until the next 8:40am cron fire; then daily
+    # after that, right after the universe refresh.
+    scheduler.add_job(
+        _run_lot_size_refresh_job, "cron", hour=8, minute=40, timezone="Asia/Kolkata",
+        id="lot_size_refresh", next_run_time=_lot_job_now.now()
+    )
     scheduler.add_job(
         lambda: __import__('api.cpr', fromlist=['compute_and_store_cpr']).compute_and_store_cpr(),
         "cron", hour=16, minute=45, timezone="Asia/Kolkata", id="eod_cpr_compute",
@@ -1803,13 +1818,15 @@ def market_status():
 @app.get("/symbols")
 def get_symbols():
     """Permanent public endpoint: the live, currently-tracked F&O universe
-    (indices + stocks), refreshed daily by the 8:35am Kite sync job. Single
-    source of truth for the frontend's search/autocomplete lists, so they
-    never go stale again."""
+    (indices + stocks) plus current lot sizes, refreshed daily by the
+    8:35am/8:40am Kite sync jobs. Single source of truth for the frontend's
+    search/autocomplete lists and lot-size lookups, so neither goes stale."""
+    from services.fno_universe import LOT_SIZES
     return {
         "indices": INDICES,
         "stocks": TOP30,
         "all": INDICES + TOP30,
+        "lot_sizes": LOT_SIZES,
     }
 
 @app.get("/delivery-confluence")
