@@ -1373,29 +1373,6 @@ def gamma_by_strike(symbol: str, date: str = None):
     return get_gex_by_strike(symbol.upper(), date)
 
 
-@app.get("/admin/gex-audit-debug")
-def gex_audit_debug():
-    """TEMP (Sep 18 2026) -- compares the currently-loaded TOP30 universe
-    (fast, in-memory -- what every page in the app is actually using right
-    now) against which symbols actually made it into the /gamma-squeeze
-    watchlist output, to find any that are silently getting dropped
-    despite having live data. Remove after the audit."""
-    from services.gamma_exposure import get_gamma_exposure
-
-    live_universe = set(TOP30)
-    gex = get_gamma_exposure()
-    in_watchlist = set(r["symbol"] for r in gex.get("watchlist", []))
-
-    missing = sorted(live_universe - in_watchlist)
-    extra = sorted(in_watchlist - live_universe)
-
-    return {
-        "top30_universe_count": len(live_universe),
-        "watchlist_count": len(in_watchlist),
-        "missing_from_watchlist": missing,
-        "in_watchlist_but_not_top30": extra,
-    }
-
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
