@@ -1799,6 +1799,19 @@ def market_status():
     from utils.market_calendar import get_market_status
     return get_market_status()
 
+
+@app.get("/symbols")
+def get_symbols():
+    """Permanent public endpoint: the live, currently-tracked F&O universe
+    (indices + stocks), refreshed daily by the 8:35am Kite sync job. Single
+    source of truth for the frontend's search/autocomplete lists, so they
+    never go stale again."""
+    return {
+        "indices": INDICES,
+        "stocks": TOP30,
+        "all": INDICES + TOP30,
+    }
+
 @app.get("/delivery-confluence")
 def delivery_confluence():
     from api.delivery_confluence import get_delivery_confluence
