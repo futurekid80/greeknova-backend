@@ -35,6 +35,7 @@ import math
 
 from api.uoa import is_market_hours, is_post_market
 from services.black_scholes import implied_vol, bs_gamma
+from services.fno_universe import LOT_SIZES
 
 import httpx
 
@@ -298,6 +299,16 @@ def _compute_gamma_exposure(date: str = None):
 
         net_gex = sum(net_per_strike.values())
 
+        # Rupee-scaled notional GEX -- None when we don't have a live lot
+        # size for this symbol yet (never guess; fall back to null on the
+        # frontend, not a wrong number).
+        lot_size = LOT_SIZES.get(sym)
+        RUPEE_SCALE = 1e7  # express in Rs. Crores for readability
+        net_gex_rupees_cr = (
+            round(net_gex * lot_size * spot * spot * 0.01 / RUPEE_SCALE, 2)
+            if lot_size else None
+        )
+
         # ── Regime (short/long gamma): driven by the LOCAL gamma balance
         # around spot (+-5% moneyness), not the full-chain cumulative sum.
         # Cumulative-from-the-lowest-strike is what public "gamma flip"
@@ -313,6 +324,10 @@ def _compute_gamma_exposure(date: str = None):
             v for k, v in net_per_strike.items() if abs(k - spot) / spot <= LOCAL_BAND_PCT
         )
         regime = "SHORT_GAMMA" if local_net_gex < 0 else "LONG_GAMMA"
+        net_gex_near_spot_rupees_cr = (
+            round(local_net_gex * lot_size * spot * spot * 0.01 / RUPEE_SCALE, 2)
+            if lot_size else None
+        )
 
         # ── Flip point: walk strikes low -> high, collect every sign
         # crossing of the cumulative net GEX, then report whichever
@@ -456,6 +471,9 @@ def _compute_gamma_exposure(date: str = None):
             "flip_point": flip_point,
             "net_gex": round(net_gex, 2),
             "net_gex_near_spot": round(local_net_gex, 2),
+            "lot_size": lot_size,
+            "net_gex_rupees_cr": net_gex_rupees_cr,
+            "net_gex_near_spot_rupees_cr": net_gex_near_spot_rupees_cr,
             "regime": regime,
             "pct_to_call_wall": pct_to_call_wall,
             "pct_to_put_wall": pct_to_put_wall,
