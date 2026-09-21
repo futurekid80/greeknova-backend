@@ -304,8 +304,16 @@ def _compute_gamma_exposure(date: str = None):
         # frontend, not a wrong number).
         lot_size = LOT_SIZES.get(sym)
         RUPEE_SCALE = 1e7  # express in Rs. Crores for readability
+        # NOTE: Kite's `oi` field (and therefore our `net_gex = gamma * oi`)
+        # is already total open interest in SHARES, not in number of lots --
+        # confirmed by the fact the existing relative Net GEX numbers only
+        # make sense at share-quantity scale. So the rupee formula must NOT
+        # multiply by lot_size again (that double-counts it and inflates
+        # every figure by another factor of lot_size). lot_size is kept
+        # around only to gate on "do we have a live lot size for this
+        # symbol" -- it does not enter the math.
         net_gex_rupees_cr = (
-            round(net_gex * lot_size * spot * spot * 0.01 / RUPEE_SCALE, 2)
+            round(net_gex * spot * spot * 0.01 / RUPEE_SCALE, 2)
             if lot_size else None
         )
 
@@ -325,7 +333,7 @@ def _compute_gamma_exposure(date: str = None):
         )
         regime = "SHORT_GAMMA" if local_net_gex < 0 else "LONG_GAMMA"
         net_gex_near_spot_rupees_cr = (
-            round(local_net_gex * lot_size * spot * spot * 0.01 / RUPEE_SCALE, 2)
+            round(local_net_gex * spot * spot * 0.01 / RUPEE_SCALE, 2)
             if lot_size else None
         )
 
