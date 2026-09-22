@@ -29,7 +29,7 @@ ranking absolute squeeze size *across* symbols in rupee terms, which this
 page doesn't attempt yet.
 """
 from utils.db import get_supabase
-from datetime import datetime, timezone, date as date_type
+from datetime import datetime, timezone, date as date_type, timedelta
 import time as time_module
 import math
 
