@@ -93,14 +93,21 @@ RV_MIN_SESSIONS = 6         # fewer closes than this -> too noisy, report None
 RV_LOOKBACK_CALENDAR_DAYS = 25  # buffer for weekends/holidays to get
                                  # RV_LOOKBACK_SESSIONS trading days
 TRADING_DAYS_PER_YEAR = 252
-IV_RICH_RATIO = 1.3   # atm_iv / realized_vol at/above this -> "IV rich",
-                       # options here are pricing in more move than the
-                       # stock has actually been making -- likely event risk
-                       # (earnings, corporate action) rather than a pure
-                       # gamma-mechanical squeeze, and expensive besides
-IV_CHEAP_RATIO = 0.8   # at/below this -> "IV cheap", the mechanically clean
-                        # setup: real gamma amplification without paying a
-                        # rich premium or fighting an IV crush on resolution
+IV_RICH_RATIO = 1.6   # atm_iv / realized_vol at/above this -> "IV rich".
+                       # NOTE: IV structurally trades above RV most of the
+                       # time (the volatility risk premium -- option sellers
+                       # price in a cushion for the unknown), so a plain
+                       # >1.0 or >1.3 threshold flags almost every stock on
+                       # an ordinary day, not just the outliers. 1.6x is
+                       # calibrated to catch names where the premium is
+                       # stretched well past the normal VRP baseline --
+                       # likely event risk (earnings, corporate action)
+                       # rather than a pure gamma-mechanical squeeze.
+IV_CHEAP_RATIO = 0.9   # at/below this -> "IV cheap" -- IV at or below
+                        # realized vol is the genuinely rare, notable state
+                        # (normally IV sits above RV), and the mechanically
+                        # clean setup: real gamma amplification without an
+                        # inflated premium or IV-crush risk on resolution
 
 
 def _realized_vol_map(supabase, symbols, today_date):
