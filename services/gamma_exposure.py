@@ -88,6 +88,71 @@ BREAKOUT_RANGE_PCT = 8.0  # "actively squeezing" = already past the wall, up to 
 ALERT_LOOKBACK_MIN = 45   # how far back to pull live Alerts-feed events for
                            # confirming a squeeze at its exact wall strike
 
+RV_LOOKBACK_SESSIONS = 10   # close-to-close realized vol window
+RV_MIN_SESSIONS = 6         # fewer closes than this -> too noisy, report None
+RV_LOOKBACK_CALENDAR_DAYS = 25  # buffer for weekends/holidays to get
+                                 # RV_LOOKBACK_SESSIONS trading days
+TRADING_DAYS_PER_YEAR = 252
+IV_RICH_RATIO = 1.3   # atm_iv / realized_vol at/above this -> "IV rich",
+                       # options here are pricing in more move than the
+                       # stock has actually been making -- likely event risk
+                       # (earnings, corporate action) rather than a pure
+                       # gamma-mechanical squeeze, and expensive besides
+IV_CHEAP_RATIO = 0.8   # at/below this -> "IV cheap", the mechanically clean
+                        # setup: real gamma amplification without paying a
+                        # rich premium or fighting an IV crush on resolution
+
+
+def _realized_vol_map(supabase, symbols, today_date):
+    """Annualized close-to-close realized volatility per symbol, from the
+    spot_daily_bars table (already backfilled/kept current via Kite
+    historical_data by the spot-volume-scanner job -- see api/spot_volume_
+    scanner.py) rather than a fresh Kite call per symbol on every GEX
+    refresh, which would be slow and rate-limit-risky at ~200 symbols
+    every few minutes.
+
+    Returns {symbol: rv_decimal}, e.g. 0.284 for 28.4% annualized RV.
+    Symbols with fewer than RV_MIN_SESSIONS closes in the lookback window
+    are omitted (their IV/RV ratio will simply be null downstream, never
+    a guessed number)."""
+    cutoff = (today_date - timedelta(days=RV_LOOKBACK_CALENDAR_DAYS)).isoformat()
+    bars = _paginated_fetch(lambda lo, hi: supabase.from_("spot_daily_bars")
+        .select("symbol,trade_date,close")
+        .gte("trade_date", cutoff)
+        .lt("trade_date", today_date.isoformat())
+        .order("trade_date")
+        .range(lo, hi), max_offset=50000)
+
+    by_symbol: dict = {}
+    wanted = set(symbols)
+    for r in bars:
+        sym = r.get("symbol")
+        if sym not in wanted:
+            continue
+        close = r.get("close")
+        if close is None or close <= 0:
+            continue
+        by_symbol.setdefault(sym, []).append((r["trade_date"], float(close)))
+
+    rv_map: dict = {}
+    for sym, pts in by_symbol.items():
+        pts.sort(key=lambda p: p[0])
+        closes = [c for _, c in pts[-(RV_LOOKBACK_SESSIONS + 1):]]
+        if len(closes) < RV_MIN_SESSIONS + 1:
+            continue
+        log_returns = [
+            math.log(closes[i] / closes[i - 1])
+            for i in range(1, len(closes))
+            if closes[i - 1] > 0 and closes[i] > 0
+        ]
+        if len(log_returns) < RV_MIN_SESSIONS:
+            continue
+        mean_r = sum(log_returns) / len(log_returns)
+        variance = sum((r - mean_r) ** 2 for r in log_returns) / (len(log_returns) - 1)
+        daily_sigma = math.sqrt(variance)
+        rv_map[sym] = daily_sigma * math.sqrt(TRADING_DAYS_PER_YEAR)
+    return rv_map
+
 
 def _eligible_expiry_map(new_data_raw, today_date):
     nearest_expiry_map: dict = {}
@@ -195,6 +260,8 @@ def _compute_gamma_exposure(date: str = None):
         and (r.get("oi") or 0) >= MIN_OPEN_OI
     ]
 
+    rv_map = _realized_vol_map(supabase, eligible_symbols, today_date)
+
     # ── Spot price per symbol ───────────────────────────────────────────────
     cmp_raw = _paginated_fetch(lambda lo, hi: supabase.from_("cmp_prices")
         .select("*")
@@ -271,6 +338,7 @@ def _compute_gamma_exposure(date: str = None):
             T = 0.25 / 365.0
 
         per_strike: dict = {}  # strike -> {"CE": gex, "PE": gex}
+        iv_by_strike: dict = {}  # strike -> {"CE": iv, "PE": iv}
         for r in chain:
             strike = float(r["strike"])
             if abs(strike - spot) / spot > MAX_STRIKE_MONEYNESS:
@@ -287,9 +355,30 @@ def _compute_gamma_exposure(date: str = None):
             gex = gamma * oi  # unscaled (no lot size) — see module docstring
             per_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})
             per_strike[strike][opt] += gex
+            iv_by_strike.setdefault(strike, {})[opt] = iv
 
         if not per_strike:
             continue
+
+        # ── ATM implied vol: average of CE/PE IV at the strike nearest
+        # spot (whichever sides solved), vs. realized vol -> is the
+        # market pricing in more move than the stock's actually been
+        # making (IV rich -> likely event risk / expensive premium) or
+        # about the same/less (IV fair-to-cheap -> the clean mechanical
+        # squeeze setup)? ──────────────────────────────────────────────
+        atm_strike = min(iv_by_strike.keys(), key=lambda k: abs(k - spot))
+        atm_ivs = list(iv_by_strike[atm_strike].values())
+        atm_iv = sum(atm_ivs) / len(atm_ivs) if atm_ivs else None
+        realized_vol = rv_map.get(sym)
+        iv_rv_ratio = round(atm_iv / realized_vol, 2) if atm_iv and realized_vol else None
+        if iv_rv_ratio is None:
+            iv_regime = None
+        elif iv_rv_ratio >= IV_RICH_RATIO:
+            iv_regime = "RICH"
+        elif iv_rv_ratio <= IV_CHEAP_RATIO:
+            iv_regime = "CHEAP"
+        else:
+            iv_regime = "FAIR"
 
         strikes_sorted = sorted(per_strike.keys())
         net_per_strike = {k: (v["CE"] - v["PE"]) for k, v in per_strike.items()}
@@ -483,6 +572,10 @@ def _compute_gamma_exposure(date: str = None):
             "net_gex_rupees_cr": net_gex_rupees_cr,
             "net_gex_near_spot_rupees_cr": net_gex_near_spot_rupees_cr,
             "regime": regime,
+            "atm_iv": round(atm_iv * 100, 1) if atm_iv else None,
+            "realized_vol": round(realized_vol * 100, 1) if realized_vol else None,
+            "iv_rv_ratio": iv_rv_ratio,
+            "iv_regime": iv_regime,
             "pct_to_call_wall": pct_to_call_wall,
             "pct_to_put_wall": pct_to_put_wall,
             "pct_to_flip": pct_to_flip,
