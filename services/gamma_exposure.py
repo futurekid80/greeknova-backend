@@ -461,6 +461,45 @@ def _compute_gamma_exposure(date: str = None):
         put_wall_strike = put_wall[0] if put_wall else None
         put_wall_gamma_oi = round(put_wall[1]["PE"], 2) if put_wall else None
 
+        # ── ATM +/-3 strike ladder: the full local neighborhood around spot,
+        # not just the single biggest wall on each side. Deliberately
+        # includes strikes already ITM (price has passed through them) --
+        # that's exactly where "are writers still defending this level or
+        # are they leaving" matters, and it's what a single call/put wall
+        # number can't show. Each rung reuses the same day's-open OI
+        # baseline and +/-45% BUILDING/STEADY/UNWINDING thresholds as the
+        # existing single-strike OI-trend check above, just applied strike
+        # by strike instead of only at squeeze_strike. ────────────────────
+        atm_idx = strikes_sorted.index(atm_strike)
+        strike_ladder = []
+        for k in strikes_sorted[max(0, atm_idx - 3):atm_idx + 4]:
+            rung = {
+                "strike": k,
+                "is_atm": k == atm_strike,
+                "is_call_wall": call_wall_strike is not None and k == call_wall_strike,
+                "is_put_wall": put_wall_strike is not None and k == put_wall_strike,
+            }
+            for opt, oi_key, trend_key, pct_key in (
+                ("CE", "call_oi", "call_oi_trend_label", "call_oi_trend_pct"),
+                ("PE", "put_oi", "put_oi_trend_label", "put_oi_trend_pct"),
+            ):
+                oi_now = latest_oi_lookup.get((sym, k, opt))
+                oi_open_v = oi_open_by_key.get((sym, k, opt))
+                rung[oi_key] = oi_now
+                if oi_now and oi_open_v:
+                    pct = round((oi_now - oi_open_v) / oi_open_v * 100, 1)
+                    rung[pct_key] = pct
+                    if pct <= -45:
+                        rung[trend_key] = "UNWINDING"
+                    elif pct >= 45:
+                        rung[trend_key] = "BUILDING"
+                    else:
+                        rung[trend_key] = "STEADY"
+                else:
+                    rung[pct_key] = None
+                    rung[trend_key] = None
+            strike_ladder.append(rung)
+
         pct_to_call_wall = round((call_wall_strike - spot) / spot * 100, 2) if call_wall_strike else None
         pct_to_put_wall = round((spot - put_wall_strike) / spot * 100, 2) if put_wall_strike else None
         pct_to_flip = round((spot - flip_point) / flip_point * 100, 2) if flip_point else None
@@ -572,6 +611,7 @@ def _compute_gamma_exposure(date: str = None):
             "call_wall_gamma_oi": call_wall_gamma_oi,
             "put_wall_strike": put_wall_strike,
             "put_wall_gamma_oi": put_wall_gamma_oi,
+            "strike_ladder": strike_ladder,
             "flip_point": flip_point,
             "net_gex": round(net_gex, 2),
             "net_gex_near_spot": round(local_net_gex, 2),
