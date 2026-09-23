@@ -489,9 +489,9 @@ def _compute_gamma_exposure(date: str = None):
                 if oi_now and oi_open_v:
                     pct = round((oi_now - oi_open_v) / oi_open_v * 100, 1)
                     rung[pct_key] = pct
-                    if pct <= -45:
+                    if pct <= -40:
                         rung[trend_key] = "UNWINDING"
-                    elif pct >= 45:
+                    elif pct >= 40:
                         rung[trend_key] = "BUILDING"
                     else:
                         rung[trend_key] = "STEADY"
