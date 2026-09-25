@@ -714,6 +714,9 @@ def run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                 pe_buying_strikes_str  = strike_analysis.get("pe_buying_strikes_str", ""),
             )
 
+            log_signal_outcome(commodity, trade_signal["trade_signal"], price_dir,
+                                price_result["current_price"], supabase)
+
             if signal["status"] == "fired":
                 fired_commodities.append(commodity)
 
@@ -1007,3 +1010,30 @@ def compute_mcx_stealth(commodity: str, supabase) -> dict:
         "stealth_cum_oi_pct": round(cum_oi_pct, 1),
         "stealth_hourly_rate": round(hourly_rate, 3),
     }
+
+
+# ── Signal outcome tracking ─────────────────────────────────────
+_last_logged_signal: dict = {}
+
+def log_signal_outcome(commodity, trade_signal_type, direction, current_price, supabase):
+    """
+    Logs a new row only when the trade_signal changes for this commodity —
+    avoids duplicate rows while a signal (e.g. Exhaustion) sits unchanged
+    across many 5-min scans. A background job later fills in price at
+    +30/+60/+120 min and grades the outcome.
+    """
+    if not trade_signal_type or trade_signal_type == "mixed":
+        return
+    if _last_logged_signal.get(commodity) == trade_signal_type:
+        return
+    _last_logged_signal[commodity] = trade_signal_type
+    try:
+        supabase.table("mcx_signal_outcomes").insert({
+            "commodity": commodity,
+            "trade_signal": trade_signal_type,
+            "direction": direction,
+            "price_at_fire": float(current_price),
+        }).execute()
+        logger.info(f"{commodity}: outcome tracking started for '{trade_signal_type}'")
+    except Exception as e:
+        logger.error(f"{commodity} outcome logging failed: {e}")

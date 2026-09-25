@@ -132,3 +132,42 @@ def trigger_scan_now():
     except Exception as e:
         logger.error(f"Manual scan failed: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/signal-accuracy")
+def get_signal_accuracy():
+    """Aggregate hit-rate per trade_signal type across all graded outcomes."""
+    try:
+        supabase = get_supabase()
+        result = supabase.table("mcx_signal_outcomes").select("*").execute()
+        rows = result.data or []
+
+        stats: dict = {}
+        for r in rows:
+            key = r["trade_signal"]
+            stats.setdefault(key, {"count": 0,
+                "30": {"correct": 0, "incorrect": 0, "neutral": 0, "checked": 0},
+                "60": {"correct": 0, "incorrect": 0, "neutral": 0, "checked": 0},
+                "120": {"correct": 0, "incorrect": 0, "neutral": 0, "checked": 0}})
+            stats[key]["count"] += 1
+            for h in ["30", "60", "120"]:
+                outcome = r.get(f"outcome_{h}")
+                if r.get(f"checked_{h}") and outcome:
+                    stats[key][h]["checked"] += 1
+                    if outcome in stats[key][h]:
+                        stats[key][h][outcome] += 1
+
+        summary = []
+        for signal_type, s in stats.items():
+            entry = {"trade_signal": signal_type, "total_fired": s["count"]}
+            for h in ["30", "60", "120"]:
+                correct, incorrect = s[h]["correct"], s[h]["incorrect"]
+                graded = correct + incorrect
+                entry[f"checked_{h}min"] = s[h]["checked"]
+                entry[f"hit_rate_{h}min"] = round(correct / graded * 100, 1) if graded > 0 else None
+            summary.append(entry)
+
+        return {"signals": summary, "raw_count": len(rows)}
+    except Exception as e:
+        logger.error(f"Signal accuracy fetch failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))

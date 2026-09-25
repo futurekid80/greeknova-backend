@@ -98,6 +98,77 @@ def start_mcx_scheduler(kite, supabase):
         replace_existing=True, misfire_grace_time=60,
     )
 
+    scheduler.add_job(
+        func=run_outcome_check_job,
+        trigger=IntervalTrigger(minutes=5, timezone=IST),
+        kwargs={"supabase": supabase},
+        id="mcx_outcome_check", name="MCX signal outcome grading",
+        replace_existing=True, misfire_grace_time=120,
+    )
+
     scheduler.start()
-    logger.info("MCX scheduler started — seed at 9:00 AM, scan every 5 min")
+    logger.info("MCX scheduler started — seed 9AM, scan every 5 min, outcome check every 5 min")
     return scheduler
+
+
+def grade_outcome(trade_signal, direction, pct_move):
+    """Simple directional grading — only meaningful for up/down claims."""
+    if direction not in ("up", "down"):
+        return "logged"
+    same_dir = (direction == "up" and pct_move > 0.1) or (direction == "down" and pct_move < -0.1)
+    opp_dir  = (direction == "up" and pct_move < -0.1) or (direction == "down" and pct_move > 0.1)
+
+    if trade_signal == "confirmed_move":
+        if same_dir: return "correct"
+        if opp_dir: return "incorrect"
+        return "neutral"
+    if trade_signal == "exhaustion":
+        if opp_dir or abs(pct_move) < 0.3: return "correct"
+        if same_dir: return "incorrect"
+        return "neutral"
+    if trade_signal == "likely_fade":
+        if opp_dir: return "correct"
+        if same_dir: return "incorrect"
+        return "neutral"
+    return "logged"
+
+
+def run_outcome_check_job(supabase):
+    if not is_mcx_market_open():
+        return
+    from datetime import timedelta
+    now = datetime.now(IST)
+    horizons = [
+        (30,  "checked_30",  "price_30",  "pct_move_30",  "outcome_30"),
+        (60,  "checked_60",  "price_60",  "pct_move_60",  "outcome_60"),
+        (120, "checked_120", "price_120", "pct_move_120", "outcome_120"),
+    ]
+    try:
+        for minutes, f_checked, f_price, f_pct, f_outcome in horizons:
+            cutoff = (now - timedelta(minutes=minutes)).isoformat()
+            pending = supabase.table("mcx_signal_outcomes") \
+                .select("id, commodity, trade_signal, direction, price_at_fire") \
+                .eq(f_checked, False) \
+                .lte("fired_at", cutoff) \
+                .execute()
+
+            for row in (pending.data or []):
+                price_row = supabase.table("mcx_ignition_signals") \
+                    .select("current_price") \
+                    .eq("commodity", row["commodity"]) \
+                    .limit(1).execute()
+                if not price_row.data:
+                    continue
+                now_price = float(price_row.data[0]["current_price"])
+                price_at_fire = float(row["price_at_fire"])
+                pct_move = ((now_price - price_at_fire) / price_at_fire * 100) if price_at_fire else 0
+                outcome = grade_outcome(row["trade_signal"], row["direction"], pct_move)
+
+                supabase.table("mcx_signal_outcomes").update({
+                    f_price: now_price,
+                    f_pct: round(pct_move, 3),
+                    f_outcome: outcome,
+                    f_checked: True,
+                }).eq("id", row["id"]).execute()
+    except Exception as e:
+        logger.error(f"MCX outcome check job failed: {e}")
