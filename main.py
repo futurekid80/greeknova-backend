@@ -586,6 +586,9 @@ app = FastAPI(title="GreekNova API", version="0.1.0", lifespan=lifespan)
 from services.access_gate import install_gate
 install_gate(app)
 
+from services.kite_byot import router as kite_byot_router
+app.include_router(kite_byot_router, tags=["BYOT"])
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
