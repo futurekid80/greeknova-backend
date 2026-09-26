@@ -432,6 +432,36 @@ async def lifespan(app: FastAPI):
             print(f"[earnings] refresh job failed: {e}")
     scheduler.add_job(_run_earnings_refresh_job, "cron", hour=7, minute=50, timezone="Asia/Kolkata", id="earnings_refresh")
 
+    def _run_spot_bars_heal_job():
+        """Daily 08:50 IST: F&O stocks that joined recently only get one new bar a day from the EOD
+        append, so they never had history. Find symbols with too few recent bars and backfill just those."""
+        try:
+            from datetime import date as _d, timedelta as _td
+            from services.kite_auth import get_kite_client
+            from api.spot_volume_scanner import backfill_spot_daily_bars
+            from api.iv_analysis import SYMBOLS
+            sb = get_supabase()
+            since = (_d.today() - _td(days=25)).isoformat()
+            counts = {}
+            lo = 0
+            while True:
+                res = sb.from_("spot_daily_bars").select("symbol").gte("trade_date", since).range(lo, lo + 999).execute()
+                rows = res.data or []
+                for r in rows:
+                    counts[r["symbol"]] = counts.get(r["symbol"], 0) + 1
+                if len(rows) < 1000:
+                    break
+                lo += 1000
+            short = [x for x in SYMBOLS if counts.get(x, 0) < 12]
+            if not short:
+                print("[spot_bars_heal] all symbols have enough history")
+                return
+            print(f"[spot_bars_heal] backfilling {len(short)} symbols: {short[:15]}")
+            backfill_spot_daily_bars(sb, get_kite_client(), short, days_back=180)
+        except Exception as e:
+            print(f"[spot_bars_heal] failed: {e}")
+    scheduler.add_job(_run_spot_bars_heal_job, "cron", hour=8, minute=50, timezone="Asia/Kolkata", id="spot_bars_heal")
+
     def _run_lot_size_refresh_job():
         try:
             from services.fno_universe import refresh_lot_sizes
