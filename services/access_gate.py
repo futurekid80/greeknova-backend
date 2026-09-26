@@ -44,7 +44,7 @@ SYSTEM_PREFIXES = (
     "/fetch-delivery", "/test-", "/alerts-test", "/cpr-compute",
     "/signal-log/seed-eod", "/daily-oi-summary/compute",
     "/participant-flow/fetch", "/participant-flow/backfill",
-    "/spot-volume/", "/first-hour-breakout/scan", "/clear-radar-cache",
+    "/spot-volume/backfill", "/spot-volume/eod-append", "/clear-radar-cache",
     "/radar-cache-clear", "/debug-", "/push-check-now",
 )
 
@@ -65,6 +65,14 @@ _http = httpx.Client(http2=False, timeout=5.0)
 def _mode() -> str:
     m = os.getenv("GATE_MODE", "log").strip().lower()
     return m if m in ("off", "log", "enforce") else "log"
+
+
+def _admin_mode() -> str:
+    m = os.getenv("ADMIN_GATE", "log").strip().lower()
+    return m if m in ("off", "log", "enforce") else "log"
+
+
+_sys_recent = deque(maxlen=100)
 
 
 def _classify(path: str) -> str:
@@ -170,6 +178,21 @@ async def _gate(request: Request, call_next):
         return await call_next(request)
 
     kind = _classify(path)
+    if kind == "system":
+        import hmac
+        admin_key = os.getenv("GATE_STATS_KEY", "")
+        sent = request.headers.get("x-gate-key", "")
+        ok = bool(admin_key) and hmac.compare_digest(sent, admin_key)
+        if ok:
+            _record("system_ok", path, False)
+        else:
+            _record("system_no_key", path, False)
+            with _lock:
+                _sys_recent.append((time.strftime("%H:%M:%S"), path, _who(request)))
+            if _admin_mode() == "enforce":
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return await call_next(request)
+
     if kind != "user":
         _record(kind, path, False)
         return await call_next(request)
@@ -208,6 +231,8 @@ def _stats_route(request: Request):
     with _lock:
         return {
             "mode": _mode(),
+            "admin_mode": _admin_mode(),
+            "system_no_key_recent": list(_sys_recent)[-25:],
             "since_restart_counts": dict(_stats),
             "distinct_members_seen_today": len(_seen_members_today["hashes"]),
             "top_would_block_paths": _would_block_paths.most_common(25),
