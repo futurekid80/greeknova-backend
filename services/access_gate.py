@@ -137,12 +137,30 @@ def _note_member(email: str):
         _seen_members_today["hashes"].add(h)
 
 
-def _record(decision: str, path: str, blocked_in_enforce: bool):
+_clients = Counter()
+
+
+def _who(request: Request) -> str:
+    try:
+        import hashlib
+        h = request.headers
+        origin = (h.get("origin") or h.get("referer") or "-")[:40]
+        ua = (h.get("user-agent") or "-")[:45]
+        ip = (h.get("x-forwarded-for") or (request.client.host if request.client else "-")).split(",")[0].strip()
+        iph = hashlib.sha256(ip.encode()).hexdigest()[:6]
+        return f"{iph} | {origin} | {ua}"
+    except Exception:
+        return "?"
+
+
+def _record(decision: str, path: str, blocked_in_enforce: bool, who: str = ""):
     with _lock:
         _stats[decision] += 1
         if blocked_in_enforce:
             _would_block_paths[path] += 1
-            _recent.append((time.strftime("%H:%M:%S"), path, decision))
+            _recent.append((time.strftime("%H:%M:%S"), path, decision, who))
+            if who:
+                _clients[who] += 1
 
 
 async def _gate(request: Request, call_next):
@@ -175,7 +193,7 @@ async def _gate(request: Request, call_next):
             else:
                 decision, block, status = "user_not_member", True, 403
 
-    _record(decision, path, block)
+    _record(decision, path, block, _who(request) if block else "")
     if block and mode == "enforce":
         msg = ("Sign in required" if status == 401
                else "This email does not have GreekNova access")
@@ -194,6 +212,7 @@ def _stats_route(request: Request):
             "distinct_members_seen_today": len(_seen_members_today["hashes"]),
             "top_would_block_paths": _would_block_paths.most_common(25),
             "recent_would_block": list(_recent)[-25:],
+            "blocked_clients": _clients.most_common(10),
             "member_list_size": len(_members["emails"]),
         }
 
