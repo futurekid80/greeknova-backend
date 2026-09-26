@@ -176,6 +176,39 @@ def _eligible_expiry_map(new_data_raw, today_date):
     return nearest_expiry_map
 
 
+def _resolve_gex_day(supabase, symbol: str, date: str = None):
+    """Pick the day to compute on and that day's latest snapshot timestamp.
+    FIX (Sep 26 2026): this used to read only today's UTC date, so on a
+    weekend, holiday, or before the first capture of a trading day there was
+    no data and the page came back empty (no all-stocks list). Now, with no
+    explicit date, it rolls back to the most recent trading day that has
+    data - same behaviour as the IV page. Returns (day_str, ts_or_None)."""
+    def _latest_ts(day_str):
+        r = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", symbol)\
+            .gte("timestamp", f"{day_str}T00:00:00+00:00")\
+            .lt("timestamp",  f"{day_str}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1).execute()
+        return r.data[0]["timestamp"] if r.data else None
+
+    if date:
+        return date, _latest_ts(date)
+
+    import datetime as _dt
+    from utils.market_calendar import is_trading_day, today_ist
+    cand = today_ist()
+    fallback_day = cand.isoformat()
+    for _ in range(10):
+        if is_trading_day(cand):
+            ts = _latest_ts(cand.isoformat())
+            if ts:
+                return cand.isoformat(), ts
+        cand = cand - _dt.timedelta(days=1)
+    return fallback_day, None
+
+
 def get_gamma_exposure(date: str = None):
     """Serve the gamma-exposure snapshot. A background scheduler job
     (refresh_gamma_exposure_cache, wired up in main.py) keeps _gex_cache
@@ -220,23 +253,16 @@ def refresh_gamma_exposure_cache():
 
 def _compute_gamma_exposure(date: str = None):
     supabase = get_supabase()
-    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     post_market = is_post_market()
 
-    # ── Latest capture timestamp today (direct MAX query — see gamma_squeeze
-    # .py for why .range() pagination on a tied-timestamp column is unsafe) ──
-    new_row = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", "NIFTY")\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .lt("timestamp",  f"{today}T23:59:59+00:00")\
-        .order("timestamp", desc=True)\
-        .limit(1).execute()
+    # ── Latest capture timestamp (direct MAX query — see gamma_squeeze
+    # .py for why .range() pagination on a tied-timestamp column is unsafe).
+    # Rolls back to the last trading day when today has no data yet. ──
+    today, ts_new = _resolve_gex_day(supabase, "NIFTY", date)
 
-    if not new_row.data:
-        return {"symbols": [], "signals": [], "total": 0, "date": today, "as_of": None, "is_post_market": post_market}
+    if not ts_new:
+        return {"symbols": [], "signals": [], "watchlist": [], "total": 0, "date": today, "as_of": None, "is_post_market": post_market}
 
-    ts_new = new_row.data[0]["timestamp"]
     ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
     window_start = ts_new_dt.isoformat()
     from datetime import timedelta
@@ -255,7 +281,7 @@ def _compute_gamma_exposure(date: str = None):
             latest_by_key[key] = r
     all_rows = list(latest_by_key.values())
 
-    today_date = date_type.fromisoformat(today) if date else datetime.now(timezone.utc).date()
+    today_date = date_type.fromisoformat(today)
     nearest_expiry_map = _eligible_expiry_map(all_rows, today_date)
     eligible_symbols = set(nearest_expiry_map.keys())
 
@@ -719,21 +745,11 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
     cheap to call directly (no multi-symbol pagination)."""
     supabase = get_supabase()
     symbol = symbol.upper()
-    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
-    today_date = date_type.fromisoformat(today) if date else datetime.now(timezone.utc).date()
+    today, ts_new = _resolve_gex_day(supabase, symbol, date)
+    today_date = date_type.fromisoformat(today)
 
-    new_row = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", symbol)\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
-        .lt("timestamp",  f"{today}T23:59:59+00:00")\
-        .order("timestamp", desc=True)\
-        .limit(1).execute()
-
-    if not new_row.data:
+    if not ts_new:
         return {"symbol": symbol, "strikes": [], "spot": None, "error": "no data"}
-
-    ts_new = new_row.data[0]["timestamp"]
 
     chain_raw = supabase.from_("oi_snapshots")\
         .select("strike,option_type,expiry,oi,last_price")\
