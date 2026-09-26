@@ -34,7 +34,7 @@ import time as time_module
 import math
 
 from api.uoa import is_market_hours, is_post_market
-from services.black_scholes import implied_vol, bs_gamma
+from services.black_scholes import implied_vol, bs_gamma, bs_theta_per_day, bs_vega_per_point
 from services.fno_universe import LOT_SIZES
 
 import httpx
@@ -372,6 +372,9 @@ def _compute_gamma_exposure(date: str = None):
 
         per_strike: dict = {}  # strike -> {"CE": gex, "PE": gex}
         iv_by_strike: dict = {}  # strike -> {"CE": iv, "PE": iv}
+        theta_strike: dict = {}   # strike -> {"CE": Rs/day decaying, "PE": ...}  (|theta| x OI)
+        vega_strike: dict = {}    # strike -> {"CE": Rs per 1 IV point, "PE": ...} (vega x OI)
+        greek_by_strike: dict = {}  # strike -> {opt: (|theta|/share/day, vega/share/pt, premium)}
         for r in chain:
             strike = float(r["strike"])
             if abs(strike - spot) / spot > MAX_STRIKE_MONEYNESS:
@@ -389,6 +392,12 @@ def _compute_gamma_exposure(date: str = None):
             per_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})
             per_strike[strike][opt] += gex
             iv_by_strike.setdefault(strike, {})[opt] = iv
+            # Theta / Vega on the same solved IV (Sep 26 2026). oi is in shares.
+            _th = abs(bs_theta_per_day(spot, strike, T, RISK_FREE_RATE, iv, opt))
+            _vg = bs_vega_per_point(spot, strike, T, RISK_FREE_RATE, iv)
+            greek_by_strike.setdefault(strike, {})[opt] = (_th, _vg, premium)
+            theta_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})[opt] += _th * oi
+            vega_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})[opt] += _vg * oi
 
         if not per_strike:
             continue
@@ -628,7 +637,42 @@ def _compute_gamma_exposure(date: str = None):
                 for a in matches[:3]
             ]
 
+        # ── Theta / Vega summary (OI-weighted estimates of the chain, not a
+        # statement about who holds the positions) ─────────────────────────
+        _RS = 1e7
+        _t_ce = sum(v["CE"] for v in theta_strike.values())
+        _t_pe = sum(v["PE"] for v in theta_strike.values())
+        _v_ce = sum(v["CE"] for v in vega_strike.values())
+        _v_pe = sum(v["PE"] for v in vega_strike.values())
+        _t_peak = max(theta_strike.items(), key=lambda kv: kv[1]["CE"] + kv[1]["PE"]) if theta_strike else None
+        _v_peak = max(vega_strike.items(), key=lambda kv: kv[1]["CE"] + kv[1]["PE"]) if vega_strike else None
+        _g = greek_by_strike.get(atm_strike, {})
+        _atm_th = sum(x[0] for x in _g.values())
+        _atm_vg = sum(x[1] for x in _g.values())
+        _atm_prem = sum(x[2] for x in _g.values())
+        greek_fields = {
+            "theta_total_cr": round((_t_ce + _t_pe) / _RS, 2),
+            "theta_ce_cr": round(_t_ce / _RS, 2),
+            "theta_pe_cr": round(_t_pe / _RS, 2),
+            "theta_peak_strike": _t_peak[0] if _t_peak else None,
+            "atm_strike": atm_strike,
+            "atm_sides": len(_g),
+            "atm_straddle_premium": round(_atm_prem, 2) if _atm_prem else None,
+            "atm_theta": round(_atm_th, 2) if _atm_th else None,
+            "atm_theta_pct": round(_atm_th / _atm_prem * 100, 2) if _atm_prem and _atm_th else None,
+            "atm_theta_per_lot": round(_atm_th * lot_size, 0) if (_atm_th and lot_size) else None,
+            "vega_total_cr": round((_v_ce + _v_pe) / _RS, 2),
+            "vega_ce_cr": round(_v_ce / _RS, 2),
+            "vega_pe_cr": round(_v_pe / _RS, 2),
+            "vega_peak_strike": _v_peak[0] if _v_peak else None,
+            "vega_pe_ce_ratio": round(_v_pe / _v_ce, 2) if _v_ce > 0 else None,
+            "atm_vega": round(_atm_vg, 2) if _atm_vg else None,
+            "atm_vega_per_lot": round(_atm_vg * lot_size, 0) if (_atm_vg and lot_size) else None,
+            "iv_crush_watch": bool(iv_regime == "RICH" and dte <= 10),
+        }
+
         row_out = {
+            **greek_fields,
             "symbol": sym,
             "cmp": spot,
             "expiry": expiry,

@@ -97,3 +97,24 @@ def implied_vol(price: float, S: float, K: float, T: float, r: float, option_typ
         else:
             lo, f_lo = mid, f_mid
     return (lo + hi) / 2
+
+
+def bs_theta_per_day(S: float, K: float, T: float, r: float, sigma: float, option_type: str) -> float:
+    """Black-Scholes theta per option (per share), per CALENDAR day.
+    Negative for a long option; callers use abs() for "decay size"."""
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return 0.0
+    sq = math.sqrt(T)
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * sq)
+    d2 = d1 - sigma * sq
+    first = -(S * _norm_pdf(d1) * sigma) / (2.0 * sq)
+    if option_type == "CE":
+        th = first - r * K * math.exp(-r * T) * _norm_cdf(d2)
+    else:
+        th = first + r * K * math.exp(-r * T) * _norm_cdf(-d2)
+    return th / 365.0
+
+
+def bs_vega_per_point(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    """Vega per share for a 1 volatility-point (1%) move in IV."""
+    return _vega(S, K, T, r, sigma) * 0.01
