@@ -34,7 +34,7 @@ import time as time_module
 import math
 
 from api.uoa import is_market_hours, is_post_market
-from services.black_scholes import implied_vol, bs_gamma, bs_theta_per_day, bs_vega_per_point
+from services.black_scholes import implied_vol, bs_gamma, bs_theta_per_day, bs_vega_per_point, _norm_cdf
 from services.fno_universe import LOT_SIZES
 
 import httpx
@@ -159,6 +159,37 @@ def _realized_vol_map(supabase, symbols, today_date):
         daily_sigma = math.sqrt(variance)
         rv_map[sym] = daily_sigma * math.sqrt(TRADING_DAYS_PER_YEAR)
     return rv_map
+
+
+IV_PCTILE_MIN_DAYS = 20      # need at least this many past sessions for a percentile
+LIQ_THIN_VOL_LOTS = 50       # ATM day volume (lots) below this -> "THIN" flag
+LIQ_THIN_OI_LOTS = 200       # ATM OI (lots) below this -> "THIN" flag
+
+
+def _iv_hist_map(supabase, symbols, today_date):
+    """{symbol: [past ATM IV % values]} from iv_history, excluding today.
+    History only goes back to when iv_history started filling, so the
+    caller reports the sample size next to any percentile."""
+    cutoff = (today_date - timedelta(days=400)).isoformat()
+    rows = _paginated_fetch(lambda lo, hi: supabase.from_("iv_history")
+        .select("symbol,trade_date,atm_iv")
+        .gte("trade_date", cutoff)
+        .lt("trade_date", today_date.isoformat())
+        .order("trade_date")
+        .range(lo, hi), max_offset=100000)
+    wanted = set(symbols)
+    out: dict = {}
+    for r in rows:
+        sym = r.get("symbol")
+        if sym not in wanted:
+            continue
+        try:
+            v = float(r.get("atm_iv"))
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out.setdefault(sym, []).append(v)
+    return out
 
 
 def _eligible_expiry_map(new_data_raw, today_date):
@@ -294,6 +325,11 @@ def _compute_gamma_exposure(date: str = None):
     ]
 
     rv_map = _realized_vol_map(supabase, eligible_symbols, today_date)
+    try:
+        ivh_map = _iv_hist_map(supabase, eligible_symbols, today_date)
+    except Exception as _e:
+        print(f"[gamma_exposure] iv history unavailable: {_e}")
+        ivh_map = {}
 
     # ── Spot price per symbol ───────────────────────────────────────────────
     cmp_raw = _paginated_fetch(lambda lo, hi: supabase.from_("cmp_prices")
@@ -650,7 +686,55 @@ def _compute_gamma_exposure(date: str = None):
         _atm_th = sum(x[0] for x in _g.values())
         _atm_vg = sum(x[1] for x in _g.values())
         _atm_prem = sum(x[2] for x in _g.values())
+        # ── Natenberg-style extras (Sep 26 2026): IV percentile vs own
+        # history, one-standard-deviation expected move with the first
+        # strikes beyond it, and ATM liquidity. ─────────────────────────
+        _cl = {(float(_r["strike"]), _r.get("option_type")): _r for _r in chain}
+        _hist = ivh_map.get(sym, [])
+        _cur_iv_pct = atm_iv * 100 if atm_iv else None
+        iv_pctile = None
+        if _cur_iv_pct and len(_hist) >= IV_PCTILE_MIN_DAYS:
+            iv_pctile = round(100.0 * sum(1 for h in _hist if h <= _cur_iv_pct) / len(_hist))
+        em = em_pct = em_low = em_high = None
+        if atm_iv:
+            em = spot * atm_iv * math.sqrt(T)
+            em_pct = round(atm_iv * math.sqrt(T) * 100, 2)
+            em_low, em_high = round(spot - em, 2), round(spot + em, 2)
+
+        def _beyond(opt):
+            if em is None:
+                return {}
+            cands = [k for k, d in iv_by_strike.items() if opt in d and ((k >= spot + em) if opt == "CE" else (k <= spot - em))]
+            if not cands:
+                return {}
+            k = min(cands) if opt == "CE" else max(cands)
+            sig = iv_by_strike[k][opt]
+            d2 = (math.log(spot / k) + (RISK_FREE_RATE - 0.5 * sig * sig) * T) / (sig * math.sqrt(T))
+            prob = _norm_cdf(d2) if opt == "CE" else _norm_cdf(-d2)
+            prem = (_cl.get((k, opt)) or {}).get("last_price") or 0
+            return {"strike": k, "premium": round(prem, 2),
+                    "prob_itm": round(prob * 100, 1),
+                    "premium_per_lot": round(prem * lot_size, 0) if lot_size else None}
+        _bc, _bp = _beyond("CE"), _beyond("PE")
+
+        _atm_rows = [_cl.get((atm_strike, o)) for o in ("CE", "PE")]
+        _atm_oi = sum((x.get("oi") or 0) for x in _atm_rows if x)
+        _atm_vol = sum((x.get("volume") or 0) for x in _atm_rows if x)
+        atm_oi_lots = round(_atm_oi / lot_size) if lot_size else None
+        atm_vol_lots = round(_atm_vol / lot_size) if lot_size else None
+        liq_thin = bool(lot_size and (atm_vol_lots < LIQ_THIN_VOL_LOTS or atm_oi_lots < LIQ_THIN_OI_LOTS))
+        natenberg_fields = {
+            "iv_pctile": iv_pctile, "iv_hist_days": len(_hist),
+            "em_pct": em_pct, "em_low": em_low, "em_high": em_high,
+            "call_1sd_strike": _bc.get("strike"), "call_1sd_premium": _bc.get("premium"),
+            "call_1sd_prob_itm": _bc.get("prob_itm"), "call_1sd_per_lot": _bc.get("premium_per_lot"),
+            "put_1sd_strike": _bp.get("strike"), "put_1sd_premium": _bp.get("premium"),
+            "put_1sd_prob_itm": _bp.get("prob_itm"), "put_1sd_per_lot": _bp.get("premium_per_lot"),
+            "atm_oi_lots": atm_oi_lots, "atm_vol_lots": atm_vol_lots, "liq_thin": liq_thin,
+        }
+
         greek_fields = {
+            **natenberg_fields,
             "theta_total_cr": round((_t_ce + _t_pe) / _RS, 2),
             "theta_ce_cr": round(_t_ce / _RS, 2),
             "theta_pe_cr": round(_t_pe / _RS, 2),
