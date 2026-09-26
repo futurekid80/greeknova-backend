@@ -185,8 +185,36 @@ def run_full_capture():
                 print(f"  ❌ {symbol}: {e}")
 
         if records:
+            # FIX (Sep 26 2026): every scanner picks "the latest snapshot" by
+            # looking at NIFTY's newest timestamp. NIFTY used to be written
+            # FIRST, so a write cut short part-way (or a reader arriving
+            # mid-write) exposed a snapshot holding only some of the ~213
+            # stocks -- IV and other pages then showed a fraction of them.
+            # Now NIFTY goes LAST, each batch is retried, and if the snapshot
+            # still cannot be completed its partial rows are removed. A
+            # snapshot therefore only becomes "latest" once it is complete.
+            records.sort(key=lambda r: r["symbol"] == "NIFTY")  # stable: NIFTY last
+            _snapshot_ok = True
             for i in range(0, len(records), 500):
-                supabase.table("oi_snapshots").insert(records[i:i+500]).execute()
+                _batch = records[i:i+500]
+                for _attempt in range(3):
+                    try:
+                        supabase.table("oi_snapshots").insert(_batch).execute()
+                        break
+                    except Exception as _be:
+                        print(f"  ⚠️ oi_snapshots batch {i//500} attempt {_attempt+1} failed: {_be}")
+                        if _attempt == 2:
+                            _snapshot_ok = False
+                        else:
+                            time.sleep(1.5)
+                if not _snapshot_ok:
+                    break
+            if not _snapshot_ok:
+                print("  ❌ Snapshot incomplete - removing its partial rows")
+                try:
+                    supabase.table("oi_snapshots").delete().eq("timestamp", timestamp).execute()
+                except Exception as _de:
+                    print(f"  ⚠️ Could not remove partial snapshot: {_de}")
         if cmp_records:
             supabase.table("cmp_prices").insert(cmp_records).execute()
         print(f"  ✅ Saved {len(records)} OI + {len(cmp_records)} CMP records")
