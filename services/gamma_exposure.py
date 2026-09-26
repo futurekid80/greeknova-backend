@@ -326,6 +326,12 @@ def _compute_gamma_exposure(date: str = None):
 
     rv_map = _realized_vol_map(supabase, eligible_symbols, today_date)
     try:
+        from services.earnings_calendar import upcoming_results_map
+        res_map = upcoming_results_map(today_date)
+    except Exception as _e:
+        print(f"[gamma_exposure] earnings map unavailable: {_e}")
+        res_map = {}
+    try:
         ivh_map = _iv_hist_map(supabase, eligible_symbols, today_date)
     except Exception as _e:
         print(f"[gamma_exposure] iv history unavailable: {_e}")
@@ -735,6 +741,9 @@ def _compute_gamma_exposure(date: str = None):
 
         greek_fields = {
             **natenberg_fields,
+            "result_date": (res_map.get(sym).isoformat() if res_map.get(sym) else None),
+            "days_to_result": ((res_map.get(sym) - today_date).days if res_map.get(sym) else None),
+            "result_before_expiry": bool(res_map.get(sym) and res_map.get(sym) <= date_type.fromisoformat(expiry)),
             "theta_total_cr": round((_t_ce + _t_pe) / _RS, 2),
             "theta_ce_cr": round(_t_ce / _RS, 2),
             "theta_pe_cr": round(_t_pe / _RS, 2),

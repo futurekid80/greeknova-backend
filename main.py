@@ -424,6 +424,14 @@ async def lifespan(app: FastAPI):
             print(f"[fno_universe] daily refresh job failed: {e}")
     scheduler.add_job(_run_fno_universe_refresh_job, "cron", hour=8, minute=35, timezone="Asia/Kolkata", id="fno_universe_refresh")
 
+    def _run_earnings_refresh_job():
+        try:
+            from services.earnings_calendar import refresh_from_nse
+            refresh_from_nse()
+        except Exception as e:
+            print(f"[earnings] refresh job failed: {e}")
+    scheduler.add_job(_run_earnings_refresh_job, "cron", hour=7, minute=50, timezone="Asia/Kolkata", id="earnings_refresh")
+
     def _run_lot_size_refresh_job():
         try:
             from services.fno_universe import refresh_lot_sizes
@@ -616,6 +624,8 @@ install_gate(app)
 
 from services.kite_byot import router as kite_byot_router
 app.include_router(kite_byot_router, tags=["BYOT"])
+from services.earnings_calendar import router as earnings_router
+app.include_router(earnings_router, tags=["Earnings"])
 
 app.add_middleware(
     CORSMiddleware,
