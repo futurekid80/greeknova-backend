@@ -233,6 +233,51 @@ def _rv_distribution_map(supabase, symbols, today_date, ttl=6 * 3600):
     return out
 
 
+TERM_SPIKE = 1.15    # near IV / month IV at or above this -> front-month spike
+TERM_CHEAP = 0.85    # at or below this -> front month cheap
+MONTH_BASIS_DTE = 7  # within this many days of expiry, richness is judged on next-month IV
+
+
+def _iv_month_hist_map(supabase, symbols, today_date):
+    """{symbol: [past next-month ATM IV %]} from iv_month_history (filled daily from now on)."""
+    cutoff = (today_date - timedelta(days=400)).isoformat()
+    rows = _paginated_fetch(lambda lo, hi: supabase.from_("iv_month_history")
+        .select("symbol,trade_date,atm_iv")
+        .gte("trade_date", cutoff)
+        .lt("trade_date", today_date.isoformat())
+        .order("trade_date")
+        .range(lo, hi), max_offset=100000)
+    wanted = set(symbols)
+    out: dict = {}
+    for r in rows:
+        if r.get("symbol") not in wanted:
+            continue
+        try:
+            v = float(r.get("atm_iv"))
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            out.setdefault(r["symbol"], []).append(v)
+    return out
+
+
+def _atm_iv_for_rows(rows, spot, T):
+    """ATM IV (avg of CE and PE) for one expiry's rows: the strike nearest spot with both sides priced."""
+    by_k: dict = {}
+    for r in rows:
+        p = r.get("last_price") or 0
+        opt = r.get("option_type")
+        if p > 0 and opt in ("CE", "PE"):
+            by_k.setdefault(float(r["strike"]), {})[opt] = p
+    paired = [k for k, d in by_k.items() if "CE" in d and "PE" in d]
+    if not paired or T <= 0:
+        return None
+    k = min(paired, key=lambda x: abs(x - spot))
+    ivs = [implied_vol(by_k[k][o], spot, k, T, RISK_FREE_RATE, o) for o in ("CE", "PE")]
+    ivs = [v for v in ivs if v]
+    return sum(ivs) / len(ivs) if ivs else None
+
+
 def _eligible_expiry_map(new_data_raw, today_date):
     nearest_expiry_map: dict = {}
     for r in new_data_raw:
@@ -366,6 +411,24 @@ def _compute_gamma_exposure(date: str = None):
     ]
 
     rv_map = _realized_vol_map(supabase, eligible_symbols, today_date)
+
+    # Next expiry (the one after the nearest) rows per symbol, for month IV / term structure
+    _exps: dict = {}
+    for _r in all_rows:
+        _e = _r.get("expiry")
+        if _e and _e > nearest_expiry_map.get(_r.get("symbol"), "9999"):
+            if _e < _exps.get(_r.get("symbol"), "9999-99"):
+                _exps[_r.get("symbol")] = _e
+    next_rows_by_sym: dict = {}
+    for _r in all_rows:
+        if _exps.get(_r.get("symbol")) == _r.get("expiry") and _r.get("option_type") in ("CE", "PE"):
+            next_rows_by_sym.setdefault(_r["symbol"], []).append(_r)
+    try:
+        ivm_hist_map = _iv_month_hist_map(supabase, eligible_symbols, today_date)
+    except Exception as _e:
+        print(f"[gamma_exposure] month IV history unavailable: {_e}")
+        ivm_hist_map = {}
+    month_rows_out = []
     try:
         rvdist_map = _rv_distribution_map(supabase, eligible_symbols, today_date)
     except Exception as _e:
@@ -742,16 +805,38 @@ def _compute_gamma_exposure(date: str = None):
         # history, one-standard-deviation expected move with the first
         # strikes beyond it, and ATM liquidity. ─────────────────────────
         _cl = {(float(_r["strike"]), _r.get("option_type")): _r for _r in chain}
-        _hist = ivh_map.get(sym, [])
-        _cur_iv_pct = atm_iv * 100 if atm_iv else None
+        # Month IV (next expiry) and term structure: near IV / month IV
+        iv_month = iv_month_expiry = iv_month_dte = None
+        _nx = _exps.get(sym)
+        if _nx:
+            try:
+                iv_month_dte = (date_type.fromisoformat(_nx) - today_date).days
+                iv_month = _atm_iv_for_rows(next_rows_by_sym.get(sym, []), spot, max(iv_month_dte, 1) / 365.0)
+                iv_month_expiry = _nx
+            except Exception:
+                iv_month = None
+        term_ratio = round(atm_iv / iv_month, 2) if (atm_iv and iv_month) else None
+        term_state = None
+        if term_ratio is not None:
+            term_state = "FRONT_SPIKE" if term_ratio >= TERM_SPIKE else ("FRONT_CHEAP" if term_ratio <= TERM_CHEAP else "NORMAL")
+        use_month = bool(iv_month and dte <= MONTH_BASIS_DTE)
+        iv_basis = "month" if use_month else "near"
+        basis_iv = iv_month if use_month else atm_iv
+        iv_rv_basis = round(basis_iv / realized_vol, 2) if (basis_iv and realized_vol) else None
+        if iv_month:
+            month_rows_out.append({"trade_date": today, "symbol": sym, "expiry": iv_month_expiry,
+                                   "dte": iv_month_dte, "atm_iv": round(iv_month * 100, 2)})
+
+        _hist = ivm_hist_map.get(sym, []) if use_month else ivh_map.get(sym, [])
+        _cur_iv_pct = basis_iv * 100 if basis_iv else None
         iv_pctile = None
         if _cur_iv_pct and len(_hist) >= IV_PCTILE_MIN_DAYS:
             iv_pctile = round(100.0 * sum(1 for h in _hist if h <= _cur_iv_pct) / len(_hist))
         iv_pctile_basis = "iv_history" if iv_pctile is not None else None
-        if iv_pctile is None and atm_iv:
+        if iv_pctile is None and basis_iv:
             _dist = rvdist_map.get(sym)
             if _dist:
-                iv_pctile = round(100.0 * sum(1 for v in _dist if v <= atm_iv) / len(_dist))
+                iv_pctile = round(100.0 * sum(1 for v in _dist if v <= basis_iv) / len(_dist))
                 iv_pctile_basis = "realized_range"
         em = em_pct = em_low = em_high = None
         if atm_iv:
@@ -783,6 +868,8 @@ def _compute_gamma_exposure(date: str = None):
         liq_thin = bool(lot_size and (atm_vol_lots < LIQ_THIN_VOL_LOTS or atm_oi_lots < LIQ_THIN_OI_LOTS))
         natenberg_fields = {
             "iv_pctile": iv_pctile, "iv_pctile_basis": iv_pctile_basis, "iv_hist_days": len(_hist),
+            "iv_month": round(iv_month * 100, 1) if iv_month else None, "iv_month_expiry": iv_month_expiry,
+            "term_ratio": term_ratio, "term_state": term_state, "iv_basis": iv_basis, "iv_rv_basis": iv_rv_basis,
             "em_pct": em_pct, "em_low": em_low, "em_high": em_high,
             "call_1sd_strike": _bc.get("strike"), "call_1sd_premium": _bc.get("premium"),
             "call_1sd_prob_itm": _bc.get("prob_itm"), "call_1sd_per_lot": _bc.get("premium_per_lot"),
@@ -872,6 +959,13 @@ def _compute_gamma_exposure(date: str = None):
         stage_rank = 0 if r["stage"] == "ACTIVE_SQUEEZE" else 1 if r["stage"] == "ON_THE_VERGE" else 2
         return (stage_rank, closest)
     symbols_out.sort(key=_sort_key)
+
+    try:
+        if month_rows_out:
+            for _i in range(0, len(month_rows_out), 500):
+                supabase.from_("iv_month_history").upsert(month_rows_out[_i:_i + 500], on_conflict="trade_date,symbol").execute()
+    except Exception as _e:
+        print(f"[gamma_exposure] month IV persist failed: {_e}")
 
     as_of_dt = ts_new_dt + timedelta(hours=5, minutes=30)  # display in IST
     result = {
