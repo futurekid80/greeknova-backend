@@ -192,6 +192,47 @@ def _iv_hist_map(supabase, symbols, today_date):
     return out
 
 
+_rvdist_cache = {"at": 0.0, "map": {}}
+RVDIST_WINDOW = 20        # sessions per rolling realized-vol sample
+RVDIST_MIN_SAMPLES = 60   # need at least this many samples for a usable range
+
+
+def _rv_distribution_map(supabase, symbols, today_date, ttl=6 * 3600):
+    """{symbol: [rolling 20-session annualised realized vol, past ~year]} from spot_daily_bars.
+    Used as a stand-in IV percentile for stocks whose own IV history is still short.
+    Cached for hours because it scans about a year of bars."""
+    import time as _t
+    if _rvdist_cache["map"] and _t.time() - _rvdist_cache["at"] < ttl:
+        return _rvdist_cache["map"]
+    cutoff = (today_date - timedelta(days=400)).isoformat()
+    bars = _paginated_fetch(lambda lo, hi: supabase.from_("spot_daily_bars")
+        .select("symbol,trade_date,close")
+        .gte("trade_date", cutoff)
+        .lt("trade_date", today_date.isoformat())
+        .order("trade_date")
+        .range(lo, hi), max_offset=120000)
+    wanted = set(symbols)
+    by_sym: dict = {}
+    for r in bars:
+        sym = r.get("symbol")
+        c = r.get("close")
+        if sym in wanted and c and c > 0:
+            by_sym.setdefault(sym, []).append(float(c))
+    out: dict = {}
+    for sym, closes in by_sym.items():
+        rets = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        samples = []
+        for i in range(RVDIST_WINDOW, len(rets) + 1):
+            w = rets[i - RVDIST_WINDOW:i]
+            m = sum(w) / len(w)
+            var = sum((x - m) ** 2 for x in w) / (len(w) - 1)
+            samples.append(math.sqrt(var) * math.sqrt(TRADING_DAYS_PER_YEAR))
+        if len(samples) >= RVDIST_MIN_SAMPLES:
+            out[sym] = samples
+    _rvdist_cache["map"], _rvdist_cache["at"] = out, _t.time()
+    return out
+
+
 def _eligible_expiry_map(new_data_raw, today_date):
     nearest_expiry_map: dict = {}
     for r in new_data_raw:
@@ -325,6 +366,11 @@ def _compute_gamma_exposure(date: str = None):
     ]
 
     rv_map = _realized_vol_map(supabase, eligible_symbols, today_date)
+    try:
+        rvdist_map = _rv_distribution_map(supabase, eligible_symbols, today_date)
+    except Exception as _e:
+        print(f"[gamma_exposure] rv distribution unavailable: {_e}")
+        rvdist_map = {}
     try:
         from services.earnings_calendar import upcoming_results_map
         res_map = upcoming_results_map(today_date)
@@ -701,6 +747,12 @@ def _compute_gamma_exposure(date: str = None):
         iv_pctile = None
         if _cur_iv_pct and len(_hist) >= IV_PCTILE_MIN_DAYS:
             iv_pctile = round(100.0 * sum(1 for h in _hist if h <= _cur_iv_pct) / len(_hist))
+        iv_pctile_basis = "iv_history" if iv_pctile is not None else None
+        if iv_pctile is None and atm_iv:
+            _dist = rvdist_map.get(sym)
+            if _dist:
+                iv_pctile = round(100.0 * sum(1 for v in _dist if v <= atm_iv) / len(_dist))
+                iv_pctile_basis = "realized_range"
         em = em_pct = em_low = em_high = None
         if atm_iv:
             em = spot * atm_iv * math.sqrt(T)
@@ -730,7 +782,7 @@ def _compute_gamma_exposure(date: str = None):
         atm_vol_lots = round(_atm_vol / lot_size) if lot_size else None
         liq_thin = bool(lot_size and (atm_vol_lots < LIQ_THIN_VOL_LOTS or atm_oi_lots < LIQ_THIN_OI_LOTS))
         natenberg_fields = {
-            "iv_pctile": iv_pctile, "iv_hist_days": len(_hist),
+            "iv_pctile": iv_pctile, "iv_pctile_basis": iv_pctile_basis, "iv_hist_days": len(_hist),
             "em_pct": em_pct, "em_low": em_low, "em_high": em_high,
             "call_1sd_strike": _bc.get("strike"), "call_1sd_premium": _bc.get("premium"),
             "call_1sd_prob_itm": _bc.get("prob_itm"), "call_1sd_per_lot": _bc.get("premium_per_lot"),
