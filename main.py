@@ -582,6 +582,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GreekNova API", version="0.1.0", lifespan=lifespan)
 
+# Access gate (Sep 26 2026) - added BEFORE CORS so CORS stays the outermost layer.
+from services.access_gate import install_gate
+install_gate(app)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
