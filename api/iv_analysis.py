@@ -370,7 +370,14 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         if not strikes:
             continue
 
-        atm_strike = min(strikes, key=lambda x: abs(x - cmp))
+        # FIX (Sep 26 2026): pick the nearest strike that has BOTH a priced CE
+        # and PE. A stray one-sided strike (e.g. ULTRACEMCO 11160, CE only,
+        # left over from an adjusted contract) used to win "nearest to spot",
+        # find no PE, and silently drop the whole stock from the IV page.
+        _ce_priced = {r["strike"] for r in expiry_options if r["option_type"] == "CE" and r["last_price"]}
+        _pe_priced = {r["strike"] for r in expiry_options if r["option_type"] == "PE" and r["last_price"]}
+        _paired = [k for k in strikes if k in _ce_priced and k in _pe_priced]
+        atm_strike = min(_paired or strikes, key=lambda x: abs(x - cmp))
 
         atm_ce = next((r["last_price"] for r in expiry_options
                        if r["strike"] == atm_strike and r["option_type"] == "CE"), None)
