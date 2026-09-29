@@ -35,6 +35,14 @@ def run_seed_job(supabase, session_open_oi, session_peak_oi, session_open_price_
         session_peak_oi.clear()
         session_open_price_dict.clear()
         logger.info("MCX session state reset for new trading day")
+
+        # Once-daily cleanup — drop previous days' strike OI rows, keep today's full history
+        try:
+            from datetime import date
+            supabase.table("mcx_strike_oi").delete().lt("scanned_at", str(date.today())).execute()
+            logger.info("MCX strike OI: cleared rows from before today")
+        except Exception as e:
+            logger.warning(f"MCX strike OI cross-day cleanup failed: {e}")
     except Exception as e:
         logger.error(f"MCX seed job failed: {e}")
 

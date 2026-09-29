@@ -175,22 +175,10 @@ def analyze_strikes(
             logger.debug(f"Strike parse error for {sym}: {e}")
             continue
 
-    # Write to Supabase — keep only last 2 scans per commodity
+    # Write to Supabase — full day retained; cross-day cleanup runs once daily in the seed job
     try:
         if strike_rows:
             supabase.table("mcx_strike_oi").insert(strike_rows).execute()
-
-            # Delete rows older than last 2 scan timestamps for this commodity
-            old_scans = supabase.table("mcx_strike_oi")                 .select("scanned_at")                 .eq("commodity", commodity)                 .order("scanned_at", desc=True)                 .execute()
-
-            timestamps = sorted(set(
-                r["scanned_at"] for r in old_scans.data
-            ), reverse=True)
-
-            if len(timestamps) > 2:
-                cutoff = timestamps[2]
-                supabase.table("mcx_strike_oi")                     .delete()                     .eq("commodity", commodity)                     .lte("scanned_at", cutoff)                     .execute()
-
     except Exception as e:
         logger.warning(f"{commodity} strike OI write error: {e}")
 
