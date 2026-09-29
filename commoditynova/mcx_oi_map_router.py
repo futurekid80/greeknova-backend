@@ -139,6 +139,20 @@ def get_session_exits(commodity: str):
             key = (float(r["strike"]), r["option_type"])
             totals[key] = totals.get(key, 0) + r["oi_delta"]
 
+        # Net change per strike for the FULL day, all deltas (adds and exits combined) —
+        # drives the bar's visual sizing so it reflects the whole session, not one scan
+        all_rows = [
+            r for r in (result.data or [])
+            if r.get("scanned_at", "").startswith(today_str)
+        ]
+        net_totals: dict = {}
+        for r in all_rows:
+            key = (float(r["strike"]), r["option_type"])
+            net_totals[key] = net_totals.get(key, 0) + r.get("oi_delta", 0)
+
+        pe_net_by_strike = {str(int(s)): v for (s, t), v in net_totals.items() if t == "PE"}
+        ce_net_by_strike = {str(int(s)): v for (s, t), v in net_totals.items() if t == "CE"}
+
         def build_lists(near_only: bool):
             ce, pe = [], []
             for (strike, opt_type), total in totals.items():
@@ -172,6 +186,8 @@ def get_session_exits(commodity: str):
             "commodity": commodity,
             "current_price": current_price,
             "zone": zone,
+            "pe_net_by_strike": pe_net_by_strike,
+            "ce_net_by_strike": ce_net_by_strike,
             # Near-ATM — drives the signal
             "ce_exits_near": ce_near[:10],
             "pe_exits_near": pe_near[:10],
