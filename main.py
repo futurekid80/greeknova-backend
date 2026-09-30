@@ -850,7 +850,7 @@ def force_login():
         return {"status": "error", "detail": str(e)}
 
 @app.get("/alerts")
-def get_alerts(limit: int = 100, since_id: int = None, signal: str = None):
+def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbol: str = None):
     """(Aug 26 2026): serves real alert history from alert_log so the
     in-app Alerts panel can catch up on load, rather than depending
     entirely on the live SW->open-tab postMessage relay.
@@ -874,7 +874,16 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None):
             signals = [s.strip() for s in signal.split(",") if s.strip()]
             if signals:
                 q = q.in_("signal", signals)
-        rows = q.limit(min(limit, 200)).execute().data or []
+        if symbol:
+            # A symbol search means "show me everything for this stock today",
+            # not "whatever's left of it in the last 100 across all stocks" --
+            # a busy morning (hundreds of OI_SPIKE alerts/hour) can push a
+            # single symbol's earlier alerts out of a plain top-100 window
+            # within minutes, so this bypasses that cap with its own limit.
+            q = q.eq("symbol", symbol.strip().upper())
+            rows = q.limit(min(limit, 500)).execute().data or []
+        else:
+            rows = q.limit(min(limit, 200)).execute().data or []
         alerts = [{
             "id":         r["id"],
             "signal":     r.get("signal"),
