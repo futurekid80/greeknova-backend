@@ -110,23 +110,24 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
     latest_ts = ts_q.data[0]["timestamp"]
 
     # ── Snapshot data ──────────────────────────────────────────────────────────
-    data_q = supabase.from_("oi_snapshots")\
+    # Fetch ALL expiries for this symbol/timestamp first (not just the requested
+    # one) so `available_expiries` always reflects the full list -- previously
+    # this query filtered by `expiry` up front, so once the frontend echoed back
+    # a specific expiry on its second call, the response's own `expiries` list
+    # collapsed to just that one, making the expiry tabs disappear after refresh.
+    all_rows = supabase.from_("oi_snapshots")\
         .select("strike, option_type, oi, volume, last_price, expiry")\
         .eq("symbol", symbol)\
-        .eq("timestamp", latest_ts)
+        .eq("timestamp", latest_ts)\
+        .order("strike", desc=False).execute().data
 
-    if expiry:
-        data_q = data_q.eq("expiry", expiry)
-
-    rows = data_q.order("strike", desc=False).execute().data
-
-    if not rows:
+    if not all_rows:
         return {"symbol": symbol, "chain": [], "spot": spot, "expiry": expiry}
 
     # ── Expiry & T ─────────────────────────────────────────────────────────────
-    available_expiries = sorted(set(r["expiry"] for r in rows))
+    available_expiries = sorted(set(r["expiry"] for r in all_rows))
     active_expiry = expiry or available_expiries[0]
-    rows = [r for r in rows if r["expiry"] == active_expiry]
+    rows = [r for r in all_rows if r["expiry"] == active_expiry]
 
     exp_date = datetime.strptime(active_expiry, "%Y-%m-%d").date()
     today_date = date_type.today()
