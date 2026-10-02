@@ -381,11 +381,25 @@ async def lifespan(app: FastAPI):
         try:
             from services.push_checker import run_push_checks
             from utils.db import get_supabase
+            from utils.market_calendar import is_trading_day
             from datetime import datetime as _dt
             import pytz as _pytz
             _ist = _pytz.timezone("Asia/Kolkata")
             _now = _dt.now(_ist)
-            _is_mkt = _now.weekday() < 5 and (9*60+15) <= (_now.hour*60+_now.minute) <= (15*60+30)
+            # BUG FIX (Oct 2 2026): this only ever checked weekday + clock
+            # time, never the actual holiday calendar -- so on a market
+            # holiday that falls Mon-Fri (e.g. Gandhi Jayanti), it kept
+            # running during normal trading hours, found no fresh data (the
+            # capture job correctly stays off), and compared against
+            # yesterday's last snapshot -- producing fake "OI spike" alerts
+            # stamped with today's time out of genuinely stale data.
+            # run_full_capture() already guards against this the same way;
+            # mirror that here.
+            _is_mkt = (
+                _now.weekday() < 5
+                and is_trading_day(_now.date())
+                and (9*60+15) <= (_now.hour*60+_now.minute) <= (15*60+30)
+            )
             if _is_mkt:
                 run_push_checks(get_supabase())
         except Exception as e:
