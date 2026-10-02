@@ -850,7 +850,7 @@ def force_login():
         return {"status": "error", "detail": str(e)}
 
 @app.get("/alerts")
-def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbol: str = None):
+def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbol: str = None, date: str = None):
     """(Aug 26 2026): serves real alert history from alert_log so the
     in-app Alerts panel can catch up on load, rather than depending
     entirely on the live SW->open-tab postMessage relay.
@@ -859,7 +859,14 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbo
     high-volume signal types like OI_SPIKE push everything else out of a
     plain top-100 window within minutes, so a rarer/high-conviction type
     like NEAR_STRIKE_UNWIND needs its own dedicated query to not get
-    silently buried before anyone sees it."""
+    silently buried before anyone sees it.
+
+    (Oct 2 2026): optional `date` param (YYYY-MM-DD, IST) -- without it this
+    always defaulted to TODAY only, for every query including a symbol or
+    signal filter. That silently made yesterday's alerts unreachable the
+    moment midnight passed (e.g. reviewing a trade the next day, or on a
+    market holiday with zero alerts of its own) even though alert_log still
+    has them. `date` lets the frontend ask for a specific past day instead."""
     try:
         supabase = get_supabase()
         q = supabase.from_("alert_log").select("*").order("id", desc=True)
@@ -867,9 +874,16 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbo
             q = q.gt("id", since_id)
         else:
             from datetime import datetime, timezone, timedelta
-            ist_now = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
-            ist_today_start_utc = ist_now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=5, minutes=30)
-            q = q.gte("created_at", ist_today_start_utc.isoformat())
+            if date:
+                try:
+                    target = datetime.strptime(date, "%Y-%m-%d")
+                except ValueError:
+                    target = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+            else:
+                target = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+            ist_day_start_utc = target.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=5, minutes=30)
+            ist_day_end_utc = ist_day_start_utc + timedelta(hours=24)
+            q = q.gte("created_at", ist_day_start_utc.isoformat()).lt("created_at", ist_day_end_utc.isoformat())
         if signal:
             signals = [s.strip() for s in signal.split(",") if s.strip()]
             if signals:
