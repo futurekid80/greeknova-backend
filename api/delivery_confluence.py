@@ -13,9 +13,6 @@ _CONFLUENCE_TTL = 3600  # 1 hour post-market
 def get_delivery_confluence(supabase):
     global _confluence_cache, _confluence_cache_time
 
-    if _confluence_cache and (_time.time() - _confluence_cache_time) < _CONFLUENCE_TTL:
-        return _confluence_cache
-
     import pytz
     ist = pytz.timezone("Asia/Kolkata")
     today = datetime.now(ist).date()
@@ -46,10 +43,21 @@ def get_delivery_confluence(supabase):
 
     last_trading_day = check.isoformat()
 
-    # Invalidate cache if date changed
+    # BUG FIX (Oct 2026): the TTL short-circuit used to run BEFORE this
+    # date check, so a cache populated for yesterday's trade_date kept being
+    # returned for up to an hour after NSE published today's bhav copy --
+    # and if the endpoint was hit more often than once an hour (a live
+    # dashboard), the cache never aged out at all, staying stale until a
+    # manual Railway restart. Now we always compute last_trading_day (cheap
+    # single-row query) first and invalidate on a date change before even
+    # considering the TTL.
     if _confluence_cache.get("date") and _confluence_cache["date"] != last_trading_day:
         _confluence_cache = {}
         _confluence_cache_time = 0
+
+    if _confluence_cache and (_time.time() - _confluence_cache_time) < _CONFLUENCE_TTL \
+            and _confluence_cache.get("date") == last_trading_day:
+        return _confluence_cache
 
     hist_start = (check - timedelta(days=20)).isoformat()
     try:
