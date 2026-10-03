@@ -1555,6 +1555,11 @@ def admin_backfill_vix_history(daily_years: int = 5, intraday_days: int = 60):
     from api.vix_backfill import backfill_vix_history
     return backfill_vix_history(daily_years, intraday_days)
 
+@app.get("/chart-data/{symbol}")
+def chart_data(symbol: str, interval: str = "day", range: str = "6m"):
+    from api.chart_data import get_chart_data
+    return get_chart_data(symbol.upper(), interval, range)
+
 @app.get("/index-data")
 def index_data():
     import time
