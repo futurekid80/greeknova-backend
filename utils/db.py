@@ -21,3 +21,22 @@ def get_supabase():
     url = os.getenv("SUPABASE_URL")
     key = os.getenv("SUPABASE_KEY")
     return create_client(url, key, options=ClientOptions(httpx_client=_http_client))
+
+
+def get_supabase_admin():
+    """
+    Service-role client. Needed for anything that calls supabase.auth.admin.*
+    (e.g. generating a login link server-side) -- the normal anon/public
+    SUPABASE_KEY cannot do this, even though it's enough for all our regular
+    table reads/writes under RLS.
+    Requires SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_SERVICE_KEY as a fallback
+    name) to be set in the environment. Raises a clear error if missing,
+    rather than silently falling back to the anon key.
+    """
+    url = os.getenv("SUPABASE_URL")
+    key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_KEY")
+    if not key:
+        raise RuntimeError(
+            "SUPABASE_SERVICE_ROLE_KEY is not set -- required for admin auth operations."
+        )
+    return create_client(url, key, options=ClientOptions(httpx_client=_http_client))

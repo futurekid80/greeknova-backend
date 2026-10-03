@@ -1,7 +1,7 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
@@ -1602,6 +1602,57 @@ def admin_job_status():
             "stale": row["status"] != "success" or age_hours > 48,
         })
     return {"jobs": out}
+
+# Shared demo login (Oct 2026) - lets Manish hand a batch of ~50 preview
+# users one common credential (demo@greeknova.com + a fixed passcode)
+# instead of adding each person to beta_users individually. We never touch
+# the person's own email/OTP flow for this -- the frontend calls this
+# endpoint with just the passcode, we generate a magic-link token server
+# side for the shared demo@greeknova.com account via the Supabase admin
+# API (no email actually sent), and hand back the token_hash for the
+# frontend to redeem with supabase.auth.verifyOtp(). The passcode is a
+# shared-knowledge gate, not a security boundary -- this account should
+# only ever be read-only / non-sensitive.
+from pydantic import BaseModel as _BaseModel
+
+class DemoLoginRequest(_BaseModel):
+    code: str
+
+DEMO_LOGIN_EMAIL = "demo@greeknova.com"
+
+@app.post("/auth/demo-login")
+def auth_demo_login(body: DemoLoginRequest):
+    expected = os.getenv("DEMO_LOGIN_CODE", "123456")
+    if body.code.strip() != expected:
+        raise HTTPException(status_code=401, detail="Invalid code")
+
+    from utils.db import get_supabase_admin
+    try:
+        admin = get_supabase_admin()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Make sure the shared demo account is on the beta list (idempotent).
+    try:
+        admin.from_("beta_users").upsert({"email": DEMO_LOGIN_EMAIL}).execute()
+    except Exception as e:
+        print(f"[DemoLogin] beta_users upsert warning: {e}")
+
+    try:
+        link_res = admin.auth.admin.generate_link({
+            "type": "magiclink",
+            "email": DEMO_LOGIN_EMAIL,
+        })
+    except Exception as e:
+        print(f"[DemoLogin] generate_link failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not create demo session")
+
+    props = getattr(link_res, "properties", None) or link_res.get("properties", {})
+    token_hash = getattr(props, "hashed_token", None) if not isinstance(props, dict) else props.get("hashed_token")
+    if not token_hash:
+        raise HTTPException(status_code=500, detail="Demo session link missing token")
+
+    return {"email": DEMO_LOGIN_EMAIL, "token_hash": token_hash}
 
 @app.get("/chart-data/{symbol}")
 def chart_data(symbol: str, interval: str = "day", range: str = "6m"):
