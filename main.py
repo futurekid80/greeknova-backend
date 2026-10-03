@@ -1634,7 +1634,7 @@ def auth_demo_login(body: DemoLoginRequest):
 
     # Make sure the shared demo account is on the beta list (idempotent).
     try:
-        admin.from_("beta_users").upsert({"email": DEMO_LOGIN_EMAIL}).execute()
+        admin.from_("beta_users").upsert({"email": DEMO_LOGIN_EMAIL, "name": "Demo User"}).execute()
     except Exception as e:
         print(f"[DemoLogin] beta_users upsert warning: {e}")
 
