@@ -15,7 +15,7 @@ INDEX_NSE_MAP = {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK", "FINNIF
 _chart_cache: dict = {}
 CACHE_TTL = {"day": 300, "minute": 60, "5minute": 60, "15minute": 90}
 
-RANGE_TO_DAYS = {"1m": 30, "3m": 90, "6m": 182, "1y": 365, "3y": 1095}
+RANGE_TO_DAYS = {"1d": 1, "1m": 30, "3m": 90, "6m": 182, "1y": 365, "3y": 1095}
 
 
 def get_chart_data(symbol: str, interval: str = "day", range: str = "6m"):

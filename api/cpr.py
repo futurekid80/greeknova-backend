@@ -1035,3 +1035,45 @@ def update_cpr_status():
     global _cpr_cache, _cpr_cache_time
     _cpr_cache = {}
     _cpr_cache_time = 0
+
+
+def get_cpr_levels_for_symbol(symbol: str):
+    """Lightweight per-symbol CPR fetch for chart overlays — same
+    query-date logic as get_cpr_scanner() (today during market hours,
+    next trading day after 4:30pm/weekend) but a single-row lookup
+    instead of pulling all ~120 symbols."""
+    symbol = symbol.upper()
+    supabase = get_supabase()
+    import pytz
+    ist = pytz.timezone('Asia/Kolkata')
+    now_ist = datetime.now(ist)
+
+    if now_ist.weekday() >= 5:
+        query_date = _get_next_trading_day(now_ist.date()).isoformat()
+    elif now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
+        query_date = _get_next_trading_day(now_ist.date()).isoformat()
+    else:
+        query_date = now_ist.date().isoformat()
+
+    row = (
+        supabase.from_("cpr_levels")
+        .select("pivot, tc, bc, trade_date")
+        .eq("symbol", symbol)
+        .eq("trade_date", query_date)
+        .limit(1)
+        .execute()
+    )
+    if not row.data:
+        # fall back to the most recent available row for this symbol
+        row = (
+            supabase.from_("cpr_levels")
+            .select("pivot, tc, bc, trade_date")
+            .eq("symbol", symbol)
+            .order("trade_date", desc=True)
+            .limit(1)
+            .execute()
+        )
+    if not row.data:
+        return {"symbol": symbol, "cpr": None}
+    r = row.data[0]
+    return {"symbol": symbol, "cpr": {"pivot": r["pivot"], "tc": r["tc"], "bc": r["bc"], "trade_date": r["trade_date"]}}

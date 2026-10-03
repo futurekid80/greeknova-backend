@@ -1560,6 +1560,11 @@ def chart_data(symbol: str, interval: str = "day", range: str = "6m"):
     from api.chart_data import get_chart_data
     return get_chart_data(symbol.upper(), interval, range)
 
+@app.get("/cpr-levels/{symbol}")
+def cpr_levels(symbol: str):
+    from api.cpr import get_cpr_levels_for_symbol
+    return get_cpr_levels_for_symbol(symbol.upper())
+
 @app.get("/index-data")
 def index_data():
     import time
