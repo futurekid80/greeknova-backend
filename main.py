@@ -253,6 +253,23 @@ def keepalive_ping():
     except Exception as e:
         print(f"⚠️ Keepalive failed: {e}")
 
+def _record_job_status(supabase, job_name, status, detail=None, records_count=None):
+    """Lightweight job-run tracker so a silent/failed background job shows up
+    somewhere other than scrolling Railway logs -- see /admin/job-status.
+    Best-effort: never let a logging failure break the caller."""
+    try:
+        import pytz
+        from datetime import datetime
+        supabase.from_("job_status").upsert({
+            "job_name": job_name,
+            "last_run_at": datetime.now(pytz.utc).isoformat(),
+            "status": status,
+            "detail": (str(detail)[:500] if detail is not None else None),
+            "records_count": records_count,
+        }).execute()
+    except Exception as log_e:
+        print(f"[JobStatus] Failed to record status for {job_name}: {log_e}")
+
 def fetch_delivery_data():
     """Fetch today's delivery data from NSE bhav copy after market close."""
     import pytz, zipfile, io, requests
@@ -293,6 +310,7 @@ def fetch_delivery_data():
         res = requests.get(url, headers=headers, timeout=15)
         if res.status_code != 200:
             print(f"[Delivery] HTTP {res.status_code} for {today}")
+            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", f"HTTP {res.status_code}")
             return
         content = res.text
         lines = content.strip().split('\n')
@@ -304,6 +322,7 @@ def fetch_delivery_data():
         series_idx = next((i for i,h in enumerate(header) if h == 'SERIES'), None)
         if sym_idx is None or trd_idx is None or del_idx is None:
             print(f"[Delivery] Column not found in header: {header}")
+            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", f"Missing expected column in header: {header[:10]}")
             return
         records = []
         for line in lines[1:]:
@@ -322,10 +341,16 @@ def fetch_delivery_data():
             for i in range(0, len(records), 100):
                 supabase.from_("delivery_data").upsert(records[i:i+100]).execute()
             print(f"[Delivery] ✅ {today} — {len(records)} stocks saved")
+            _record_job_status(supabase, "delivery_bhavcopy_fetch", "success", f"{today}", len(records))
         else:
             print(f"[Delivery] ⚠️ {today} — no matching symbols")
+            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", f"{today} — parsed file but no matching symbols", 0)
     except Exception as e:
         print(f"[Delivery] ❌ {e}")
+        try:
+            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", str(e))
+        except Exception:
+            pass  # supabase itself may be what failed to init
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1554,6 +1579,29 @@ def vix_history(range: str = "6m"):
 def admin_backfill_vix_history(daily_years: int = 5, intraday_days: int = 60):
     from api.vix_backfill import backfill_vix_history
     return backfill_vix_history(daily_years, intraday_days)
+
+@app.get("/admin/job-status")
+def admin_job_status():
+    """Glance-able health check for background jobs that fail/skip silently
+    in Railway logs (bhavcopy delivery fetch today; add more jobs here by
+    calling _record_job_status from them). Flags a job as stale if its last
+    successful run is more than 2 trading-relevant days old."""
+    from utils.db import get_supabase
+    import pytz
+    from datetime import datetime, timedelta
+    supabase = get_supabase()
+    res = supabase.from_("job_status").select("*").execute()
+    now = datetime.now(pytz.utc)
+    out = []
+    for row in (res.data or []):
+        last_run = datetime.fromisoformat(row["last_run_at"].replace("Z", "+00:00"))
+        age_hours = round((now - last_run).total_seconds() / 3600, 1)
+        out.append({
+            **row,
+            "age_hours": age_hours,
+            "stale": row["status"] != "success" or age_hours > 48,
+        })
+    return {"jobs": out}
 
 @app.get("/chart-data/{symbol}")
 def chart_data(symbol: str, interval: str = "day", range: str = "6m"):
