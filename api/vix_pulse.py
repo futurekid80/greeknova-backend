@@ -115,3 +115,26 @@ def get_vix_pulse():
     _vix_cache = result
     _vix_cache_time = now_epoch
     return result
+
+
+RANGE_DAYS = {"1m": 30, "3m": 90, "6m": 182, "1y": 365}
+
+
+def get_vix_daily_history(range: str = "6m"):
+    supabase = get_supabase()
+    days = RANGE_DAYS.get(range, 182)
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    rows = (
+        supabase.table("vix_daily_history")
+        .select("date, open, high, low, close")
+        .gte("date", cutoff)
+        .order("date")
+        .execute()
+    )
+    closes = [r["close"] for r in rows.data] if rows.data else []
+    return {
+        "range": range,
+        "history": rows.data,
+        "range_low": min(closes) if closes else None,
+        "range_high": max(closes) if closes else None,
+    }

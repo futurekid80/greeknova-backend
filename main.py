@@ -1545,6 +1545,16 @@ def vix_pulse():
     from api.vix_pulse import get_vix_pulse
     return get_vix_pulse()
 
+@app.get("/vix-history")
+def vix_history(range: str = "6m"):
+    from api.vix_pulse import get_vix_daily_history
+    return get_vix_daily_history(range)
+
+@app.get("/admin/backfill-vix-history")
+def admin_backfill_vix_history(daily_years: int = 5, intraday_days: int = 60):
+    from api.vix_backfill import backfill_vix_history
+    return backfill_vix_history(daily_years, intraday_days)
+
 @app.get("/index-data")
 def index_data():
     import time
