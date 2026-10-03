@@ -196,8 +196,10 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
 
         # ── Fetch FUT open snapshot (9:15-9:20 AM IST = 03:45-03:50 UTC) ─
         # Include expiry so we can filter to nearest expiry only
+        # Include last_price so we can derive a FUT-based price change (see
+        # fut_price_chg_map below) instead of mixing cash price with FUT OI.
         fut_open_res = supabase.from_("oi_snapshots")\
-            .select("symbol, oi, volume, expiry")\
+            .select("symbol, oi, volume, expiry, last_price")\
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{trade_date}T03:44:00+00:00")\
             .lte("timestamp", f"{trade_date}T03:52:00+00:00")\
@@ -208,7 +210,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         # ── Fetch FUT close snapshot (3:25-3:30 PM IST = 09:55-10:00 UTC) ─
         # Include expiry so we can filter to nearest expiry only
         fut_close_res = supabase.from_("oi_snapshots")\
-            .select("symbol, oi, volume, expiry")\
+            .select("symbol, oi, volume, expiry, last_price")\
             .eq("option_type", "FUT")\
             .gte("timestamp", f"{trade_date}T09:50:00+00:00")\
             .lte("timestamp", f"{trade_date}T10:05:00+00:00")\
@@ -240,22 +242,25 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if len(sorted_exps) > 1:
                 fut_next_expiry[sym] = sorted_exps[1]
 
-        # ── Build open OI maps — nearest and next-nearest expiry ─────────
+        # ── Build open OI + price maps — nearest and next-nearest expiry ──
         fut_open_map = {}
         fut_open_map_next = {}
+        fut_open_price_map = {}
         for r in (fut_open_res.data or []):
             sym = r["symbol"]
             exp = str(r.get("expiry") or "")
             if exp == fut_nearest_expiry.get(sym) and sym not in fut_open_map:
                 fut_open_map[sym] = int(r.get("oi") or 0)
+                fut_open_price_map[sym] = float(r.get("last_price") or 0)
             elif exp == fut_next_expiry.get(sym) and sym not in fut_open_map_next:
                 fut_open_map_next[sym] = int(r.get("oi") or 0)
 
-        # ── Build close OI + volume maps — nearest and next-nearest ──────
+        # ── Build close OI + volume + price maps — nearest and next-nearest ─
         # Use same expiry maps as open for consistency (apples-to-apples)
         fut_close_oi_map = {}
         fut_close_oi_map_next = {}
         fut_vol_map = {}
+        fut_close_price_map = {}
         seen_close = set()
         seen_close_next = set()
         for r in (fut_close_res.data or []):
@@ -264,10 +269,25 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if exp == fut_nearest_expiry.get(sym) and sym not in seen_close:
                 fut_close_oi_map[sym] = int(r.get("oi") or 0)
                 fut_vol_map[sym] = int(r.get("volume") or 0)
+                fut_close_price_map[sym] = float(r.get("last_price") or 0)
                 seen_close.add(sym)
             elif exp == fut_next_expiry.get(sym) and sym not in seen_close_next:
                 fut_close_oi_map_next[sym] = int(r.get("oi") or 0)
                 seen_close_next.add(sym)
+
+        # ── FUT-based price change % (open→close), nearest expiry ────────
+        # BUG FIX (Oct 2026): price_chg_pct below was sourced purely from
+        # cmp_prices (CASH price) but then classified together with
+        # fut_oi_chg_pct (FUTURES OI) in fut_signal -- a real mismatch since
+        # FUT and cash can diverge (basis, especially in the last days before
+        # expiry). Prefer the FUT contract's own open->close price change;
+        # fall back to the cash price_chg_pct already in `rows` only when a
+        # FUT price isn't available for that symbol/day.
+        fut_price_chg_map = {}
+        for sym, close_price in fut_close_price_map.items():
+            open_price = fut_open_price_map.get(sym, 0)
+            if open_price > 0 and close_price > 0:
+                fut_price_chg_map[sym] = round((close_price - open_price) / open_price * 100, 2)
 
         # ── Compute FUT OI change % — near-month and next-month ───────────
         fut_oi_chg_map = {}
@@ -288,6 +308,12 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         for row in rows:
             sym = row["symbol"]
             fut_oi = fut_oi_chg_map.get(sym, 0)
+            # Prefer FUT open->close price change (matches the FUT OI this
+            # gets classified against); fall back to the cash price_chg_pct
+            # computed above only when no FUT price data exists for the day
+            # (e.g. symbol missing an open or close snapshot).
+            if sym in fut_price_chg_map:
+                row["price_chg_pct"] = cap_pct(fut_price_chg_map[sym])
             price  = row.get("price_chg_pct") or 0
             row["fut_vol"]        = fut_vol_map.get(sym, 0)
             row["fut_oi_chg_pct"] = fut_oi
