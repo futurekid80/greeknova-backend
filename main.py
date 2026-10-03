@@ -1540,6 +1540,11 @@ def oi_pulse():
     from api.oi_pulse import get_oi_pulse
     return get_oi_pulse()
 
+@app.get("/vix-pulse")
+def vix_pulse():
+    from api.vix_pulse import get_vix_pulse
+    return get_vix_pulse()
+
 @app.get("/index-data")
 def index_data():
     import time
