@@ -508,6 +508,18 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         else:
             history_quality = f"{n_days}d"
 
+        # ── Confidence flag — IVR/IVP are only meaningful once there's a
+        # reasonable amount of history behind them. A stock with 11 days of
+        # iv_history sitting at IVR 100 just means "today is the highest IV
+        # we've ever recorded for it" — technically correct, but it reads
+        # the same as a stock with a full year behind it unless we flag it.
+        # iv_history can't be backfilled (IV is computed by us, not raw
+        # market data), so this only improves as more days accumulate.
+        # 30 days ≈ a month of trading, a reasonable floor for a percentile
+        # to start meaning something.
+        IV_HISTORY_CONFIDENCE_DAYS = 30
+        low_confidence = n_days < IV_HISTORY_CONFIDENCE_DAYS
+
         # ── IV signal labels — market standard thresholds ─────────────────────
         if ivr is None:
             iv_signal = "INSUFFICIENT_DATA"
@@ -524,6 +536,9 @@ def get_iv_analysis(symbol: str = None, date: str = None):
         else:
             iv_signal = "LOW_IV"
             iv_label  = f"Low IV — IVR {ivr:.0f}"
+
+        if low_confidence and ivr is not None:
+            iv_label = f"{iv_label} · Low confidence ({n_days}d history)"
 
         # Strategy signals — SEBI compliant (descriptive, not prescriptive)
         strategies = []
@@ -574,6 +589,7 @@ def get_iv_analysis(symbol: str = None, date: str = None):
             "history_quality":     history_quality,
             "iv_signal":           iv_signal,
             "iv_label":            iv_label,
+            "low_confidence":      low_confidence,
             "strategies":          strategies,
             "expected_move_pts":   expected_move_pts,
             "expected_move_pct":   expected_move_pct,
