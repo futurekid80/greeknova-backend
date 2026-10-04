@@ -1373,19 +1373,37 @@ def watchdog_archive():
     ist = pytz.timezone('Asia/Kolkata')
     supabase = get_supabase()
     try:
+        # BUG FIX (Oct 4 2026): this used to order by created_at, which has
+        # NO index on oi_snapshots_archive (64M+ rows) -- Postgres's own
+        # statement timeout was killing this query every single time before
+        # it could even check staleness, so the self-heal never actually
+        # ran despite the endpoint returning {"status":"triggered"} (the
+        # outer try/except here swallows the error and the caller never
+        # sees it). `timestamp` has a DESC index already (same one
+        # archive_old_snapshots' own resume logic uses), so query that
+        # instead -- it's effectively instant.
+        #
+        # Threshold is widened accordingly: `timestamp` is the archived
+        # DATA's own time, not when the archive job ran, and archiving only
+        # ever covers data older than 7 days (archive_old_snapshots'
+        # cutoff_date) -- so under healthy weekly operation the newest
+        # archived `timestamp` is normally ~7-8 days old even right after a
+        # successful run. 15 days (7-day cutoff + the old 8-day run-missed
+        # tolerance) preserves the original intent: flag it only once the
+        # archive job has genuinely gone silent, not every normal week.
         recent = supabase.from_("oi_snapshots_archive") \
-            .select("created_at") \
-            .order("created_at", desc=True) \
+            .select("timestamp") \
+            .order("timestamp", desc=True) \
             .limit(1).execute()
-        last_run = None
+        last_archived_ts = None
         if recent.data:
-            last_run = datetime.fromisoformat(recent.data[0]["created_at"].replace("Z", "+00:00"))
-        stale = (not last_run) or (datetime.now(pytz.utc) - last_run > timedelta(days=8))
+            last_archived_ts = datetime.fromisoformat(recent.data[0]["timestamp"].replace("Z", "+00:00"))
+        stale = (not last_archived_ts) or (datetime.now(pytz.utc) - last_archived_ts > timedelta(days=15))
         if stale:
-            print("[ARCHIVE Watchdog] ⚠️ No archive activity in over 8 days — re-triggering...")
+            print("[ARCHIVE Watchdog] ⚠️ No archive progress in over 15 days — re-triggering...")
             archive_old_snapshots()
         else:
-            print(f"[ARCHIVE Watchdog] ✅ Last archive run {last_run.isoformat()} — within expected window")
+            print(f"[ARCHIVE Watchdog] ✅ Newest archived data {last_archived_ts.isoformat()} — within expected window")
     except Exception as e:
         print(f"[ARCHIVE Watchdog] Error: {e}")
 
