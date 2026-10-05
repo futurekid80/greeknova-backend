@@ -126,19 +126,41 @@ def _get_uoa_signals_cached() -> dict:
 
 
 def _get_prev_trading_day(ref_date):
-    """Get previous trading day (skip weekends)."""
-    prev = ref_date - timedelta(days=1)
-    while prev.weekday() >= 5:
-        prev -= timedelta(days=1)
-    return prev
+    """Get previous trading day (skip weekends AND NSE holidays).
+
+    BUG FIX (Oct 5 2026): this used to only skip weekends (weekday>=5),
+    not exchange holidays like Gandhi Jayanti (Oct 2 2026). When the EOD
+    CPR job ran on/after a holiday, market_closed was still computed as
+    True (weekday<5 check doesn't know about holidays), so prev_trading_day
+    was set to the holiday itself -- a date with no Kite candle. The match
+    loop below then fell through to its `candles[-2]` fallback, which
+    assumes candles[-1] is "today's partial candle" to be excluded. That
+    assumption was wrong here: candles[-1] was already the correct
+    previous COMPLETE session (e.g. Thursday Oct 1), so skipping to
+    candles[-2] picked a close from ONE TRADING DAY TOO FAR BACK (e.g.
+    Wednesday Sep 30) for every single symbol -- producing a stale
+    prev_close and therefore wrong day's % change across the board
+    (reported by Manish: Kalyan Jewellers, Angel One, BSE all showing
+    inflated moves the Monday after Gandhi Jayanti). Delegate to the
+    shared, holiday-aware helper in utils/market_calendar.py instead of
+    this file's own weekend-only copy -- the exact duplicated-date-logic
+    anti-pattern that module's own today_ist() docstring warns about.
+    """
+    from utils.market_calendar import get_prev_trading_day
+    return get_prev_trading_day(ref_date)
 
 
 def _get_next_trading_day(ref_date):
-    """Get next trading day (skip weekends)."""
-    nxt = ref_date + timedelta(days=1)
-    while nxt.weekday() >= 5:
-        nxt += timedelta(days=1)
-    return nxt
+    """Get next trading day (skip weekends AND NSE holidays).
+
+    Was weekend-only, same as the old _get_prev_trading_day -- only
+    "safe" because its one call site (below) separately re-checked
+    is_trading_day() in a patch-up loop. Delegating to the shared helper
+    removes that fragile duplication; the patch-up loop below is now
+    redundant but harmless.
+    """
+    from utils.market_calendar import get_next_trading_day
+    return get_next_trading_day(ref_date)
 
 
 def compute_and_store_cpr(trade_date: str = None):
