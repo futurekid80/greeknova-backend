@@ -15,7 +15,14 @@ INDEX_NSE_MAP = {"NIFTY": "NSE:NIFTY 50", "BANKNIFTY": "NSE:NIFTY BANK", "FINNIF
 _chart_cache: dict = {}
 CACHE_TTL = {"day": 300, "minute": 60, "5minute": 60, "15minute": 90}
 
-RANGE_TO_DAYS = {"1d": 1, "1m": 30, "3m": 90, "6m": 182, "1y": 365, "3y": 1095}
+# BUG FIX (Oct 5 2026): "1d" used a literal 1-calendar-day lookback, so
+# right after a weekend/holiday (e.g. Fri close -> Sat/Sun/Mon) the window
+# fell entirely in a dead zone with zero market data -- "No chart data
+# available" even though the chart itself was fine. 5 calendar days always
+# reaches back across the longest realistic NSE gap (a 3-day weekend plus
+# one more holiday) to the last real trading session, while still being
+# well under Kite's 60-day cap on minute-interval requests.
+RANGE_TO_DAYS = {"1d": 5, "1m": 30, "3m": 90, "6m": 182, "1y": 365, "3y": 1095}
 
 
 def get_chart_data(symbol: str, interval: str = "day", range: str = "6m"):
