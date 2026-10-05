@@ -2288,6 +2288,11 @@ def oi_profile(symbol: str, date: str = None, expiry: str = None):
     from api.oi_profile import get_oi_profile
     return get_oi_profile(symbol=symbol, date=date, expiry=expiry)
 
+@app.get("/straddle-chart/{symbol}")
+def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):
+    from api.straddle_chart import get_straddle_chart
+    return get_straddle_chart(symbol=symbol, strike=strike, expiry=expiry, date=date)
+
 @app.get("/vacuum-scanner")
 def vacuum_scanner(max_distance_pct: float = 10.0):
     from api.vacuum_scanner import get_vacuum_scanner
