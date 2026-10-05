@@ -400,6 +400,13 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         row["pe_oi_delta"] = row["pe_oi"] - prev_pe
         
     return {
+        "_debug_window_start": window_start,
+        "_debug_eod_ts": eod_ts,
+        "_debug_raw_rows_count": len(raw_rows),
+        "_debug_deduped_count": len(all_rows_unfiltered),
+        "_debug_all_rows_count": len(all_rows),
+        "_debug_pe_rows_in_all_rows": sum(1 for r in all_rows if r["option_type"] == "PE"),
+        "_debug_ce_rows_in_all_rows": sum(1 for r in all_rows if r["option_type"] == "CE"),
         "symbol":          symbol,
         "date":            date,
         "expiry":          active_expiry,
