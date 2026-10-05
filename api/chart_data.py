@@ -72,8 +72,16 @@ def get_chart_data(symbol: str, interval: str = "day", range: str = "6m"):
     out = []
     for c in candles:
         ts = c["date"]
+        # BUG FIX (Oct 5 2026): lightweight-charts' Time type only accepts a
+        # plain "YYYY-MM-DD" string for daily (business-day) candles -- for
+        # any intraday interval it needs a numeric Unix timestamp (seconds).
+        # Sending a full ISO datetime string ("2026-10-01T09:15:00+05:30")
+        # for intraday candles isn't a format the library understands as
+        # either type; it silently produced garbage bar widths/positions
+        # (giant blown-up candles) instead of a clean error, since the chart
+        # always failed before reaching render until the 1D-range fix above.
         out.append({
-            "time": ts.strftime("%Y-%m-%d") if interval == "day" else ts.isoformat(),
+            "time": ts.strftime("%Y-%m-%d") if interval == "day" else int(ts.timestamp()),
             "open": c["open"],
             "high": c["high"],
             "low": c["low"],
