@@ -117,50 +117,83 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             .order("timestamp", desc=True) \
             .limit(500).execute()
 
-        # Get previous trading day's close — use last available date from DB (handles holidays)
-        try:
-            prev_res = supabase.from_("cmp_prices")\
-                .select("timestamp")\
-                .lt("timestamp", f"{trade_date}T00:00:00+00:00")\
-                .order("timestamp", desc=True)\
-                .limit(1)\
-                .execute()
-            if prev_res.data:
-                import pytz as _pytz
-                _ist = _pytz.timezone('Asia/Kolkata')
-                from datetime import datetime as _dt2
-                _raw_ts = prev_res.data[0]["timestamp"]
-                _dt_obj = _dt2.fromisoformat(_raw_ts.replace("Z", "+00:00")).astimezone(_ist)
-                prev_date = _dt_obj.strftime('%Y-%m-%d')
-            else:
-                raise Exception("no prev data")
-        except:
-            from datetime import datetime as _dt2
-            trade_dt = _dt2.strptime(trade_date, '%Y-%m-%d')
-            prev_date = (trade_dt - timedelta(days=3)).strftime('%Y-%m-%d')
+        # BUG FIX (Oct 5 2026): price_chg_pct used to be computed purely from
+        # cmp_prices -- two intraday/EOD LTP *snapshots* (today's last poll
+        # vs. yesterday's last poll), not NSE's official close-to-close
+        # move. Same bug class already fixed in api/cpr.py, api/oi_pulse.py,
+        # api/vol_oi_breakout.py and api/positional_intelligence.py: NSE's
+        # official close is set by a post-15:30 closing auction and can
+        # differ meaningfully from the last continuous-session LTP.
+        # Confirmed live: this exact bug was still inflating ANGELONE/BSE/
+        # KALYANKJIL's scanner % change to +4%+ even after those four other
+        # fixes, because this is where the post-market scanner (_get_eod_pulse
+        # in oi_pulse.py) actually reads price_chg_pct from -- a precomputed,
+        # stored column, written once daily by this very function and never
+        # recomputed live. Use the official close (official_close_map,
+        # already fetched above via Kite's historical_data) against
+        # cpr_levels.prev_close (also Kite-official, computed by the EOD CPR
+        # job) instead of cmp_prices snapshots on either side.
+        cpr_prev_res = supabase.from_("cpr_levels")\
+            .select("symbol, prev_close")\
+            .eq("trade_date", trade_date)\
+            .execute()
+        cpr_prev_close_map = {
+            r["symbol"]: float(r["prev_close"])
+            for r in (cpr_prev_res.data or [])
+            if r.get("prev_close") is not None
+        }
 
-        prev_cmp_res = supabase.from_("cmp_prices")\
-            .select("symbol, cmp")\
-            .gte("timestamp", f"{prev_date}T00:00:00+00:00")\
-            .lte("timestamp", f"{prev_date}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(500).execute()
-
+        # Fallback prev-close source (cmp_prices LTP) only for a symbol
+        # cpr_levels doesn't have yet (e.g. not covered by the EOD CPR job).
+        # Still uses the last available date in the DB so it naturally
+        # skips weekends/holidays with no data.
         prev_cmp_map = {}
-        seen_prev = set()
-        for row in (prev_cmp_res.data or []):
-            if row["symbol"] not in seen_prev:
-                prev_cmp_map[row["symbol"]] = float(row["cmp"])
-                seen_prev.add(row["symbol"])
+        missing_for_fallback = [s for s in SYMBOLS if s not in cpr_prev_close_map]
+        if missing_for_fallback:
+            try:
+                prev_res = supabase.from_("cmp_prices")\
+                    .select("timestamp")\
+                    .lt("timestamp", f"{trade_date}T00:00:00+00:00")\
+                    .order("timestamp", desc=True)\
+                    .limit(1)\
+                    .execute()
+                if prev_res.data:
+                    import pytz as _pytz
+                    _ist = _pytz.timezone('Asia/Kolkata')
+                    from datetime import datetime as _dt2
+                    _raw_ts = prev_res.data[0]["timestamp"]
+                    _dt_obj = _dt2.fromisoformat(_raw_ts.replace("Z", "+00:00")).astimezone(_ist)
+                    prev_date = _dt_obj.strftime('%Y-%m-%d')
+                else:
+                    raise Exception("no prev data")
+            except:
+                from datetime import datetime as _dt2
+                trade_dt = _dt2.strptime(trade_date, '%Y-%m-%d')
+                prev_date = (trade_dt - timedelta(days=3)).strftime('%Y-%m-%d')
+
+            prev_cmp_res = supabase.from_("cmp_prices")\
+                .select("symbol, cmp")\
+                .gte("timestamp", f"{prev_date}T00:00:00+00:00")\
+                .lte("timestamp", f"{prev_date}T23:59:59+00:00")\
+                .order("timestamp", desc=True)\
+                .limit(500).execute()
+
+            seen_prev = set()
+            for row in (prev_cmp_res.data or []):
+                sym = row["symbol"]
+                if sym in missing_for_fallback and sym not in seen_prev:
+                    prev_cmp_map[sym] = float(row["cmp"])
+                    seen_prev.add(sym)
 
         cmp_map = {}
         seen = set()
         for row in (cmp_res.data or []):
             sym = row["symbol"]
             if sym not in seen:
-                curr = float(row.get("cmp") or 0)
-                prev = prev_cmp_map.get(sym, 0)
-                price_chg = round((curr - prev) / prev * 100, 2) if prev > 0 else None
+                curr_official = official_close_map.get(sym)
+                curr = curr_official if curr_official is not None else float(row.get("cmp") or 0)
+                prev = cpr_prev_close_map.get(sym) or prev_cmp_map.get(sym, 0)
+                price_chg = round((curr - prev) / prev * 100, 2) if prev > 0 and curr > 0 else None
                 cmp_map[sym] = {
                     "cmp": row.get("cmp"),
                     "price_chg_pct": price_chg
@@ -308,13 +341,22 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         for row in rows:
             sym = row["symbol"]
             fut_oi = fut_oi_chg_map.get(sym, 0)
-            # Prefer FUT open->close price change (matches the FUT OI this
-            # gets classified against); fall back to the cash price_chg_pct
-            # computed above only when no FUT price data exists for the day
-            # (e.g. symbol missing an open or close snapshot).
-            if sym in fut_price_chg_map:
-                row["price_chg_pct"] = cap_pct(fut_price_chg_map[sym])
-            price  = row.get("price_chg_pct") or 0
+            # BUG FIX (Oct 5 2026): this used to overwrite row["price_chg_pct"]
+            # -- the field the scanner displays as the stock's day change --
+            # with the FUT contract's own 9:15->15:30 open/close move. That's
+            # a futures-basis intraday swing, not the cash market's
+            # close-to-close % change, and it was the single biggest source
+            # of the inflated ANGELONE/BSE/KALYANKJIL scanner numbers (a FUT
+            # contract can easily swing several % intraday on basis/rollover
+            # even when the underlying barely moved day-to-day). Keep using
+            # the FUT open->close move ONLY for fut_signal classification
+            # (that's the "Oct 2026" fix's actual intent -- keeping the
+            # signal consistent with the FUT OI it's paired with), via a
+            # local variable (not persisted -- daily_oi_summary has no
+            # fut_price_chg_pct column, and adding one isn't needed for
+            # fut_signal, the only consumer), and leave row["price_chg_pct"]
+            # as the correct cash close-to-close value computed above.
+            price = fut_price_chg_map.get(sym, row.get("price_chg_pct") or 0)
             row["fut_vol"]        = fut_vol_map.get(sym, 0)
             row["fut_oi_chg_pct"] = fut_oi
             row["fut_oi_chg_pct_next"] = fut_oi_chg_map_next.get(sym, None)
