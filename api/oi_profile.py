@@ -104,12 +104,22 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     ce_oi: dict = {}
     pe_oi: dict = {}
 
+    # BUG FIX (Oct 5 2026): the capture job (main.py) always pulls the FUT
+    # contract alongside CE/PE for every symbol, stocks included, stored with
+    # option_type="FUT". This loop's `else` branch treated "anything that
+    # isn't CE" as PE, so the futures contract's OI -- always far larger than
+    # any single option strike's OI -- was silently getting dumped into the
+    # PE total. Confirmed live: AUBANK showed PCR 5.3 when the real
+    # (Sensibull-matching) chain-wide PCR was ~0.9; its Oct-expiry futures OI
+    # alone (22.4M) accounted for the entire gap once added to the real PE
+    # total (43.86L + 224.44L FUT = 268.3L, exactly the inflated figure).
+    # Must explicitly require PE here, not just "not CE".
     for r in all_rows:
         strike = float(r["strike"])
         oi     = r["oi"] or 0
         if r["option_type"] == "CE":
             ce_oi[strike] = ce_oi.get(strike, 0) + oi
-        else:
+        elif r["option_type"] == "PE":
             pe_oi[strike] = pe_oi.get(strike, 0) + oi
 
     all_strikes_raw = sorted(set(list(ce_oi.keys()) + list(pe_oi.keys())))
@@ -400,13 +410,6 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         row["pe_oi_delta"] = row["pe_oi"] - prev_pe
         
     return {
-        "_debug_window_start": window_start,
-        "_debug_eod_ts": eod_ts,
-        "_debug_raw_rows_count": len(raw_rows),
-        "_debug_deduped_count": len(all_rows_unfiltered),
-        "_debug_all_rows_count": len(all_rows),
-        "_debug_pe_rows_in_all_rows": sum(1 for r in all_rows if r["option_type"] == "PE"),
-        "_debug_ce_rows_in_all_rows": sum(1 for r in all_rows if r["option_type"] == "CE"),
         "symbol":          symbol,
         "date":            date,
         "expiry":          active_expiry,

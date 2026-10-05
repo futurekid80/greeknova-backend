@@ -71,6 +71,11 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     # NSE-style whole-chain PCR and stays stable through the session)
 
     # ── Group by timestamp — compute both OI PCR and Vol PCR ─────────────────
+    # BUG FIX (Oct 5 2026): same bug class fixed in oi_profile.py today -- the
+    # query above has no option_type filter, so it also returns each symbol's
+    # FUT row. This loop's `else` branch treated "anything that isn't CE" as
+    # PE, silently dumping the futures contract's (always much larger) OI
+    # into pe_oi every cycle. Must explicitly require PE.
     ts_map: dict = {}
     for row in all_data:
         ts = row["timestamp"]
@@ -79,7 +84,7 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
         if row["option_type"] == "CE":
             ts_map[ts]["ce_oi"]  += row["oi"] or 0
             ts_map[ts]["ce_vol"] += row["volume"] or 0
-        else:
+        elif row["option_type"] == "PE":
             ts_map[ts]["pe_oi"]  += row["oi"] or 0
             ts_map[ts]["pe_vol"] += row["volume"] or 0
 
