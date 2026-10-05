@@ -54,7 +54,20 @@ def get_chart_data(symbol: str, interval: str = "day", range: str = "6m"):
     if interval != "day":
         days = min(days, 59)
 
-    to_date = datetime.now()
+    # BUG FIX (Oct 5 2026): datetime.now() is naive server time -- Railway
+    # runs in UTC, but Kite's historical_data interprets the date strings we
+    # send as IST (the exchange timezone). Sending unconverted UTC "now" as
+    # "to_date" made Kite think the request ended ~5h30m earlier than it
+    # actually did (e.g. 04:03 UTC sent/read as 04:03 IST, before market
+    # open), so it silently returned only up to the last fully-elapsed
+    # session and never today's candles, however long the market had been
+    # open. This looked exactly like a Kite data-availability lag but was
+    # entirely our own timezone bug -- confirmed by cross-checking against
+    # the live oi_snapshots capture pipeline, which had today's real-time
+    # price the whole time.
+    import pytz
+    ist = pytz.timezone("Asia/Kolkata")
+    to_date = datetime.now(ist).replace(tzinfo=None)
     from_date = to_date - timedelta(days=days)
 
     try:
