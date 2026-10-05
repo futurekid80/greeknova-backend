@@ -304,15 +304,35 @@ def get_positional_intelligence(min_consec: int = 0):
         if latest_snap.data:
             latest_ts = latest_snap.data[0]["timestamp"]
             # Fetch CE/PE OI for all symbols at latest snapshot
-            options_res = supabase.from_("oi_snapshots")\
-                .select("symbol, option_type, strike, oi, last_price, expiry")\
-                .eq("timestamp", latest_ts)\
-                .in_("option_type", ["CE", "PE"])\
-                .limit(10000)\
-                .execute()
+            # BUG FIX (Oct 5 2026): a single .limit(10000) request with no
+            # pagination -- sized for the old ~66-symbol universe. Now that
+            # F&O covers all 216 symbols, one snapshot holds ~17,900 CE/PE
+            # rows, so this was silently dropping ~44% of them. With no
+            # explicit ORDER BY, which rows got cut wasn't even a clean
+            # alphabetical tail -- it depended on insertion order, so Net
+            # Delta randomly went missing for an unpredictable scatter of
+            # stocks (ANANDRATHI, RADICO, APOLLOHOSP, MANKIND, UNOMINDA, LTF
+            # confirmed missing live while others on either side of them
+            # alphabetically were fine). Same "limit sized for the 66-symbol
+            # universe" class already fixed today in Scanners' CMP fetch.
+            # Paginate instead, same pattern used elsewhere (oi_profile.py,
+            # pcr_trend.py).
+            options_rows = []
+            for offset in range(0, 50000, 1000):
+                batch = supabase.from_("oi_snapshots")\
+                    .select("symbol, option_type, strike, oi, last_price, expiry")\
+                    .eq("timestamp", latest_ts)\
+                    .in_("option_type", ["CE", "PE"])\
+                    .range(offset, offset + 999)\
+                    .execute()
+                if not batch.data:
+                    break
+                options_rows.extend(batch.data)
+                if len(batch.data) < 1000:
+                    break
             # Group by symbol
             sym_options: dict = defaultdict(list)
-            for r in (options_res.data or []):
+            for r in options_rows:
                 sym_options[r["symbol"]].append(r)
             # Compute net delta per symbol using ATM±5 strikes
             # BUG FIX: was summing OI across ALL expiries mixed together (no
