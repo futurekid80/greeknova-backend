@@ -163,7 +163,7 @@ def get_positional_intelligence(min_consec: int = 0):
     try:
         # CPR is stored for next trading day — find nearest available
         cpr_res = supabase.from_("cpr_levels")\
-            .select("symbol, tc, bc, width_label, width_emoji, cpr_trend, trade_date")\
+            .select("symbol, tc, bc, width_label, width_emoji, cpr_trend, trade_date, prev_close")\
             .gte("trade_date", today_str)\
             .order("trade_date", desc=False)\
             .limit(500)\
@@ -243,11 +243,23 @@ def get_positional_intelligence(min_consec: int = 0):
                     latest_oi_next[s] = oi
             # Fetch genuine previous trading day close — NOT last_trading_day,
             # which equals today during market hours. Mirrors vol_oi_breakout.py.
-            # BUG FIX (Oct 5 2026): was weekend-only (weekday<5), not
-            # NSE-holiday aware -- same duplicated-date-logic bug already
-            # fixed in api/cpr.py, api/oi_pulse.py and api/vol_oi_breakout.py.
-            # Delegate to the shared helper instead of reimplementing it again.
+            # BUG FIX (Oct 5 2026), part 1: date selection was weekend-only
+            # (weekday<5), not NSE-holiday aware -- same duplicated-date-logic
+            # bug already fixed in api/cpr.py, api/oi_pulse.py and
+            # api/vol_oi_breakout.py. Delegate to the shared helper.
+            # BUG FIX (Oct 5 2026), part 2 -- the bigger one: prev_close was
+            # sourced from cmp_prices' last intraday LTP poll of the prev
+            # day, which is NOT the exchange's official closing price (NSE's
+            # close is set by a post-15:30 closing auction and can differ
+            # meaningfully from the last continuous-session LTP -- confirmed
+            # live, a ~2.5% gap for ANGELONE). cpr_map's prev_close (fetched
+            # above) comes from Kite's official daily candle and is correct
+            # -- use it first, falling back to the cmp_prices approximation
+            # only for a symbol cpr_map doesn't have.
             prev_close_map = {}
+            for _sym, _row in cpr_map.items():
+                if _row.get("prev_close") is not None:
+                    prev_close_map[_sym] = float(_row["prev_close"])
             try:
                 from utils.market_calendar import get_prev_trading_day
                 _prev_date = get_prev_trading_day(datetime.strptime(today_str, '%Y-%m-%d').date()).strftime('%Y-%m-%d')
@@ -261,7 +273,7 @@ def get_positional_intelligence(min_consec: int = 0):
                 _seen_prev = set()
                 for _row in (_prev_cmp_res.data or []):
                     _sym = _row["symbol"]
-                    if _sym not in _seen_prev:
+                    if _sym not in prev_close_map and _sym not in _seen_prev:
                         prev_close_map[_sym] = float(_row["cmp"])
                         _seen_prev.add(_sym)
             except Exception as e:

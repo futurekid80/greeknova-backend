@@ -373,16 +373,31 @@ def get_vol_oi_breakout(supabase):
 
         # ── Step 4: CPR levels ────────────────────────────────────────────
         cpr_rows = supabase.from_("cpr_levels")\
-            .select("symbol, tc, bc, width_label, width_emoji")\
+            .select("symbol, tc, bc, width_label, width_emoji, prev_close")\
             .eq("trade_date", today)\
             .execute()
         cpr_map = {r["symbol"]: r for r in (cpr_rows.data or [])}
 
         # ── Step 5: Prev close prices (for accurate price change) ─────────
-        # Use prev trading day's latest CMP — same as Market Pulse / OI Pulse
-        # BUG FIX (Oct 5 2026): was weekend-only (weekday<5), not NSE-holiday
-        # aware -- same duplicated-date-logic bug already fixed in
-        # api/cpr.py and api/oi_pulse.py. Delegate to the shared helper.
+        # BUG FIX (Oct 5 2026), part 1: prev-trading-day date selection was
+        # weekend-only (weekday<5), not NSE-holiday aware -- same
+        # duplicated-date-logic bug already fixed in api/cpr.py and
+        # api/oi_pulse.py. Delegate to the shared helper.
+        #
+        # BUG FIX (Oct 5 2026), part 2 -- the bigger one: prev_close was
+        # sourced from cmp_prices' last intraday LTP poll of the prev day,
+        # which is NOT the exchange's official closing price (NSE's close
+        # is set by a post-15:30 closing auction and can differ meaningfully
+        # from the last continuous-session LTP -- confirmed live, a ~2.5%
+        # gap for ANGELONE). cpr_levels.prev_close (already queried above
+        # for tc/bc) is sourced from Kite's official daily candle and is the
+        # correct value -- use it first, falling back to the cmp_prices
+        # approximation only for a symbol cpr_levels doesn't have yet.
+        prev_close_map = {}
+        for sym, row in cpr_map.items():
+            if row.get("prev_close") is not None:
+                prev_close_map[sym] = float(row["prev_close"])
+
         from datetime import datetime as _dt
         from utils.market_calendar import get_prev_trading_day
         prev_date = get_prev_trading_day(_dt.strptime(today, '%Y-%m-%d').date()).strftime('%Y-%m-%d')
@@ -395,11 +410,10 @@ def get_vol_oi_breakout(supabase):
             .limit(500)\
             .execute()
 
-        prev_close_map = {}
         seen_prev = set()
         for row in (prev_cmp_res.data or []):
             sym = row["symbol"]
-            if sym not in seen_prev:
+            if sym not in prev_close_map and sym not in seen_prev:
                 prev_close_map[sym] = float(row["cmp"])
                 seen_prev.add(sym)
 

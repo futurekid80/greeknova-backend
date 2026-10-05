@@ -599,32 +599,59 @@ def get_oi_pulse():
         for r in (cmp_result.data or []):
             last_cmp[r["symbol"]] = float(r["cmp"])
 
-        # Get previous day's EOD CMP as prev_close
-        # BUG FIX (Oct 5 2026): this used to only skip weekends (weekday<5),
-        # not NSE holidays -- a third hand-copied instance of the same
-        # duplicated-date-logic bug already fixed in api/cpr.py's
-        # _get_prev_trading_day (see that commit for the full story: it
-        # caused Kalyan Jewellers/Angel One/BSE/etc to show inflated % moves
-        # the trading day after a holiday). This endpoint reads prev_close
-        # from cmp_prices, a separate path from cpr_levels, so fixing cpr.py
-        # alone did not fix the scanner. Delegate to the shared, holiday-aware
-        # helper instead of reimplementing it again.
+        # Get previous day's official close as prev_close
+        # BUG FIX (Oct 5 2026), part 1: the prev-trading-day DATE selection
+        # here used to only skip weekends (weekday<5), not NSE holidays --
+        # a third hand-copied instance of the duplicated-date-logic bug
+        # already fixed in api/cpr.py's _get_prev_trading_day. Delegate to
+        # the shared, holiday-aware helper instead of reimplementing it.
+        #
+        # BUG FIX (Oct 5 2026), part 2 -- the bigger one: even with the
+        # right date, sourcing "prev_close" from cmp_prices' last intraday
+        # LTP snapshot of that day is wrong. cmp_prices is captured by
+        # continuous-session polling (every few minutes) and its last row
+        # for a day is whatever LTP happened to be at the last poll before
+        # the job stopped -- NOT the exchange's official closing price.
+        # NSE's official close is set by a separate closing-auction process
+        # after 15:30 IST and can differ meaningfully from the last traded
+        # price in continuous trading (confirmed live: ANGELONE's last
+        # cmp_prices row on Oct 1 was 276.80 at 15:38 IST, but Kite's
+        # official daily candle close -- what cpr_levels.prev_close already
+        # correctly stores -- was 283.75, a ~2.5% gap). That gap alone
+        # explained the scanner still showing BSE +4.39%/ANGELONE +3.03%/
+        # KALYANKJIL +5.36% even after fixing the date-selection bug above.
+        # cpr_levels.prev_close is sourced from Kite's historical daily
+        # candle (the authoritative close) and was already fixed in commit
+        # 18e0d85 -- read prev_close from there first, and only fall back
+        # to the cmp_prices approximation for a symbol cpr_levels doesn't
+        # have (e.g. not yet covered by the EOD CPR job).
         from utils.market_calendar import get_prev_trading_day
         active_dt = datetime.strptime(active_date, '%Y-%m-%d').date()
         prev_date = get_prev_trading_day(active_dt).strftime('%Y-%m-%d')
-        prev_cmp_result = supabase.from_("cmp_prices")\
-            .select("symbol, cmp")\
-            .gte("timestamp", f"{prev_date}T00:00:00+00:00")\
-            .lt("timestamp", f"{prev_date}T23:59:59+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(500)\
-            .execute()
+
         prev_close_map: dict = {}
-        seen_prev = set()
-        for r in (prev_cmp_result.data or []):
-            if r["symbol"] not in seen_prev:
-                prev_close_map[r["symbol"]] = float(r["cmp"])
-                seen_prev.add(r["symbol"])
+        cpr_prev_result = supabase.from_("cpr_levels")\
+            .select("symbol, prev_close")\
+            .eq("trade_date", active_date)\
+            .execute()
+        for r in (cpr_prev_result.data or []):
+            if r.get("prev_close") is not None:
+                prev_close_map[r["symbol"]] = float(r["prev_close"])
+
+        missing_syms = [s for s in last_cmp if s not in prev_close_map]
+        if missing_syms:
+            prev_cmp_result = supabase.from_("cmp_prices")\
+                .select("symbol, cmp")\
+                .gte("timestamp", f"{prev_date}T00:00:00+00:00")\
+                .lt("timestamp", f"{prev_date}T23:59:59+00:00")\
+                .order("timestamp", desc=True)\
+                .limit(500)\
+                .execute()
+            seen_prev = set()
+            for r in (prev_cmp_result.data or []):
+                if r["symbol"] in missing_syms and r["symbol"] not in seen_prev:
+                    prev_close_map[r["symbol"]] = float(r["cmp"])
+                    seen_prev.add(r["symbol"])
 
         for sym in last_cmp:
             prices[sym] = {
