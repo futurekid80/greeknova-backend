@@ -192,19 +192,25 @@ def compute_and_store_cpr(trade_date: str = None):
 
     print(f"[CPR] Computing for trade_date: {trade_date}")
 
-    # Previous trading day = the OHLC source
-    # If running post-market (after 15:40 IST), today's candle is complete — use it
-    # BUG FIX (Aug 3 2026): was 15:30 — CAS goes live today, F&O trades
-    # until 15:40 now, so this was treating today's candle as "final" 10
-    # minutes before the day's trading actually ended.
-    now_ist = datetime.now(ist)
-    market_closed = now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 40)
-    if market_closed and today.weekday() < 5:
-        prev_trading_day = today  # Use today's completed candle
-    else:
-        prev_trading_day = _get_prev_trading_day(today)
+    # Previous trading day = the OHLC source.
+    # BUG FIX (Oct 5 2026): prev_trading_day used to be derived from the
+    # REAL wall-clock "now" (today/market_closed), not from `trade_date` --
+    # correct only for the implicit nightly-run case (trade_date defaults to
+    # tomorrow, so "today" genuinely is the day before it). Any EXPLICIT
+    # trade_date call (e.g. a manual recompute for *today's own* date, which
+    # is exactly how this gets re-triggered to fix a stale row) broke this:
+    # called after 15:40 IST with trade_date=today, market_closed was True,
+    # so prev_trading_day was set to `today` itself -- storing TODAY's own
+    # close as "previous close" for today's own row. Confirmed against
+    # Google Finance: ANGELONE's real previous close (Oct 1) was 276.80, but
+    # this bug stored 283.75 -- ANGELONE's own Oct 5 close -- as prev_close,
+    # making every later % change computed off it near-zero instead of the
+    # real +2.51%. Always derive prev_trading_day from trade_date itself, so
+    # behavior no longer depends on when the function happens to be called.
+    target_date = date_type.fromisoformat(trade_date)
+    prev_trading_day = _get_prev_trading_day(target_date)
     prev_str = prev_trading_day.isoformat()
-    print(f"[CPR] Using OHLC from: {prev_str} (market_closed={market_closed})")
+    print(f"[CPR] Using OHLC from: {prev_str} (for trade_date={trade_date})")
 
     all_symbols = INDICES + STOCKS
     ohlc_map: dict = {}
