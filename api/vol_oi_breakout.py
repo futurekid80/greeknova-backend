@@ -380,13 +380,12 @@ def get_vol_oi_breakout(supabase):
 
         # ── Step 5: Prev close prices (for accurate price change) ─────────
         # Use prev trading day's latest CMP — same as Market Pulse / OI Pulse
+        # BUG FIX (Oct 5 2026): was weekend-only (weekday<5), not NSE-holiday
+        # aware -- same duplicated-date-logic bug already fixed in
+        # api/cpr.py and api/oi_pulse.py. Delegate to the shared helper.
         from datetime import datetime as _dt
-        prev_day = _dt.strptime(today, '%Y-%m-%d')
-        for _ in range(5):
-            prev_day = prev_day - timedelta(days=1)
-            if prev_day.weekday() < 5:
-                break
-        prev_date = prev_day.strftime('%Y-%m-%d')
+        from utils.market_calendar import get_prev_trading_day
+        prev_date = get_prev_trading_day(_dt.strptime(today, '%Y-%m-%d').date()).strftime('%Y-%m-%d')
 
         prev_cmp_res = supabase.from_("cmp_prices")\
             .select("symbol, cmp")\

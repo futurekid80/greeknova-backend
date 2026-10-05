@@ -600,13 +600,18 @@ def get_oi_pulse():
             last_cmp[r["symbol"]] = float(r["cmp"])
 
         # Get previous day's EOD CMP as prev_close
-        prev_date = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-        # Walk back to find last trading day
-        for days_back in range(1, 6):
-            check = (datetime.strptime(active_date, '%Y-%m-%d') - timedelta(days=days_back))
-            if check.weekday() < 5:  # skip weekends
-                prev_date = check.strftime('%Y-%m-%d')
-                break
+        # BUG FIX (Oct 5 2026): this used to only skip weekends (weekday<5),
+        # not NSE holidays -- a third hand-copied instance of the same
+        # duplicated-date-logic bug already fixed in api/cpr.py's
+        # _get_prev_trading_day (see that commit for the full story: it
+        # caused Kalyan Jewellers/Angel One/BSE/etc to show inflated % moves
+        # the trading day after a holiday). This endpoint reads prev_close
+        # from cmp_prices, a separate path from cpr_levels, so fixing cpr.py
+        # alone did not fix the scanner. Delegate to the shared, holiday-aware
+        # helper instead of reimplementing it again.
+        from utils.market_calendar import get_prev_trading_day
+        active_dt = datetime.strptime(active_date, '%Y-%m-%d').date()
+        prev_date = get_prev_trading_day(active_dt).strftime('%Y-%m-%d')
         prev_cmp_result = supabase.from_("cmp_prices")\
             .select("symbol, cmp")\
             .gte("timestamp", f"{prev_date}T00:00:00+00:00")\

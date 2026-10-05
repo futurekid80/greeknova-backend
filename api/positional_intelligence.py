@@ -243,14 +243,14 @@ def get_positional_intelligence(min_consec: int = 0):
                     latest_oi_next[s] = oi
             # Fetch genuine previous trading day close — NOT last_trading_day,
             # which equals today during market hours. Mirrors vol_oi_breakout.py.
+            # BUG FIX (Oct 5 2026): was weekend-only (weekday<5), not
+            # NSE-holiday aware -- same duplicated-date-logic bug already
+            # fixed in api/cpr.py, api/oi_pulse.py and api/vol_oi_breakout.py.
+            # Delegate to the shared helper instead of reimplementing it again.
             prev_close_map = {}
             try:
-                _prev_day = datetime.strptime(today_str, '%Y-%m-%d')
-                for _ in range(10):
-                    _prev_day = _prev_day - timedelta(days=1)
-                    if _prev_day.weekday() < 5:
-                        break
-                _prev_date = _prev_day.strftime('%Y-%m-%d')
+                from utils.market_calendar import get_prev_trading_day
+                _prev_date = get_prev_trading_day(datetime.strptime(today_str, '%Y-%m-%d').date()).strftime('%Y-%m-%d')
                 _prev_cmp_res = supabase.from_("cmp_prices")\
                     .select("symbol, cmp")\
                     .gte("timestamp", f"{_prev_date}T00:00:00+00:00")\
