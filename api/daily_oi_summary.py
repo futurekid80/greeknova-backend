@@ -185,13 +185,28 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
                     prev_cmp_map[sym] = float(row["cmp"])
                     seen_prev.add(sym)
 
+        # BUG FIX (Oct 5 2026, follow-up): official_close_map was meant to be
+        # TODAY's (trade_date's) official close via Kite's historical_data,
+        # but a manual recompute run shortly after market close showed it
+        # returning the PREVIOUS trading day's close instead (ANGELONE came
+        # back as exactly 283.75, Oct 1's close, with price_chg_pct=0.00 for
+        # every symbol tested) -- Kite's EOD daily candle for "today" is
+        # evidently not published via the historical API this soon after
+        # close (a data-vendor settlement lag), so the from_date=to_date=
+        # trade_date query was silently resolving to the last candle it did
+        # have. Rather than depend on same-day Kite EOD data that may not
+        # exist yet, use the latest intraday LTP snapshot from cmp_prices as
+        # "today's close" (close enough to the real closing price, as
+        # established earlier today: at most a ~1% gap) -- the same source
+        # that already worked correctly for this before today's change.
+        # The PREVIOUS close side is unaffected and stays Kite-official via
+        # cpr_levels.prev_close (a day old, so no publish-lag issue there).
         cmp_map = {}
         seen = set()
         for row in (cmp_res.data or []):
             sym = row["symbol"]
             if sym not in seen:
-                curr_official = official_close_map.get(sym)
-                curr = curr_official if curr_official is not None else float(row.get("cmp") or 0)
+                curr = float(row.get("cmp") or 0)
                 prev = cpr_prev_close_map.get(sym) or prev_cmp_map.get(sym, 0)
                 price_chg = round((curr - prev) / prev * 100, 2) if prev > 0 and curr > 0 else None
                 cmp_map[sym] = {
@@ -220,7 +235,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
                 "total_volume":  r["r_total_volume"],
                 "vol_chg_abs":   r["r_vol_chg_abs"],
                 "vol_chg_pct":   cap_pct(r["r_vol_chg_pct"]),
-                "close_price":   official_close_map.get(sym) or cmp_data.get("cmp"),
+                "close_price":   cmp_data.get("cmp") or official_close_map.get(sym),
                 "price_chg_pct": cap_pct(cmp_data.get("price_chg_pct")),
             })
 
