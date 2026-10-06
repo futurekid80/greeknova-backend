@@ -598,7 +598,23 @@ def get_positional_intelligence(min_consec: int = 0):
     # silently cut off by the top-10 cap while weaker ones stayed visible.
     # Sort by today's OI change magnitude within each tier instead, so the
     # genuinely strongest signals always surface first.
-    stealth_buildup.sort(key=lambda x: ({"ELITE": 0, "STRONG": 1, "WATCH": 2}.get(x["tier"], 3), -abs(x.get("today_oi_chg", 0))))
+    #
+    # Oct 6 2026: that fix only addressed ordering WITHIN a tier -- the
+    # final stealth_buildup[:10] slice below is a single flat cut across all
+    # tiers combined, so on any day with >=10 ELITE-tier stocks (common --
+    # ELITE just needs oi>=2.0% + |price|<=0.5%), every STRONG/WATCH entry
+    # gets starved out of the list entirely, no matter how strong its OI
+    # buildup is. That's exactly what hid LODHA (STRONG tier, OI +2.9%,
+    # price +0.84%) today -- it was a perfectly valid signal, just never
+    # reached because 10 ELITE stocks filled the cap first. Reserving
+    # per-tier slots below guarantees STRONG/WATCH stay visible regardless
+    # of how many ELITE signals exist that day.
+    stealth_buildup.sort(key=lambda x: -abs(x.get("today_oi_chg", 0)))
+    _stealth_total_count = len(stealth_buildup)  # full qualifying count, pre-cap -- summary below must report this, not the capped list
+    _elite = [x for x in stealth_buildup if x["tier"] == "ELITE"][:12]
+    _strong = [x for x in stealth_buildup if x["tier"] == "STRONG"][:8]
+    _watch = [x for x in stealth_buildup if x["tier"] == "WATCH"][:5]
+    stealth_buildup = _elite + _strong + _watch
     vol_breakout.sort(key=lambda x: -x["vol_ratio"])
     series_buildup.sort(key=lambda x: -x["consistency_pct"])
 
@@ -608,12 +624,12 @@ def get_positional_intelligence(min_consec: int = 0):
         "total_trading_days": max((p.get("total_days", 0) for p in pi_data.values()), default=0),
         "date": today_str,
         "active_conviction": active_conviction,
-        "stealth_buildup": stealth_buildup[:10],
+        "stealth_buildup": stealth_buildup,  # already tier-capped (12 ELITE + 8 STRONG + 5 WATCH) above
         "vol_breakout": vol_breakout[:10],
         "series_buildup": series_buildup[:15],
         "summary": {
             "active_conviction": len(active_conviction),
-            "stealth_buildup": len(stealth_buildup),
+            "stealth_buildup": _stealth_total_count,
             "vol_breakout": len(vol_breakout),
             "series_buildup": len(series_buildup),
             "long_bias": sum(1 for r in active_conviction if r["signal"] == "LONG_BUILDUP"),
