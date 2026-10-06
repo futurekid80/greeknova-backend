@@ -624,10 +624,15 @@ def get_positional_intelligence(min_consec: int = 0):
     # of how many ELITE signals exist that day.
     stealth_buildup.sort(key=lambda x: -abs(x.get("today_oi_chg", 0)))
     _stealth_total_count = len(stealth_buildup)  # full qualifying count, pre-cap -- summary below must report this, not the capped list
-    _elite = [x for x in stealth_buildup if x["tier"] == "ELITE"][:12]
-    _strong = [x for x in stealth_buildup if x["tier"] == "STRONG"][:8]
-    _watch = [x for x in stealth_buildup if x["tier"] == "WATCH"][:5]
-    stealth_buildup = _elite + _strong + _watch
+    # Oct 6 2026: display-only cap, requested by Manish to cut clutter --
+    # top 5 ELITE + top 5 STRONG shown, WATCH tier dropped from the capped
+    # display entirely (fewer, stronger candidates on screen). This does
+    # NOT change the underlying entry gates/tiers -- a stock still qualifies
+    # and is still counted in summary.stealth_buildup (_stealth_total_count
+    # above) exactly as before; it just won't appear in this capped list.
+    _elite = [x for x in stealth_buildup if x["tier"] == "ELITE"][:5]
+    _strong = [x for x in stealth_buildup if x["tier"] == "STRONG"][:5]
+    stealth_buildup = _elite + _strong
     vol_breakout.sort(key=lambda x: -x["vol_ratio"])
     series_buildup.sort(key=lambda x: -x["consistency_pct"])
 
