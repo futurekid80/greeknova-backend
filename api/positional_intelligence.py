@@ -109,7 +109,7 @@ def get_positional_intelligence(min_consec: int = 0):
     hist_start = (today - timedelta(days=25)).isoformat()
     try:
         hist_res = supabase.from_("daily_oi_summary")\
-            .select("symbol, trade_date, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_signal")\
+            .select("symbol, trade_date, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, fut_price_chg_pct, close_price, fut_signal")\
             .gte("trade_date", hist_start)\
             .lte("trade_date", today_str)\
             .order("trade_date", desc=False)\
@@ -488,10 +488,23 @@ def get_positional_intelligence(min_consec: int = 0):
                 today_oi_next = float(_next_raw) if _next_raw is not None else None
                 today_oi_abs = (today_data or {}).get("fut_oi_close")
                 today_oi_abs_next = (today_data or {}).get("fut_oi_close_next")
-                _raw_price_chg = (today_data or {}).get("price_chg_pct")
-                if _raw_price_chg is None:
-                    continue  # Skip new stocks with no previous day close
-                today_price = float(_raw_price_chg)
+                # Oct 6 2026: use the FUT contract's own open->close price
+                # move here (fut_price_chg_pct), not cash price_chg_pct. The
+                # live/intraday branch above already compares FUT LTP vs
+                # prior close -- reusing a different (cash close-to-close)
+                # basis post-market let a stock's price legitimately drift
+                # past the 1% "quiet" threshold by day's end even when it
+                # looked stealthy on a FUT basis all day live. This is what
+                # hid RADICO from Stealth Buildup post-market on Oct 5: OI
+                # kept building quietly, but the full day's cash move ended
+                # up >1% even though the FUT contract itself barely moved.
+                # Skip (don't fall back to cash) when no FUT open+close
+                # snapshot pair was captured that day -- falling back would
+                # silently reintroduce the same basis mismatch this fixes.
+                _raw_fut_price_chg = (today_data or {}).get("fut_price_chg_pct")
+                if _raw_fut_price_chg is None:
+                    continue
+                today_price = float(_raw_fut_price_chg)
             # Combined = near + next month OI change. Genuine rollover shows
             # up as OI leaving near-month and arriving in next-month in
             # roughly equal size, so it largely cancels out here -- what's

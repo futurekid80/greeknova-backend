@@ -367,11 +367,21 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             # the FUT open->close move ONLY for fut_signal classification
             # (that's the "Oct 2026" fix's actual intent -- keeping the
             # signal consistent with the FUT OI it's paired with), via a
-            # local variable (not persisted -- daily_oi_summary has no
-            # fut_price_chg_pct column, and adding one isn't needed for
-            # fut_signal, the only consumer), and leave row["price_chg_pct"]
-            # as the correct cash close-to-close value computed above.
+            # local variable, and leave row["price_chg_pct"] as the correct
+            # cash close-to-close value computed above.
+            #
+            # Oct 6 2026: fut_price_chg_pct IS now also persisted (its own
+            # column -- see migration add_fut_price_chg_pct_to_daily_oi_summary)
+            # so api/positional_intelligence.py's post-market Stealth Buildup
+            # check can use the same FUT-vs-prior-close price basis its live
+            # check already uses, instead of cash price_chg_pct. Left as
+            # None (not defaulted to cash) when no FUT open+close snapshot
+            # pair exists for the symbol that day -- positional_intelligence.py
+            # treats a missing value as "skip this stock for stealth today"
+            # rather than silently falling back to the cash basis, which is
+            # exactly the mismatch this column exists to avoid.
             price = fut_price_chg_map.get(sym, row.get("price_chg_pct") or 0)
+            row["fut_price_chg_pct"] = fut_price_chg_map.get(sym)
             row["fut_vol"]        = fut_vol_map.get(sym, 0)
             row["fut_oi_chg_pct"] = fut_oi
             row["fut_oi_chg_pct_next"] = fut_oi_chg_map_next.get(sym, None)
