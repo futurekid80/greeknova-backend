@@ -1694,7 +1694,10 @@ def auth_demo_login(body: DemoLoginRequest):
 # review, not a bug.
 #
 # Registered Redirect URL for this app (set in the Kite developer console,
-# fixed, cannot be changed per-request): https://app.greeknova.com/login/zerodha/callback
+# fixed, cannot be changed per-request): https://greeknova-frontend.vercel.app/auth/callback
+# -- confirmed live Oct 7 2026 (the legacy vercel.app domain, handled by
+# app/auth/callback/page.tsx in the frontend repo, not the app.greeknova.com
+# custom domain).
 class KiteLoginRequest(_BaseModel):
     request_token: str
 
