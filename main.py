@@ -1672,6 +1672,124 @@ def auth_demo_login(body: DemoLoginRequest):
 
     return {"email": DEMO_LOGIN_EMAIL, "token_hash": token_hash}
 
+
+# ---------------------------------------------------------------------------
+# Zerodha "Continue with Zerodha" login (Oct 2026) -- a Sensibull/Streak-style
+# one-click login: ONE GreekNova-owned Kite Connect app (KITE_API_KEY /
+# KITE_API_SECRET, already set on Railway -- same app used by the personal
+# data-capture auto-login in services/kite_auth.py) handles every user's
+# authentication. The end user never sees or enters an API key/secret --
+# they just approve on Zerodha's own page, we exchange the request_token for
+# an access_token scoped to THEIR account using our app's secret (server-side
+# only, never sent to the browser), and sign them into the same Supabase
+# session every other page expects.
+#
+# Distinct from the separate app/connect-kite BYOT flow (services/kite_byot.py),
+# where each member registers and pays for their OWN Kite Connect app. That
+# flow still exists and is unaffected by this one. This is specifically the
+# flow being demoed to Zerodha (Nagaveni Jalihal / Z-Connect) ahead of their
+# decision on approving GreekNova for genuine multi-user Kite Connect access --
+# until that's approved, Zerodha may reject anyone logging in here who isn't
+# the app's own linked account (ZERODHA_USER_ID), which is expected during
+# review, not a bug.
+#
+# Registered Redirect URL for this app (set in the Kite developer console,
+# fixed, cannot be changed per-request): https://app.greeknova.com/login/zerodha/callback
+class KiteLoginRequest(_BaseModel):
+    request_token: str
+
+@app.post("/auth/kite-login")
+def auth_kite_login(body: KiteLoginRequest):
+    import hashlib
+    import requests
+
+    api_key = os.getenv("KITE_API_KEY")
+    api_secret = os.getenv("KITE_API_SECRET")
+    if not api_key or not api_secret:
+        raise HTTPException(status_code=500, detail="Zerodha login is not configured (missing KITE_API_KEY/KITE_API_SECRET)")
+
+    request_token = body.request_token.strip()
+    if not request_token:
+        raise HTTPException(status_code=400, detail="Missing request_token")
+
+    # Kite's own checksum scheme: sha256(api_key + request_token + api_secret).
+    checksum = hashlib.sha256(f"{api_key}{request_token}{api_secret}".encode()).hexdigest()
+
+    try:
+        resp = requests.post(
+            "https://api.kite.trade/session/token",
+            data={"api_key": api_key, "request_token": request_token, "checksum": checksum},
+            headers={"X-Kite-Version": "3"},
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"[KiteLogin] token exchange request failed: {e}")
+        raise HTTPException(status_code=502, detail="Could not reach Zerodha")
+
+    if resp.status_code != 200:
+        # Expected failure mode pre-approval: Zerodha rejects any account
+        # that isn't this app's own linked user until multi-user access is
+        # granted. Relay Zerodha's own message rather than a generic one so
+        # it's clear this is Zerodha's decision, not a GreekNova bug.
+        print(f"[KiteLogin] token exchange rejected: {resp.status_code} {resp.text[:300]}")
+        try:
+            zmsg = resp.json().get("message")
+        except Exception:
+            zmsg = None
+        raise HTTPException(status_code=401, detail=zmsg or "Zerodha login could not be verified")
+
+    kite_data = (resp.json() or {}).get("data") or {}
+    kite_email = kite_data.get("email")
+    kite_user_id = kite_data.get("user_id")
+    kite_user_name = kite_data.get("user_name")
+    access_token = kite_data.get("access_token")
+
+    if not kite_email or not kite_user_id:
+        raise HTTPException(status_code=502, detail="Zerodha did not return a usable profile")
+
+    from utils.db import get_supabase_admin
+    try:
+        admin = get_supabase_admin()
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Auto-add to the beta list on first Zerodha login -- identity is proven
+    # by Zerodha itself here, so there's no separate "is this email allowed"
+    # gate to check first.
+    try:
+        admin.from_("beta_users").upsert({"email": kite_email, "name": kite_user_name or kite_email}).execute()
+    except Exception as e:
+        print(f"[KiteLogin] beta_users upsert warning: {e}")
+
+    # Best-effort: remember this access token against the user's email so
+    # their own positions/holdings/quotes can be pulled later via the same
+    # app credentials. Table may not exist in every environment yet --
+    # never block login on this.
+    try:
+        admin.from_("kite_identities").upsert({
+            "email": kite_email,
+            "kite_user_id": kite_user_id,
+            "kite_user_name": kite_user_name,
+            "access_token": access_token,
+            "last_login_at": "now()",
+        }, on_conflict="email").execute()
+    except Exception as e:
+        print(f"[KiteLogin] kite_identities upsert skipped: {e}")
+
+    try:
+        link_res = admin.auth.admin.generate_link({"type": "magiclink", "email": kite_email})
+    except Exception as e:
+        print(f"[KiteLogin] generate_link failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not create session")
+
+    props = getattr(link_res, "properties", None) or link_res.get("properties", {})
+    token_hash = getattr(props, "hashed_token", None) if not isinstance(props, dict) else props.get("hashed_token")
+    if not token_hash:
+        raise HTTPException(status_code=500, detail="Kite login session link missing token")
+
+    return {"email": kite_email, "token_hash": token_hash}
+
+
 @app.get("/chart-data/{symbol}")
 def chart_data(symbol: str, interval: str = "day", range: str = "6m"):
     from api.chart_data import get_chart_data
