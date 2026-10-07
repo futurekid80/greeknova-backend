@@ -12,8 +12,20 @@ VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_CONTACT_EMAIL = os.environ.get("VAPID_CONTACT_EMAIL") or "mailto:support@greeknova.app"
 
 
-def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10):
-    """Save or update a device's push subscription."""
+def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10,
+                       vol_threshold: float = None, enabled_signals: list = None):
+    """Save or update a device's push subscription.
+
+    vol_threshold/enabled_signals are optional -- a true first-ever
+    subscribe won't have them, and the column defaults (20 / null-means-
+    all-signals) cover that case fine. But this also runs on every
+    RE-subscribe (a disable->enable cycle unsubscribes the old push
+    endpoint and gets issued a new one, so this upserts a NEW row, not an
+    update of the old one) -- if the caller already knows the person's
+    customized values, passing them here is what carries that
+    customization forward instead of silently resetting it to defaults.
+    See push_subscribe() in main.py.
+    """
     endpoint = sub_data.get("endpoint")
     keys = sub_data.get("keys", {})
     p256dh = keys.get("p256dh")
@@ -22,15 +34,21 @@ def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10):
     if not endpoint or not p256dh or not auth:
         return {"error": "Invalid subscription data"}
 
+    row = {
+        "endpoint": endpoint,
+        "p256dh": p256dh,
+        "auth": auth,
+        "spike_threshold": spike_threshold,
+        "enabled": True,
+        "last_used_at": "now()",
+    }
+    if vol_threshold is not None:
+        row["vol_threshold"] = vol_threshold
+    if enabled_signals is not None:
+        row["enabled_signals"] = [s for s in enabled_signals if s in ALL_SIGNAL_TYPES]
+
     try:
-        supabase.from_("push_subscriptions").upsert({
-            "endpoint": endpoint,
-            "p256dh": p256dh,
-            "auth": auth,
-            "spike_threshold": spike_threshold,
-            "enabled": True,
-            "last_used_at": "now()",
-        }, on_conflict="endpoint").execute()
+        supabase.from_("push_subscriptions").upsert(row, on_conflict="endpoint").execute()
         return {"status": "subscribed"}
     except Exception as e:
         print(f"[Push] Subscribe failed: {e}")

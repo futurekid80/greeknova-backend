@@ -3180,10 +3180,22 @@ async def push_subscribe(request: Request):
     body = await request.json()
     subscription = body.get("subscription")
     threshold = body.get("spikeThreshold", 10)
+    # Oct 7 2026: volThreshold/enabledSignals are optional -- a brand new
+    # subscription (first-ever enable) won't have them yet, which is fine,
+    # the column defaults (20 / null-means-all) cover that case. But this
+    # endpoint also fires on every RE-subscribe (disable->enable cycle,
+    # or the browser invalidating a dead subscription and recreating it),
+    # which gets a new push endpoint and therefore a new DB row -- without
+    # passing these along too, that new row silently reset vol_threshold
+    # and enabled_signals back to defaults, discarding whatever the person
+    # had customized, even though spike_threshold (passed every time)
+    # correctly carried over. See AlertsContext.enableAlerts().
+    vol_threshold = body.get("volThreshold")
+    enabled_signals = body.get("enabledSignals")
     if not subscription:
         return {"error": "Missing subscription"}
     supabase = get_supabase()
-    return save_subscription(supabase, subscription, threshold)
+    return save_subscription(supabase, subscription, threshold, vol_threshold, enabled_signals)
 
 @app.post("/push-unsubscribe")
 async def push_unsubscribe(request: Request):
