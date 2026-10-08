@@ -1326,6 +1326,14 @@ def get_vrp_scan(symbol: str = "NIFTY"):
         if abs(strike - spot) / spot > MAX_STRIKE_MONEYNESS:
             continue
         opt = r["option_type"]
+        # OTM only (Oct 8 2026 fix) -- a premium SELLER shorts the strike
+        # that's out of the money (defined, collectable credit); an ITM
+        # strike's quoted premium is mostly intrinsic value and its IV
+        # tends to be noisy/unreliable on top of being the wrong trade
+        # entirely. Was letting deep-ITM strikes (thin OI, inflated-looking
+        # IV off stale ITM pricing) crowd out the real OTM candidates.
+        if (opt == "CE" and strike < spot) or (opt == "PE" and strike > spot):
+            continue
         oi = r.get("oi") or 0
         premium = r.get("last_price") or 0
         if oi < VRP_MIN_OI or premium <= 0:
@@ -1360,8 +1368,11 @@ def get_vrp_scan(symbol: str = "NIFTY"):
         })
 
     candidates.sort(key=lambda c: c["score"], reverse=True)
-    ce_top = [c for c in candidates if c["option_type"] == "CE"][:VRP_CANDIDATES_PER_SIDE]
-    pe_top = [c for c in candidates if c["option_type"] == "PE"][:VRP_CANDIDATES_PER_SIDE]
+    # Pick the top-scoring strikes, then re-sort just that shortlist by
+    # strike so the table reads as a ladder moving away from spot, not a
+    # scattered score ranking that jumps around the chain.
+    ce_top = sorted([c for c in candidates if c["option_type"] == "CE"][:VRP_CANDIDATES_PER_SIDE], key=lambda c: c["strike"])
+    pe_top = sorted([c for c in candidates if c["option_type"] == "PE"][:VRP_CANDIDATES_PER_SIDE], key=lambda c: c["strike"], reverse=True)
 
     return {
         "symbol": symbol,
