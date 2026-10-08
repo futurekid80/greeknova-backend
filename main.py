@@ -1586,6 +1586,18 @@ def vol_surface(symbol: str = "NIFTY", expiry: str = None):
     return get_vol_surface(symbol.upper(), expiry)
 
 
+@app.get("/gap-iv-scan/{symbol}")
+def gap_iv_scan(symbol: str = "NIFTY"):
+    # Oct 8 2026: passive gap-down/gap-up + IV-spike detector, per Manish's
+    # request to explore trading IV spikes/crashes off a gap open. Context
+    # only (gap %, which strike's IV is unusually rich for ITSELF right
+    # now) -- no auto-trade, no push alert yet (alerting comes later once
+    # Manish is satisfied watching this passively). See gamma_exposure.py's
+    # get_gap_iv_scan docstring for exactly what counts as a "spike".
+    from services.gamma_exposure import get_gap_iv_scan
+    return get_gap_iv_scan(symbol.upper())
+
+
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain

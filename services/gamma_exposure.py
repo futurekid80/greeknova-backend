@@ -1778,3 +1778,94 @@ def get_vol_surface(symbol: str = "NIFTY", expiry: str = None):
         "smile": smile,
         "term_structure": term_structure,
     }
+
+
+GAP_SPIKE_MIN_GAP_PCT = 0.4       # |open vs prev close| %, below this it's
+                                   # just normal day-to-day drift, not a gap
+GAP_SPIKE_MIN_IV_PCTILE = 75.0    # a strike's IV needs to sit at/above this
+                                   # percentile of its OWN recent history
+                                   # (see _iv_percentile_from_history) to
+                                   # count as "spiked", not just "a bit rich"
+
+
+def get_gap_iv_scan(symbol: str = "NIFTY"):
+    """Oct 8 2026 addition: passive detector for Manish's gap-down (or
+    gap-up) IV-spike-selling idea -- "sell into the spike, let IV crush
+    mean-revert." This does NOT place or suggest a trade; it surfaces the
+    two facts a seller would check by hand before deciding anything:
+
+      1. Did today open with a real gap vs yesterday's close? (not every
+         red open is a "gap" worth reacting to -- GAP_SPIKE_MIN_GAP_PCT
+         filters normal drift)
+      2. Is any strike's IV actually elevated *for that strike*, not just
+         elevated in absolute terms? Reuses the per-strike IV percentile
+         already computed by get_vrp_scan/_iv_percentile_from_history, so
+         "spiked" means "unusually rich for THIS strike's own history",
+         the same honest percentile the VRP scanner already shows.
+
+    Deliberately does not attempt to predict/backtest the IV-crush pattern
+    yet -- strike_iv_daily only started capturing Oct 8 2026, so there
+    isn't enough history for an honest "after past gaps like this, IV
+    typically fell by X% over Y sessions" statistic. That can be added once
+    enough sessions have accumulated; showing it earlier would mean
+    showing a stat built on noise.
+    """
+    supabase = get_supabase()
+    symbol = symbol.upper()
+    today, ts_new = _resolve_gex_day(supabase, symbol)
+    if not ts_new:
+        return {"symbol": symbol, "error": "no data"}
+
+    prev_bar_q = supabase.from_("spot_daily_bars")\
+        .select("trade_date,close").eq("symbol", symbol)\
+        .lt("trade_date", today)\
+        .order("trade_date", desc=True).limit(1).execute()
+    prev_close = float(prev_bar_q.data[0]["close"]) if prev_bar_q.data else None
+
+    open_q = supabase.from_("cmp_prices")\
+        .select("cmp,timestamp").eq("symbol", symbol)\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=False).limit(1).execute()
+    today_open = float(open_q.data[0]["cmp"]) if open_q.data else None
+
+    gap_pct = None
+    if prev_close and today_open:
+        gap_pct = round((today_open - prev_close) / prev_close * 100, 2)
+
+    # Reuses the exact same VRP-scan candidates (nearest expiry) so the IV
+    # percentile shown here always matches what the VRP scanner itself
+    # shows for that strike -- no second, divergent calculation.
+    scan = get_vrp_scan(symbol)
+    if scan.get("error"):
+        return {
+            "symbol": symbol, "prev_close": prev_close, "today_open": today_open,
+            "gap_pct": gap_pct, "error": scan["error"],
+        }
+
+    candidates = scan["ce_candidates"] + scan["pe_candidates"]
+    ranked = sorted(
+        (c for c in candidates if c.get("iv_percentile") is not None),
+        key=lambda c: c["iv_percentile"], reverse=True,
+    )
+    top_spiked = ranked[:6]
+
+    gap_is_down = gap_pct is not None and gap_pct <= -GAP_SPIKE_MIN_GAP_PCT
+    gap_is_up = gap_pct is not None and gap_pct >= GAP_SPIKE_MIN_GAP_PCT
+    iv_spike_present = any(c["iv_percentile"] >= GAP_SPIKE_MIN_IV_PCTILE for c in top_spiked)
+    spike_detected = (gap_is_down or gap_is_up) and iv_spike_present
+
+    return {
+        "symbol": symbol,
+        "as_of": scan["as_of"],
+        "expiry": scan["expiry"],
+        "spot": scan["spot"],
+        "prev_close": prev_close,
+        "today_open": today_open,
+        "gap_pct": gap_pct,
+        "gap_direction": "DOWN" if gap_is_down else ("UP" if gap_is_up else "FLAT"),
+        "gap_threshold_pct": GAP_SPIKE_MIN_GAP_PCT,
+        "iv_pctile_threshold": GAP_SPIKE_MIN_IV_PCTILE,
+        "spike_detected": spike_detected,
+        "candidates": top_spiked,
+        "note": "Context only -- not a buy/sell signal. Check the strike's own PoP/premium before deciding anything.",
+    }
