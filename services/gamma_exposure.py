@@ -1482,7 +1482,14 @@ def get_vrp_scan(symbol: str = "NIFTY", expiry: str = None):
         pool = eligible or side
         if not pool:
             return
-        best = max(pool, key=lambda c: c["score"])
+        # Oct 8 2026 fix: on a tied/near-tied score, max() alone returns the
+        # FIRST strike it sees, and the ladder is sorted near-ATM-first --
+        # so near-ATM strikes were quietly winning ties over far safer ones
+        # just by list order (e.g. a 50%-PoP near-ATM strike beating a
+        # 95%-PoP OTM strike at the identical rounded score). For a premium
+        # seller, equal VRP/spike richness should always prefer the safer
+        # (higher PoP) strike, so PoP is now the tiebreaker.
+        best = max(pool, key=lambda c: (c["score"], c["pop"] if c["pop"] is not None else -1))
         best["is_best_pick"] = True
 
     _flag_best(ce_side)
