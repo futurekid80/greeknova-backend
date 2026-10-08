@@ -1016,6 +1016,41 @@ def _compute_gamma_exposure(date: str = None):
     except Exception as e:
         print(f"[gex_signal_log] failed to persist snapshot: {e}")
 
+    # ── Always-on regime log for the three indices (Oct 8 2026): unlike
+    # gex_signal_log above, this is NOT gated on squeeze stage — it writes
+    # every refresh cycle regardless of whether the symbol is near a wall,
+    # so a long-gamma stretch (where stage stays None for the whole period)
+    # still leaves a trail of how regime/net_gex/walls drifted. That's what
+    # gex_signal_log can't show: it only has rows for squeeze-candidate
+    # moments, so an index sitting in LONG_GAMMA for hours/days is invisible
+    # in it. Scoped to the three indices only -- cheap, and these are the
+    # ones worth a regime history for. Best-effort, same as above.
+    INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+    try:
+        regime_rows = [
+            {
+                "as_of_data_ts": ts_new,
+                "symbol": r["symbol"],
+                "cmp": r["cmp"],
+                "expiry": r["expiry"],
+                "days_to_expiry": r["days_to_expiry"],
+                "regime": r["regime"],
+                "net_gex": r["net_gex"],
+                "net_gex_near_spot": r["net_gex_near_spot"],
+                "call_wall_strike": r["call_wall_strike"],
+                "put_wall_strike": r["put_wall_strike"],
+                "flip_point": r["flip_point"],
+                "pct_to_call_wall": r["pct_to_call_wall"],
+                "pct_to_put_wall": r["pct_to_put_wall"],
+            }
+            for r in symbols_out
+            if r["symbol"] in INDEX_SYMBOLS
+        ]
+        if regime_rows:
+            supabase.from_("gex_regime_log").insert(regime_rows).execute()
+    except Exception as e:
+        print(f"[gex_regime_log] failed to persist snapshot: {e}")
+
     _gex_cache = result
     _gex_cache_time = time_module.time()
     return result
