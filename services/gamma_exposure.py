@@ -1224,7 +1224,20 @@ VRP_LOOKBACK_MINUTES = 60   # "sudden spike" window -- how far back we look
                             # to measure how much a strike's IV has jumped
 VRP_MIN_OI = 500            # ignore illiquid strikes -- a "spike" on 2 lots
                             # of OI isn't a real sellable opportunity
-VRP_CANDIDATES_PER_SIDE = 8
+VRP_ZONE_PCT = 0.07         # Oct 8 2026: the actual scan universe -- the
+                            # realistic weekly-OTM-selling band. Wider than
+                            # this and premium gets too thin to matter;
+                            # ranking purely by VRP inside a too-wide band
+                            # (the old MAX_STRIKE_MONEYNESS=35%) always
+                            # drifted to its outer edge, because IV rises
+                            # with distance from spot from normal skew
+                            # alone -- that's not a real opportunity, just
+                            # market structure. We show the WHOLE ladder in
+                            # this tighter zone (not a skew-biased top-N),
+                            # so near-ATM strikes are visible too.
+VRP_BEST_PICK_MIN_PREMIUM = 5.0  # a "best pick" needs collectable premium,
+                                  # not just a high VRP number on a strike
+                                  # so far out it's barely worth shorting
 
 
 def get_vrp_scan(symbol: str = "NIFTY"):
@@ -1323,7 +1336,8 @@ def get_vrp_scan(symbol: str = "NIFTY"):
         if r.get("expiry") != expiry or r.get("option_type") not in ("CE", "PE"):
             continue
         strike = float(r["strike"])
-        if abs(strike - spot) / spot > MAX_STRIKE_MONEYNESS:
+        pct_from_spot = (strike - spot) / spot
+        if abs(pct_from_spot) > VRP_ZONE_PCT:
             continue
         opt = r["option_type"]
         # OTM only (Oct 8 2026 fix) -- a premium SELLER shorts the strike
@@ -1360,19 +1374,34 @@ def get_vrp_scan(symbol: str = "NIFTY"):
             "strike": strike,
             "option_type": opt,
             "premium": premium,
+            "pct_from_spot": round(pct_from_spot * 100, 2),
             "oi": oi,
             "iv": round(iv * 100, 2),
             "vrp": vrp_pts,
             "iv_change_60m": iv_change_pts,
             "score": round(score, 2),
+            "is_best_pick": False,
         })
 
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    # Pick the top-scoring strikes, then re-sort just that shortlist by
-    # strike so the table reads as a ladder moving away from spot, not a
-    # scattered score ranking that jumps around the chain.
-    ce_top = sorted([c for c in candidates if c["option_type"] == "CE"][:VRP_CANDIDATES_PER_SIDE], key=lambda c: c["strike"])
-    pe_top = sorted([c for c in candidates if c["option_type"] == "PE"][:VRP_CANDIDATES_PER_SIDE], key=lambda c: c["strike"], reverse=True)
+    # Full ladder per side, ordered by distance from spot (near-ATM first)
+    # -- not pre-filtered to a skew-biased top-N, so the real spread across
+    # the sellable zone is visible, not just its outer edge.
+    ce_side = sorted([c for c in candidates if c["option_type"] == "CE"], key=lambda c: c["strike"])
+    pe_side = sorted([c for c in candidates if c["option_type"] == "PE"], key=lambda c: c["strike"], reverse=True)
+
+    # One flagged "best pick" per side: highest-scoring strike that still
+    # carries real collectable premium, so the pick isn't just the
+    # furthest, cheapest strike riding pure skew.
+    def _flag_best(side):
+        eligible = [c for c in side if c["premium"] >= VRP_BEST_PICK_MIN_PREMIUM]
+        pool = eligible or side
+        if not pool:
+            return
+        best = max(pool, key=lambda c: c["score"])
+        best["is_best_pick"] = True
+
+    _flag_best(ce_side)
+    _flag_best(pe_side)
 
     return {
         "symbol": symbol,
@@ -1382,7 +1411,8 @@ def get_vrp_scan(symbol: str = "NIFTY"):
         "futures": F,
         "realized_vol": round(rv * 100, 2) if rv else None,
         "lookback_minutes": VRP_LOOKBACK_MINUTES,
+        "zone_pct": round(VRP_ZONE_PCT * 100, 1),
         "as_of": ts_new,
-        "ce_candidates": ce_top,
-        "pe_candidates": pe_top,
+        "ce_candidates": ce_side,
+        "pe_candidates": pe_side,
     }
