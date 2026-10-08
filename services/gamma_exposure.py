@@ -1305,8 +1305,60 @@ def get_vrp_scan(symbol: str = "NIFTY"):
     if T <= 0:
         T = 0.25 / 252.0
 
+    # ── Weekend theta flag -- classic Indian weekly-seller point: a seller
+    # collects decay for every CALENDAR day to expiry, but only takes on
+    # market-move RISK for the TRADING days in between. When a weekend (or
+    # holiday) falls inside that gap, the ratio of "decay earned" to "risk
+    # taken" jumps for that stretch -- worth flagging explicitly rather
+    # than leaving the trader to notice the calendar gap themselves.
+    calendar_days_left = (expiry_date - today_date).days
+    weekend_gap_days = calendar_days_left - trading_days_left
+    weekend_theta_note = None
+    if trading_days_left > 0 and weekend_gap_days > 0:
+        weekend_theta_note = (
+            f"{calendar_days_left} calendar day(s) to expiry but only "
+            f"{trading_days_left} trading day(s) of market risk -- "
+            f"{weekend_gap_days} non-trading day(s) of decay in between."
+        )
+
+    # ── Wall-holding check, from the always-on gex_regime_log (Oct 8 2026
+    # addition) -- is the nearby wall this strike leans on actually
+    # defending its level, or quietly eroding toward spot? A strike with
+    # great VRP sitting behind a melting wall is a worse bet than a lower-
+    # VRP strike behind a wall that's holding.
+    call_wall_status = put_wall_status = None
+    call_wall_now = put_wall_now = None
+    try:
+        regime_rows = supabase.from_("gex_regime_log")\
+            .select("captured_at,call_wall_strike,put_wall_strike")\
+            .eq("symbol", symbol)\
+            .order("captured_at", desc=True)\
+            .limit(10).execute().data or []
+        if len(regime_rows) >= 2:
+            newest, oldest = regime_rows[0], regime_rows[-1]
+            call_wall_now = newest.get("call_wall_strike")
+            put_wall_now = newest.get("put_wall_strike")
+            cw_old, pw_old = oldest.get("call_wall_strike"), oldest.get("put_wall_strike")
+            WALL_DRIFT_PCT = 0.3  # % move in the wall itself to call it "eroding"
+            if call_wall_now and cw_old:
+                drift = (cw_old - call_wall_now) / cw_old * 100  # positive = wall moved DOWN toward spot
+                call_wall_status = "ERODING" if drift > WALL_DRIFT_PCT else "HOLDING"
+            if put_wall_now and pw_old:
+                drift = (put_wall_now - pw_old) / pw_old * 100  # positive = wall moved UP toward spot
+                put_wall_status = "ERODING" if drift > WALL_DRIFT_PCT else "HOLDING"
+        elif len(regime_rows) == 1:
+            call_wall_now = regime_rows[0].get("call_wall_strike")
+            put_wall_now = regime_rows[0].get("put_wall_strike")
+    except Exception as e:
+        print(f"[vrp_scan] wall-holding check unavailable: {e}")
+
     rv_map = _realized_vol_map(supabase, {symbol}, today_date)
     rv = rv_map.get(symbol)
+    lot_size = LOT_SIZES.get(symbol)
+    MARGIN_PCT_ESTIMATE = 0.12  # rough SPAN+exposure approximation for a
+                                 # short index option near the money --
+                                 # NOT a real margin calc, flagged as such
+                                 # in the API response and the UI.
 
     # ── Past snapshot, ~VRP_LOOKBACK_MINUTES back, same expiry -- to
     # measure how much each strike's IV has moved, not just where it sits.
@@ -1365,6 +1417,27 @@ def get_vrp_scan(symbol: str = "NIFTY"):
             if past_iv:
                 iv_change_pts = round((iv - past_iv) * 100, 2)
 
+        # Probability of Profit (risk-neutral): for a short option, the
+        # chance it expires worthless -- N(-d2) for a call (spot ends
+        # below strike), N(d2) for a put (spot ends above strike). Same
+        # Black-76 d2 as the flip-point/runway calc above.
+        pop = None
+        if T > 0 and iv > 0:
+            d2 = (math.log(F / strike) - 0.5 * iv * iv * T) / (iv * math.sqrt(T))
+            pop = round((_norm_cdf(-d2) if opt == "CE" else _norm_cdf(d2)) * 100, 1)
+
+        # Rough ROI estimate -- premium collected vs an ESTIMATED margin
+        # (not a real SPAN+exposure calc; flagged as such in the response
+        # and the UI). Still useful for comparing strikes against each
+        # other even if the absolute number is approximate.
+        roi_pct = annualized_roi_pct = margin_estimate = None
+        if lot_size:
+            margin_estimate = round(spot * lot_size * MARGIN_PCT_ESTIMATE, 0)
+            if margin_estimate > 0:
+                roi_pct = round(premium * lot_size / margin_estimate * 100, 2)
+                if calendar_days_left > 0:
+                    annualized_roi_pct = round(roi_pct * (365 / calendar_days_left), 1)
+
         # Rank richest-and-freshest first: VRP carries more weight than a
         # spike alone (a spike with no VRP behind it may just be catching
         # up to where IV always "should" be, e.g. post-event repricing).
@@ -1379,6 +1452,9 @@ def get_vrp_scan(symbol: str = "NIFTY"):
             "iv": round(iv * 100, 2),
             "vrp": vrp_pts,
             "iv_change_60m": iv_change_pts,
+            "pop": pop,
+            "roi_pct": roi_pct,
+            "annualized_roi_pct": annualized_roi_pct,
             "score": round(score, 2),
             "is_best_pick": False,
         })
@@ -1412,6 +1488,12 @@ def get_vrp_scan(symbol: str = "NIFTY"):
         "realized_vol": round(rv * 100, 2) if rv else None,
         "lookback_minutes": VRP_LOOKBACK_MINUTES,
         "zone_pct": round(VRP_ZONE_PCT * 100, 1),
+        "weekend_theta_note": weekend_theta_note,
+        "call_wall": call_wall_now,
+        "call_wall_status": call_wall_status,   # "HOLDING" | "ERODING" | None (not enough history yet)
+        "put_wall": put_wall_now,
+        "put_wall_status": put_wall_status,
+        "margin_estimate_note": "Margin is a rough ~12% of notional estimate, not a real SPAN+exposure figure -- check your broker's margin calculator before sizing a trade." if lot_size else None,
         "as_of": ts_new,
         "ce_candidates": ce_side,
         "pe_candidates": pe_side,
