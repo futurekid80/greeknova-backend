@@ -61,6 +61,23 @@ def get_prev_trading_day(from_date: date = None) -> date:
         d -= timedelta(days=1)
     return d
 
+def trading_days_between(d1: date, d2: date) -> int:
+    """Count trading days strictly between d1 (exclusive) and d2 (inclusive),
+    walking forward. Used for Greeks/IV time-to-expiry (252-trading-day
+    convention, matching what Indian options platforms use, e.g. Sensibull)
+    instead of raw calendar days/365 -- avoids overstating time value across
+    weekends/holidays, which matters most right before a weekly expiry."""
+    if d2 <= d1:
+        return 0
+    n = 0
+    d = d1 + timedelta(days=1)
+    while d <= d2:
+        if is_trading_day(d):
+            n += 1
+        d += timedelta(days=1)
+    return n
+
+
 def get_market_status() -> dict:
     today = today_ist()
     tomorrow = today + timedelta(days=1)

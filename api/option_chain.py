@@ -1,75 +1,42 @@
 import math
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
+from utils.market_calendar import today_ist, trading_days_between
+from services.black_scholes import (
+    implied_vol76, bs76_gamma, bs76_theta_per_day, bs76_vega_per_point, _norm_cdf,
+)
 
-# ── Black-Scholes helpers ──────────────────────────────────────────────────────
+# ── Black-76 helpers ────────────────────────────────────────────────────────
+# Oct 2026: this used to be a third, independent copy of plain Black-Scholes
+# (spot-based, calendar-days/365) -- now delegates to the same Black-76
+# engine (futures-based, 252-trading-days) as gamma_exposure.py, so IV and
+# Greeks shown here match what the gamma-squeeze/vega pages compute instead
+# of quietly disagreeing with them by a few percent.
 
-def norm_cdf(x):
-    return (1.0 + math.erf(x / math.sqrt(2.0))) / 2.0
-
-def norm_pdf(x):
-    return math.exp(-0.5 * x * x) / math.sqrt(2 * math.pi)
-
-def bs_price(S, K, T, r, sigma, is_call):
-    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
-        return 0.0
-    try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        if is_call:
-            return S * norm_cdf(d1) - K * math.exp(-r * T) * norm_cdf(d2)
-        else:
-            return K * math.exp(-r * T) * norm_cdf(-d2) - S * norm_cdf(-d1)
-    except:
-        return 0.0
-
-def bs_vega(S, K, T, r, sigma):
-    if T <= 0 or sigma <= 0 or S <= 0:
-        return 0.0
-    try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        return S * norm_pdf(d1) * math.sqrt(T)
-    except:
-        return 0.0
-
-def calculate_iv(market_price, S, K, T, r, is_call, max_iter=100):
-    if market_price < 0.1 or T <= 0 or S <= 0:
+def calculate_iv(market_price, F, K, T, r, is_call):
+    if market_price < 0.1 or T <= 0 or F <= 0:
         return None
-    sigma = 0.3
-    for _ in range(max_iter):
-        price = bs_price(S, K, T, r, sigma, is_call)
-        vega = bs_vega(S, K, T, r, sigma)
-        if vega < 1e-10:
-            return None
-        diff = price - market_price
-        if abs(diff) < 0.01:
-            return round(sigma * 100, 2)
-        sigma -= diff / vega
-        sigma = max(0.001, min(sigma, 5.0))
-    return round(sigma * 100, 2)
+    iv = implied_vol76(market_price, F, K, T, r, "CE" if is_call else "PE")
+    return round(iv * 100, 2) if iv else None
 
-def calculate_greeks(S, K, T, r, sigma, is_call):
-    if T <= 0 or sigma <= 0 or S <= 0:
+def calculate_greeks(F, K, T, r, sigma, is_call):
+    if T <= 0 or sigma <= 0 or F <= 0:
         return {}
+    opt = "CE" if is_call else "PE"
     try:
-        d1 = (math.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * math.sqrt(T))
-        d2 = d1 - sigma * math.sqrt(T)
-        delta = norm_cdf(d1) if is_call else norm_cdf(d1) - 1.0
-        gamma = norm_pdf(d1) / (S * sigma * math.sqrt(T))
-        theta_raw = -(S * norm_pdf(d1) * sigma) / (2 * math.sqrt(T))
-        if is_call:
-            theta_raw -= r * K * math.exp(-r * T) * norm_cdf(d2)
-        else:
-            theta_raw += r * K * math.exp(-r * T) * norm_cdf(-d2)
-        theta = theta_raw / 365
-        vega = S * norm_pdf(d1) * math.sqrt(T) / 100
+        d1 = (math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))
+        delta_undiscounted = _norm_cdf(d1) if is_call else _norm_cdf(d1) - 1.0
+        delta = math.exp(-r * T) * delta_undiscounted
+        gamma = bs76_gamma(F, K, T, r, sigma)
+        theta = bs76_theta_per_day(F, K, T, r, sigma, opt)  # already negative (decay) for a long option
+        vega = bs76_vega_per_point(F, K, T, r, sigma)  # already scaled per 1 IV point (1%)
         return {
             "delta": round(delta, 3),
             "gamma": round(gamma, 5),
             "theta": round(theta, 2),
             "vega":  round(vega, 2),
         }
-    except:
+    except Exception:
         return {}
 
 # ── Main function ──────────────────────────────────────────────────────────────
@@ -130,10 +97,14 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
     rows = [r for r in all_rows if r["expiry"] == active_expiry]
 
     exp_date = datetime.strptime(active_expiry, "%Y-%m-%d").date()
-    today_date = date_type.today()
+    today_date = today_ist()  # Oct 2026 fix: was date_type.today() (UTC) -- wrong
+                               # between 12:00-5:30 AM IST, same bug fixed
+                               # elsewhere per market_calendar.py's own notes.
     days_left = (exp_date - today_date).days
-    T = max(days_left, 0.5) / 365   # min 0.5 days to avoid degenerate Greeks
-    r_f = 0.065  # ~6.5% risk-free rate
+    trading_days_left = trading_days_between(today_date, exp_date)
+    T = max(trading_days_left, 0.5) / 252   # min 0.5 trading-day to avoid degenerate Greeks
+    r_f = 0.065  # ~6.5% risk-free rate -- used only as a discount rate under
+                 # Black-76, not as a drift assumption (see option_chain Greeks above)
 
     # ── Estimate spot if Kite unavailable ─────────────────────────────────────
     if not spot:
@@ -158,6 +129,11 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
     pe_map = {r["strike"]: r for r in rows if r["option_type"] == "PE"}
     atm = min(strikes, key=lambda s: abs(s - spot))
 
+    # Futures price for this expiry (Black-76 underlying) -- fall back to
+    # spot for whichever symbol/expiry doesn't have a liquid futures print.
+    fut_row = next((r for r in rows if r["option_type"] == "FUT" and (r.get("last_price") or 0) > 0), None)
+    F = fut_row["last_price"] if fut_row else spot
+
     chain = []
     for strike in strikes:
         ce = ce_map.get(strike, {})
@@ -165,8 +141,8 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
         ce_ltp = ce.get("last_price", 0) or 0
         pe_ltp = pe.get("last_price", 0) or 0
 
-        ce_iv  = calculate_iv(ce_ltp, spot, strike, T, r_f, True)
-        pe_iv  = calculate_iv(pe_ltp, spot, strike, T, r_f, False)
+        ce_iv  = calculate_iv(ce_ltp, F, strike, T, r_f, True)
+        pe_iv  = calculate_iv(pe_ltp, F, strike, T, r_f, False)
         ce_sig = (ce_iv / 100) if ce_iv else 0.25
         pe_sig = (pe_iv / 100) if pe_iv else 0.25
 
@@ -178,14 +154,14 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
                 "iv":     ce_iv,
                 "oi":     ce.get("oi", 0),
                 "volume": ce.get("volume", 0),
-                **calculate_greeks(spot, strike, T, r_f, ce_sig, True),
+                **calculate_greeks(F, strike, T, r_f, ce_sig, True),
             },
             "pe": {
                 "ltp":    pe_ltp,
                 "iv":     pe_iv,
                 "oi":     pe.get("oi", 0),
                 "volume": pe.get("volume", 0),
-                **calculate_greeks(spot, strike, T, r_f, pe_sig, False),
+                **calculate_greeks(F, strike, T, r_f, pe_sig, False),
             },
         })
 

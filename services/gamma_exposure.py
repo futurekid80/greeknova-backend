@@ -34,7 +34,10 @@ import time as time_module
 import math
 
 from api.uoa import is_market_hours, is_post_market
-from services.black_scholes import implied_vol, bs_gamma, bs_theta_per_day, bs_vega_per_point, _norm_cdf
+from services.black_scholes import (
+    implied_vol76, bs76_gamma, bs76_theta_per_day, bs76_vega_per_point, _norm_cdf,
+)
+from utils.market_calendar import trading_days_between
 from services.fno_universe import LOT_SIZES
 
 import httpx
@@ -261,7 +264,7 @@ def _iv_month_hist_map(supabase, symbols, today_date):
     return out
 
 
-def _atm_iv_for_rows(rows, spot, T):
+def _atm_iv_for_rows(rows, spot, T, forward=None):
     """ATM IV (avg of CE and PE) for one expiry's rows: the strike nearest spot with both sides priced."""
     by_k: dict = {}
     for r in rows:
@@ -273,7 +276,8 @@ def _atm_iv_for_rows(rows, spot, T):
     if not paired or T <= 0:
         return None
     k = min(paired, key=lambda x: abs(x - spot))
-    ivs = [implied_vol(by_k[k][o], spot, k, T, RISK_FREE_RATE, o) for o in ("CE", "PE")]
+    F = forward if (forward and forward > 0) else spot
+    ivs = [implied_vol76(by_k[k][o], F, k, T, RISK_FREE_RATE, o) for o in ("CE", "PE")]
     ivs = [v for v in ivs if v]
     return sum(ivs) / len(ivs) if ivs else None
 
@@ -410,6 +414,24 @@ def _compute_gamma_exposure(date: str = None):
         and (r.get("oi") or 0) >= MIN_OPEN_OI
     ]
 
+    # ── Futures price per (symbol, expiry) -- Oct 2026: Indian options
+    # platforms (Sensibull et al.) solve IV/Greeks off the FUTURES price,
+    # not spot, because the futures price already has interest+dividend
+    # carry baked in. We already capture FUT rows in oi_snapshots for
+    # rollover tracking (see api/rollover.py) -- same window, just a
+    # different option_type filter, so no new data source needed. Falls
+    # back to spot (old behaviour) for whichever symbol/expiry combos
+    # don't have a liquid futures print in this window (illiquid stock
+    # futures, mainly).
+    fut_map: dict = {}
+    for r in all_rows:
+        if r.get("option_type") != "FUT":
+            continue
+        key = (r.get("symbol"), r.get("expiry"))
+        px = r.get("last_price")
+        if px and px > 0:
+            fut_map[key] = px
+
     rv_map = _realized_vol_map(supabase, eligible_symbols, today_date)
 
     # Next expiry (the one after the nearest) rows per symbol, for month IV / term structure
@@ -512,14 +534,22 @@ def _compute_gamma_exposure(date: str = None):
             continue
         expiry = nearest_expiry_map.get(sym)
         try:
-            dte = (date_type.fromisoformat(expiry) - today_date).days
+            expiry_date = date_type.fromisoformat(expiry)
+            dte = (expiry_date - today_date).days
         except Exception:
             continue
-        T = max(dte, 0) / 365.0
+        # 252-trading-day convention (Oct 2026 refinement) -- what Sensibull
+        # and most Indian platforms use, instead of calendar-days/365, so
+        # weekends/holidays between now and expiry don't inflate time value.
+        trading_days_left = trading_days_between(today_date, expiry_date)
+        T = max(trading_days_left, 0) / 252.0
         # Same-day expiry: give it a sliver of time value rather than 0 so
         # gamma doesn't blow up to infinity at the strike.
         if T <= 0:
-            T = 0.25 / 365.0
+            T = 0.25 / 252.0
+
+        fut_price = fut_map.get((sym, expiry))
+        F = fut_price if (fut_price and fut_price > 0) else spot
 
         per_strike: dict = {}  # strike -> {"CE": gex, "PE": gex}
         iv_by_strike: dict = {}  # strike -> {"CE": iv, "PE": iv}
@@ -535,17 +565,17 @@ def _compute_gamma_exposure(date: str = None):
             premium = r.get("last_price") or 0
             if oi <= 0 or premium <= 0:
                 continue
-            iv = implied_vol(premium, spot, strike, T, RISK_FREE_RATE, opt)
+            iv = implied_vol76(premium, F, strike, T, RISK_FREE_RATE, opt)
             if iv is None:
                 continue
-            gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
+            gamma = bs76_gamma(F, strike, T, RISK_FREE_RATE, iv)
             gex = gamma * oi  # unscaled (no lot size) — see module docstring
             per_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})
             per_strike[strike][opt] += gex
             iv_by_strike.setdefault(strike, {})[opt] = iv
             # Theta / Vega on the same solved IV (Sep 26 2026). oi is in shares.
-            _th = abs(bs_theta_per_day(spot, strike, T, RISK_FREE_RATE, iv, opt))
-            _vg = bs_vega_per_point(spot, strike, T, RISK_FREE_RATE, iv)
+            _th = abs(bs76_theta_per_day(F, strike, T, RISK_FREE_RATE, iv, opt))
+            _vg = bs76_vega_per_point(F, strike, T, RISK_FREE_RATE, iv)
             greek_by_strike.setdefault(strike, {})[opt] = (_th, _vg, premium)
             theta_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})[opt] += _th * oi
             vega_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})[opt] += _vg * oi
@@ -810,8 +840,11 @@ def _compute_gamma_exposure(date: str = None):
         _nx = _exps.get(sym)
         if _nx:
             try:
-                iv_month_dte = (date_type.fromisoformat(_nx) - today_date).days
-                iv_month = _atm_iv_for_rows(next_rows_by_sym.get(sym, []), spot, max(iv_month_dte, 1) / 365.0)
+                _nx_date = date_type.fromisoformat(_nx)
+                iv_month_dte = (_nx_date - today_date).days
+                _nx_T = max(trading_days_between(today_date, _nx_date), 1) / 252.0
+                _nx_fut = fut_map.get((sym, _nx))
+                iv_month = _atm_iv_for_rows(next_rows_by_sym.get(sym, []), spot, _nx_T, forward=_nx_fut)
                 iv_month_expiry = _nx
             except Exception:
                 iv_month = None
@@ -852,7 +885,8 @@ def _compute_gamma_exposure(date: str = None):
                 return {}
             k = min(cands) if opt == "CE" else max(cands)
             sig = iv_by_strike[k][opt]
-            d2 = (math.log(spot / k) + (RISK_FREE_RATE - 0.5 * sig * sig) * T) / (sig * math.sqrt(T))
+            # Black-76 d2 (no separate drift term -- carry's already in F).
+            d2 = (math.log(F / k) - 0.5 * sig * sig * T) / (sig * math.sqrt(T))
             prob = _norm_cdf(d2) if opt == "CE" else _norm_cdf(-d2)
             prem = (_cl.get((k, opt)) or {}).get("last_price") or 0
             return {"strike": k, "premium": round(prem, 2),
@@ -1094,12 +1128,21 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         return {"symbol": symbol, "strikes": [], "spot": None, "error": "no spot price"}
 
     try:
-        dte = (date_type.fromisoformat(expiry) - today_date).days
+        expiry_date = date_type.fromisoformat(expiry)
+        dte = (expiry_date - today_date).days
     except Exception:
+        expiry_date = today_date
         dte = 0
-    T = max(dte, 0) / 365.0
+    T = max(trading_days_between(today_date, expiry_date), 0) / 252.0
     if T <= 0:
-        T = 0.25 / 365.0
+        T = 0.25 / 252.0
+
+    fut_price = next(
+        (r.get("last_price") for r in chain_raw
+         if r.get("expiry") == expiry and r.get("option_type") == "FUT" and (r.get("last_price") or 0) > 0),
+        None,
+    )
+    F = fut_price if fut_price else spot
 
     per_strike: dict = {}
     for r in chain_raw:
@@ -1113,10 +1156,10 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         premium = r.get("last_price") or 0
         if oi <= 0 or premium <= 0:
             continue
-        iv = implied_vol(premium, spot, strike, T, RISK_FREE_RATE, opt)
+        iv = implied_vol76(premium, F, strike, T, RISK_FREE_RATE, opt)
         if iv is None:
             continue
-        gamma = bs_gamma(spot, strike, T, RISK_FREE_RATE, iv)
+        gamma = bs76_gamma(F, strike, T, RISK_FREE_RATE, iv)
         gex = gamma * oi
         per_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})
         per_strike[strike][opt] += gex
