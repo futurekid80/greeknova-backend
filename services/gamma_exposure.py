@@ -1238,6 +1238,15 @@ VRP_ZONE_PCT = 0.07         # Oct 8 2026: the actual scan universe -- the
 VRP_BEST_PICK_MIN_PREMIUM = 5.0  # a "best pick" needs collectable premium,
                                   # not just a high VRP number on a strike
                                   # so far out it's barely worth shorting
+VRP_BEST_PICK_MIN_POP = 70.0      # Oct 8 2026: score alone (VRP + 0.5*spike)
+                                  # was quietly favoring near-ATM strikes --
+                                  # ATM carries the most gamma/vega, so
+                                  # ordinary IV noise shows up there as a
+                                  # bigger VRP/spike number even though a
+                                  # ~50% PoP strike is a coin-flip sell, not
+                                  # a "best" one. A hard PoP floor keeps
+                                  # "best pick" meaning a strike that's both
+                                  # rich AND reasonably safe to sell.
 
 
 def get_vrp_scan(symbol: str = "NIFTY", expiry: str = None):
@@ -1478,8 +1487,18 @@ def get_vrp_scan(symbol: str = "NIFTY", expiry: str = None):
     # carries real collectable premium, so the pick isn't just the
     # furthest, cheapest strike riding pure skew.
     def _flag_best(side):
-        eligible = [c for c in side if c["premium"] >= VRP_BEST_PICK_MIN_PREMIUM]
-        pool = eligible or side
+        # Two gates, loosened in order if nothing clears them: (1) real
+        # collectable premium, (2) PoP not a coin-flip. Without the PoP
+        # gate, ATM's extra gamma/vega means ordinary IV noise alone can
+        # out-score a far safer OTM strike on pure VRP+spike math -- see
+        # VRP_BEST_PICK_MIN_POP above for the full reasoning.
+        pop_and_premium = [
+            c for c in side
+            if c["premium"] >= VRP_BEST_PICK_MIN_PREMIUM
+            and c["pop"] is not None and c["pop"] >= VRP_BEST_PICK_MIN_POP
+        ]
+        premium_only = [c for c in side if c["premium"] >= VRP_BEST_PICK_MIN_PREMIUM]
+        pool = pop_and_premium or premium_only or side
         if not pool:
             return
         # Oct 8 2026 fix: on a tied/near-tied score, max() alone returns the
