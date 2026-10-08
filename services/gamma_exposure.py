@@ -1218,3 +1218,160 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         "strikes": strikes_out,
         "as_of": ts_new,
     }
+
+
+VRP_LOOKBACK_MINUTES = 60   # "sudden spike" window -- how far back we look
+                            # to measure how much a strike's IV has jumped
+VRP_MIN_OI = 500            # ignore illiquid strikes -- a "spike" on 2 lots
+                            # of OI isn't a real sellable opportunity
+VRP_CANDIDATES_PER_SIDE = 8
+
+
+def get_vrp_scan(symbol: str = "NIFTY"):
+    """VRP (Volatility Risk Premium) scanner for weekly index strikes.
+
+    Oct 2026: built per Manish's request -- for someone looking to SHORT
+    weekly NIFTY/BANKNIFTY/FINNIFTY options, this ranks strikes by how
+    rich the premium looks *right now*, combining two signals:
+
+      1. VRP = IV - Realized Vol. When IV sits well above what the
+         underlying has actually been realizing, premium sellers are
+         historically being overpaid for the risk they're taking on.
+      2. IV spike = how much that strike's IV has jumped in the last
+         VRP_LOOKBACK_MINUTES, re-solving IV from the option's OWN price
+         history (oi_snapshots) rather than needing a separate time-series
+         table. A fresh spike (news, a sudden order, a wall shift) that
+         hasn't been "earned" by a matching realized-vol move is exactly
+         the kind of thing that tends to mean-revert -- a classic weekly
+         short-strike setup.
+
+    Both signals use the same Black-76 engine as gamma_exposure/vega
+    (futures-based IV, 252-trading-day T) so numbers here agree with what
+    those pages show for the same strike.
+    """
+    supabase = get_supabase()
+    symbol = symbol.upper()
+    today, ts_new = _resolve_gex_day(supabase, symbol)
+    if not ts_new:
+        return {"symbol": symbol, "candidates": [], "error": "no data"}
+    today_date = date_type.fromisoformat(today)
+
+    chain_raw = supabase.from_("oi_snapshots")\
+        .select("strike,option_type,expiry,oi,last_price")\
+        .eq("symbol", symbol)\
+        .eq("timestamp", ts_new)\
+        .execute().data or []
+
+    expiries = sorted(set(
+        r["expiry"] for r in chain_raw
+        if r.get("expiry") and r["expiry"] >= today
+    ))
+    if not expiries:
+        return {"symbol": symbol, "candidates": [], "error": "no active expiry"}
+    expiry = expiries[0]  # nearest -- the weekly, for an index
+    expiry_date = date_type.fromisoformat(expiry)
+    dte = (expiry_date - today_date).days
+
+    cmp_q = supabase.from_("cmp_prices")\
+        .select("cmp").eq("symbol", symbol)\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=True).limit(1).execute()
+    spot = float(cmp_q.data[0]["cmp"]) if cmp_q.data else None
+    if not spot:
+        return {"symbol": symbol, "candidates": [], "error": "no spot price"}
+
+    fut_price = next(
+        (r.get("last_price") for r in chain_raw
+         if r.get("expiry") == expiry and r.get("option_type") == "FUT" and (r.get("last_price") or 0) > 0),
+        None,
+    )
+    F = fut_price if fut_price else spot
+
+    trading_days_left = trading_days_between(today_date, expiry_date)
+    T = max(trading_days_left, 0) / 252.0
+    if T <= 0:
+        T = 0.25 / 252.0
+
+    rv_map = _realized_vol_map(supabase, {symbol}, today_date)
+    rv = rv_map.get(symbol)
+
+    # ── Past snapshot, ~VRP_LOOKBACK_MINUTES back, same expiry -- to
+    # measure how much each strike's IV has moved, not just where it sits.
+    ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
+    past_cutoff = (ts_new_dt - timedelta(minutes=VRP_LOOKBACK_MINUTES)).isoformat()
+    past_ts_q = supabase.from_("oi_snapshots")\
+        .select("timestamp").eq("symbol", symbol)\
+        .lte("timestamp", past_cutoff)\
+        .order("timestamp", desc=True).limit(1).execute()
+    past_chain: dict = {}
+    past_F = F
+    if past_ts_q.data:
+        past_ts = past_ts_q.data[0]["timestamp"]
+        past_raw = supabase.from_("oi_snapshots")\
+            .select("strike,option_type,last_price")\
+            .eq("symbol", symbol).eq("timestamp", past_ts).eq("expiry", expiry)\
+            .execute().data or []
+        for r in past_raw:
+            if r.get("option_type") == "FUT" and (r.get("last_price") or 0) > 0:
+                past_F = r["last_price"]
+        for r in past_raw:
+            if r.get("option_type") in ("CE", "PE") and (r.get("last_price") or 0) > 0:
+                past_chain[(float(r["strike"]), r["option_type"])] = r["last_price"]
+
+    candidates = []
+    for r in chain_raw:
+        if r.get("expiry") != expiry or r.get("option_type") not in ("CE", "PE"):
+            continue
+        strike = float(r["strike"])
+        if abs(strike - spot) / spot > MAX_STRIKE_MONEYNESS:
+            continue
+        opt = r["option_type"]
+        oi = r.get("oi") or 0
+        premium = r.get("last_price") or 0
+        if oi < VRP_MIN_OI or premium <= 0:
+            continue
+        iv = implied_vol76(premium, F, strike, T, RISK_FREE_RATE, opt)
+        if iv is None:
+            continue
+
+        vrp_pts = round((iv - rv) * 100, 2) if rv else None
+
+        iv_change_pts = None
+        past_premium = past_chain.get((strike, opt))
+        if past_premium:
+            past_iv = implied_vol76(past_premium, past_F, strike, T, RISK_FREE_RATE, opt)
+            if past_iv:
+                iv_change_pts = round((iv - past_iv) * 100, 2)
+
+        # Rank richest-and-freshest first: VRP carries more weight than a
+        # spike alone (a spike with no VRP behind it may just be catching
+        # up to where IV always "should" be, e.g. post-event repricing).
+        score = (vrp_pts or 0) + 0.5 * (iv_change_pts or 0)
+
+        candidates.append({
+            "strike": strike,
+            "option_type": opt,
+            "premium": premium,
+            "oi": oi,
+            "iv": round(iv * 100, 2),
+            "vrp": vrp_pts,
+            "iv_change_60m": iv_change_pts,
+            "score": round(score, 2),
+        })
+
+    candidates.sort(key=lambda c: c["score"], reverse=True)
+    ce_top = [c for c in candidates if c["option_type"] == "CE"][:VRP_CANDIDATES_PER_SIDE]
+    pe_top = [c for c in candidates if c["option_type"] == "PE"][:VRP_CANDIDATES_PER_SIDE]
+
+    return {
+        "symbol": symbol,
+        "expiry": expiry,
+        "days_to_expiry": dte,
+        "spot": spot,
+        "futures": F,
+        "realized_vol": round(rv * 100, 2) if rv else None,
+        "lookback_minutes": VRP_LOOKBACK_MINUTES,
+        "as_of": ts_new,
+        "ce_candidates": ce_top,
+        "pe_candidates": pe_top,
+    }

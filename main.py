@@ -1543,6 +1543,16 @@ def gamma_by_strike(symbol: str, date: str = None):
     return get_gex_by_strike(symbol.upper(), date)
 
 
+@app.get("/vrp-scan/{symbol}")
+def vrp_scan(symbol: str = "NIFTY"):
+    # Oct 2026: weekly short-strike VRP (Volatility Risk Premium) scanner --
+    # ranks index strikes by IV-minus-realized-vol plus a recent IV spike,
+    # for someone looking to sell weekly premium. See gamma_exposure.py's
+    # get_vrp_scan docstring for the methodology.
+    from services.gamma_exposure import get_vrp_scan
+    return get_vrp_scan(symbol.upper())
+
+
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
