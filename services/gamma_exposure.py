@@ -1794,18 +1794,27 @@ def get_gap_iv_scan(symbol: str = "NIFTY"):
     mean-revert." This does NOT place or suggest a trade; it surfaces the
     two facts a seller would check by hand before deciding anything:
 
-      1. Did today open with a real gap vs yesterday's close? (not every
-         red open is a "gap" worth reacting to -- GAP_SPIKE_MIN_GAP_PCT
-         filters normal drift)
+      1. Has the index moved meaningfully away from yesterday's close --
+         either at the open (the classic "gap") OR by drifting there
+         later in the session? Tracked as TWO separate numbers:
+         "gap_pct" (open vs prev close, fixed once the day's open tick
+         lands) and "move_from_close_pct" (CURRENT spot vs prev close,
+         updates every call) -- so a quiet open that slides into a real
+         move by noon still counts, not just a move visible at 9:15am.
+         Either one crossing GAP_SPIKE_MIN_GAP_PCT counts as "moved".
       2. Is any strike's IV actually elevated *for that strike*, not just
          elevated in absolute terms? Reuses the per-strike IV percentile
          already computed by get_vrp_scan/_iv_percentile_from_history, so
          "spiked" means "unusually rich for THIS strike's own history",
          the same honest percentile the VRP scanner already shows.
 
+    Meant to be polled through the day (the frontend does, every few
+    minutes) -- spike_detected can flip true well after the open if IV
+    genuinely spikes later, not just in the first few minutes.
+
     Deliberately does not attempt to predict/backtest the IV-crush pattern
     yet -- strike_iv_daily only started capturing Oct 8 2026, so there
-    isn't enough history for an honest "after past gaps like this, IV
+    isn't enough history for an honest "after past moves like this, IV
     typically fell by X% over Y sessions" statistic. That can be added once
     enough sessions have accumulated; showing it earlier would mean
     showing a stat built on noise.
@@ -1834,13 +1843,19 @@ def get_gap_iv_scan(symbol: str = "NIFTY"):
 
     # Reuses the exact same VRP-scan candidates (nearest expiry) so the IV
     # percentile shown here always matches what the VRP scanner itself
-    # shows for that strike -- no second, divergent calculation.
+    # shows for that strike -- no second, divergent calculation. Also
+    # gives us the live spot for move_from_close_pct below.
     scan = get_vrp_scan(symbol)
     if scan.get("error"):
         return {
             "symbol": symbol, "prev_close": prev_close, "today_open": today_open,
             "gap_pct": gap_pct, "error": scan["error"],
         }
+
+    spot = scan["spot"]
+    move_from_close_pct = None
+    if prev_close and spot:
+        move_from_close_pct = round((spot - prev_close) / prev_close * 100, 2)
 
     candidates = scan["ce_candidates"] + scan["pe_candidates"]
     ranked = sorted(
@@ -1849,20 +1864,29 @@ def get_gap_iv_scan(symbol: str = "NIFTY"):
     )
     top_spiked = ranked[:6]
 
-    gap_is_down = gap_pct is not None and gap_pct <= -GAP_SPIKE_MIN_GAP_PCT
-    gap_is_up = gap_pct is not None and gap_pct >= GAP_SPIKE_MIN_GAP_PCT
+    # "Moved" if EITHER the open gap OR where spot sits right now vs
+    # yesterday's close crosses the threshold -- catches both a gap that
+    # was visible at 9:15am and a quiet open that slides into a real move
+    # later in the session.
+    biggest_move_pct = max(
+        (v for v in (gap_pct, move_from_close_pct) if v is not None),
+        key=abs, default=None,
+    )
+    moved_down = biggest_move_pct is not None and biggest_move_pct <= -GAP_SPIKE_MIN_GAP_PCT
+    moved_up = biggest_move_pct is not None and biggest_move_pct >= GAP_SPIKE_MIN_GAP_PCT
     iv_spike_present = any(c["iv_percentile"] >= GAP_SPIKE_MIN_IV_PCTILE for c in top_spiked)
-    spike_detected = (gap_is_down or gap_is_up) and iv_spike_present
+    spike_detected = (moved_down or moved_up) and iv_spike_present
 
     return {
         "symbol": symbol,
         "as_of": scan["as_of"],
         "expiry": scan["expiry"],
-        "spot": scan["spot"],
+        "spot": spot,
         "prev_close": prev_close,
         "today_open": today_open,
         "gap_pct": gap_pct,
-        "gap_direction": "DOWN" if gap_is_down else ("UP" if gap_is_up else "FLAT"),
+        "move_from_close_pct": move_from_close_pct,
+        "move_direction": "DOWN" if moved_down else ("UP" if moved_up else "FLAT"),
         "gap_threshold_pct": GAP_SPIKE_MIN_GAP_PCT,
         "iv_pctile_threshold": GAP_SPIKE_MIN_IV_PCTILE,
         "spike_detected": spike_detected,
