@@ -1240,7 +1240,7 @@ VRP_BEST_PICK_MIN_PREMIUM = 5.0  # a "best pick" needs collectable premium,
                                   # so far out it's barely worth shorting
 
 
-def get_vrp_scan(symbol: str = "NIFTY"):
+def get_vrp_scan(symbol: str = "NIFTY", expiry: str = None):
     """VRP (Volatility Risk Premium) scanner for weekly index strikes.
 
     Oct 2026: built per Manish's request -- for someone looking to SHORT
@@ -1281,7 +1281,12 @@ def get_vrp_scan(symbol: str = "NIFTY"):
     ))
     if not expiries:
         return {"symbol": symbol, "candidates": [], "error": "no active expiry"}
-    expiry = expiries[0]  # nearest -- the weekly, for an index
+    nearest_expiry = expiries[0]
+    # Oct 8 2026: scan ANY available expiry, not just the nearest weekly --
+    # per Manish's request, so a quiet weekly doesn't mean "nothing to
+    # see" when a further-out expiry might be showing real VRP. Falls
+    # back to nearest if an invalid/missing expiry is requested.
+    expiry = expiry if expiry in expiries else nearest_expiry
     expiry_date = date_type.fromisoformat(expiry)
     dte = (expiry_date - today_date).days
 
@@ -1326,31 +1331,35 @@ def get_vrp_scan(symbol: str = "NIFTY"):
     # defending its level, or quietly eroding toward spot? A strike with
     # great VRP sitting behind a melting wall is a worse bet than a lower-
     # VRP strike behind a wall that's holding.
+    # gex_regime_log only ever logs the NEAREST expiry's gamma walls, so
+    # showing a wall reading against a far-dated expiry would be
+    # misleading -- only populate these when scanning the nearest expiry.
     call_wall_status = put_wall_status = None
     call_wall_now = put_wall_now = None
-    try:
-        regime_rows = supabase.from_("gex_regime_log")\
-            .select("captured_at,call_wall_strike,put_wall_strike")\
-            .eq("symbol", symbol)\
-            .order("captured_at", desc=True)\
-            .limit(10).execute().data or []
-        if len(regime_rows) >= 2:
-            newest, oldest = regime_rows[0], regime_rows[-1]
-            call_wall_now = newest.get("call_wall_strike")
-            put_wall_now = newest.get("put_wall_strike")
-            cw_old, pw_old = oldest.get("call_wall_strike"), oldest.get("put_wall_strike")
-            WALL_DRIFT_PCT = 0.3  # % move in the wall itself to call it "eroding"
-            if call_wall_now and cw_old:
-                drift = (cw_old - call_wall_now) / cw_old * 100  # positive = wall moved DOWN toward spot
-                call_wall_status = "ERODING" if drift > WALL_DRIFT_PCT else "HOLDING"
-            if put_wall_now and pw_old:
-                drift = (put_wall_now - pw_old) / pw_old * 100  # positive = wall moved UP toward spot
-                put_wall_status = "ERODING" if drift > WALL_DRIFT_PCT else "HOLDING"
-        elif len(regime_rows) == 1:
-            call_wall_now = regime_rows[0].get("call_wall_strike")
-            put_wall_now = regime_rows[0].get("put_wall_strike")
-    except Exception as e:
-        print(f"[vrp_scan] wall-holding check unavailable: {e}")
+    if expiry == nearest_expiry:
+        try:
+            regime_rows = supabase.from_("gex_regime_log")\
+                .select("captured_at,call_wall_strike,put_wall_strike")\
+                .eq("symbol", symbol)\
+                .order("captured_at", desc=True)\
+                .limit(10).execute().data or []
+            if len(regime_rows) >= 2:
+                newest, oldest = regime_rows[0], regime_rows[-1]
+                call_wall_now = newest.get("call_wall_strike")
+                put_wall_now = newest.get("put_wall_strike")
+                cw_old, pw_old = oldest.get("call_wall_strike"), oldest.get("put_wall_strike")
+                WALL_DRIFT_PCT = 0.3  # % move in the wall itself to call it "eroding"
+                if call_wall_now and cw_old:
+                    drift = (cw_old - call_wall_now) / cw_old * 100  # positive = wall moved DOWN toward spot
+                    call_wall_status = "ERODING" if drift > WALL_DRIFT_PCT else "HOLDING"
+                if put_wall_now and pw_old:
+                    drift = (put_wall_now - pw_old) / pw_old * 100  # positive = wall moved UP toward spot
+                    put_wall_status = "ERODING" if drift > WALL_DRIFT_PCT else "HOLDING"
+            elif len(regime_rows) == 1:
+                call_wall_now = regime_rows[0].get("call_wall_strike")
+                put_wall_now = regime_rows[0].get("put_wall_strike")
+        except Exception as e:
+            print(f"[vrp_scan] wall-holding check unavailable: {e}")
 
     rv_map = _realized_vol_map(supabase, {symbol}, today_date)
     rv = rv_map.get(symbol)
@@ -1482,6 +1491,7 @@ def get_vrp_scan(symbol: str = "NIFTY"):
     return {
         "symbol": symbol,
         "expiry": expiry,
+        "available_expiries": expiries,
         "days_to_expiry": dte,
         "spot": spot,
         "futures": F,
