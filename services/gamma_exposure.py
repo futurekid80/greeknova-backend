@@ -1248,6 +1248,107 @@ VRP_BEST_PICK_MIN_POP = 70.0      # Oct 8 2026: score alone (VRP + 0.5*spike)
                                   # "best pick" meaning a strike that's both
                                   # rich AND reasonably safe to sell.
 
+IV_PCTILE_PER_STRIKE_MIN_SESSIONS = 10   # below this, report "collecting
+                                          # history" rather than a number --
+                                          # a percentile off 2-3 points is
+                                          # noise, not signal
+IV_PCTILE_PER_STRIKE_LOOKBACK = 30       # sessions of strike_iv_daily history
+                                          # to rank today's IV against
+
+
+def _strike_iv_history_map(supabase, symbol, strikes_and_types):
+    """Batched version of the per-strike history lookup -- one query for
+    every (strike, option_type) in strikes_and_types instead of one query
+    per strike, so scanning a ~20-strike zone doesn't fire 20+ round trips.
+    Returns {(strike, option_type): [iv, iv, ...]} (most recent first,
+    capped at IV_PCTILE_PER_STRIKE_LOOKBACK per strike -- good enough since
+    we only need the count and the comparison, not exact ordering)."""
+    strikes = sorted({s for s, _ in strikes_and_types})
+    if not strikes:
+        return {}
+    try:
+        rows = supabase.from_("strike_iv_daily")\
+            .select("strike,option_type,iv,trade_date")\
+            .eq("symbol", symbol)\
+            .in_("strike", strikes)\
+            .order("trade_date", desc=True)\
+            .limit(IV_PCTILE_PER_STRIKE_LOOKBACK * len(strikes) * 2)\
+            .execute().data or []
+    except Exception as e:
+        print(f"[strike_iv_pctile] batched lookup failed: {e}")
+        return {}
+    by_key: dict = {}
+    for r in rows:
+        key = (float(r["strike"]), r["option_type"])
+        bucket = by_key.setdefault(key, [])
+        if len(bucket) < IV_PCTILE_PER_STRIKE_LOOKBACK:
+            bucket.append(float(r["iv"]))
+    return by_key
+
+
+def _iv_percentile_from_history(hist_ivs, today_iv):
+    """Oct 8 2026 addition: where does TODAY's IV for this exact strike sit
+    versus its own recent history? This is an IV percentile, not a true VRP
+    percentile -- a real VRP percentile would need the realized-vol figure
+    from each HISTORICAL day too (RV changes day to day), which strike_iv_
+    daily doesn't capture per-row. IV percentile is the honest, buildable
+    version of the same idea: "is today's richness for THIS strike unusual
+    for it, or just average" -- context for the trader's own judgment, not
+    a verdict.
+
+    Deliberately not scoped to one expiry: weekly strikes roll over every
+    Thursday, and restricting to a single expiry would mean almost no
+    history ever accumulates. Mixing expiries is fine here because a
+    strike only ever gets captured while it's inside the VRP scan zone
+    (see capture_strike_iv_daily) -- so the history is self-pruning to
+    periods when that literal strike number was actually close to spot,
+    which is exactly when its IV is comparable.
+
+    Returns (percentile_0_100_or_None, sessions_found)."""
+    sessions = len(hist_ivs)
+    if sessions < IV_PCTILE_PER_STRIKE_MIN_SESSIONS:
+        return None, sessions
+    below_or_equal = sum(1 for v in hist_ivs if v <= today_iv)
+    pctile = round(below_or_equal / sessions * 100, 0)
+    return pctile, sessions
+
+
+def capture_strike_iv_daily(symbol: str = "NIFTY"):
+    """EOD job (see main.py's strike_iv_capture cron): persists today's
+    VRP-scan-zone strike IVs to strike_iv_daily, one row per (symbol,
+    expiry, strike, option_type, trade_date). Feeds _strike_iv_percentile
+    above. Reuses get_vrp_scan's own candidate computation so the stored
+    IVs always match exactly what the scanner showed that day -- no
+    separate/divergent calculation path to keep in sync."""
+    supabase = get_supabase()
+    scan = get_vrp_scan(symbol)  # nearest expiry, the one that matters most
+    if scan.get("error") or not scan.get("as_of"):
+        return 0
+    trade_date = scan["as_of"][:10]
+    expiry = scan["expiry"]
+    rows = [
+        {
+            "trade_date": trade_date,
+            "symbol": symbol,
+            "expiry": expiry,
+            "strike": c["strike"],
+            "option_type": c["option_type"],
+            "iv": c["iv"],
+            "pct_from_spot": c["pct_from_spot"],
+        }
+        for c in (scan["ce_candidates"] + scan["pe_candidates"])
+    ]
+    if not rows:
+        return 0
+    try:
+        supabase.from_("strike_iv_daily")\
+            .upsert(rows, on_conflict="trade_date,symbol,expiry,strike,option_type")\
+            .execute()
+    except Exception as e:
+        print(f"[strike_iv_daily] upsert failed for {symbol}: {e}")
+        return 0
+    return len(rows)
+
 
 def get_vrp_scan(symbol: str = "NIFTY", expiry: str = None):
     """VRP (Volatility Risk Premium) scanner for weekly index strikes.
@@ -1477,6 +1578,20 @@ def get_vrp_scan(symbol: str = "NIFTY", expiry: str = None):
             "is_best_pick": False,
         })
 
+    # IV percentile per strike (see _iv_percentile_from_history) -- one
+    # batched history fetch for every strike in the zone, not a query per
+    # strike. Gated to IV_PCTILE_PER_STRIKE_MIN_SESSIONS; below that it
+    # reports the session count so the UI can show "collecting history"
+    # instead of a misleadingly precise number.
+    hist_map = _strike_iv_history_map(
+        supabase, symbol, [(c["strike"], c["option_type"]) for c in candidates]
+    )
+    for c in candidates:
+        hist_ivs = hist_map.get((c["strike"], c["option_type"]), [])
+        pctile, sessions = _iv_percentile_from_history(hist_ivs, c["iv"])
+        c["iv_percentile"] = pctile
+        c["iv_percentile_sessions"] = sessions
+
     # Full ladder per side, ordered by distance from spot (near-ATM first)
     # -- not pre-filtered to a skew-biased top-N, so the real spread across
     # the sellable zone is visible, not just its outer edge.
@@ -1533,4 +1648,133 @@ def get_vrp_scan(symbol: str = "NIFTY", expiry: str = None):
         "as_of": ts_new,
         "ce_candidates": ce_side,
         "pe_candidates": pe_side,
+    }
+
+
+VOL_SMILE_ZONE_PCT = 0.15  # wider than the VRP sellable zone (7%) -- this
+                           # is for understanding WHY a strike is rich, not
+                           # for picking a strike to sell, so it's fine (even
+                           # useful) to show strikes outside the sellable
+                           # band too.
+
+
+def get_vol_surface(symbol: str = "NIFTY", expiry: str = None):
+    """Oct 8 2026 addition: raw IV-by-strike (the "smile") for one expiry,
+    plus ATM IV across every available expiry (the "term structure") -- so
+    a seller can SEE why the VRP scanner ranked a strike the way it did
+    (a kink in the smile, a jump in the term structure) instead of taking
+    the scanner's VRP number on faith. Context for the trader's own
+    judgment, not another auto-generated verdict.
+
+    Reuses the exact same Black-76/252-day engine as the VRP scanner and
+    gamma-squeeze page, so IVs here agree with what those pages show.
+    """
+    supabase = get_supabase()
+    symbol = symbol.upper()
+    today, ts_new = _resolve_gex_day(supabase, symbol)
+    if not ts_new:
+        return {"symbol": symbol, "smile": [], "term_structure": [], "error": "no data"}
+    today_date = date_type.fromisoformat(today)
+
+    chain_raw = supabase.from_("oi_snapshots")\
+        .select("strike,option_type,expiry,oi,last_price")\
+        .eq("symbol", symbol)\
+        .eq("timestamp", ts_new)\
+        .execute().data or []
+
+    expiries = sorted(set(
+        r["expiry"] for r in chain_raw
+        if r.get("expiry") and r["expiry"] >= today
+    ))
+    if not expiries:
+        return {"symbol": symbol, "smile": [], "term_structure": [], "error": "no active expiry"}
+    nearest_expiry = expiries[0]
+    expiry = expiry if expiry in expiries else nearest_expiry
+    expiry_date = date_type.fromisoformat(expiry)
+
+    cmp_q = supabase.from_("cmp_prices")\
+        .select("cmp").eq("symbol", symbol)\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=True).limit(1).execute()
+    spot = float(cmp_q.data[0]["cmp"]) if cmp_q.data else None
+    if not spot:
+        return {"symbol": symbol, "smile": [], "term_structure": [], "error": "no spot price"}
+
+    by_expiry: dict = {}
+    for r in chain_raw:
+        by_expiry.setdefault(r.get("expiry"), []).append(r)
+
+    # ── Smile: IV across the strike ladder for the selected expiry, both
+    # sides, OTM only (ITM premium is mostly intrinsic value and its
+    # back-solved IV is noisy -- same reasoning as the VRP scanner).
+    rows = by_expiry.get(expiry, [])
+    fut_price = next(
+        (r.get("last_price") for r in rows
+         if r.get("option_type") == "FUT" and (r.get("last_price") or 0) > 0),
+        None,
+    )
+    F = fut_price if fut_price else spot
+    trading_days_left = trading_days_between(today_date, expiry_date)
+    T = max(trading_days_left, 0) / 252.0
+    if T <= 0:
+        T = 0.25 / 252.0
+
+    smile = []
+    for r in rows:
+        if r.get("option_type") not in ("CE", "PE"):
+            continue
+        strike = float(r["strike"])
+        pct_from_spot = (strike - spot) / spot
+        if abs(pct_from_spot) > VOL_SMILE_ZONE_PCT:
+            continue
+        opt = r["option_type"]
+        if (opt == "CE" and strike < spot) or (opt == "PE" and strike > spot):
+            continue  # OTM only, same reasoning as the VRP scanner
+        premium = r.get("last_price") or 0
+        if premium <= 0:
+            continue
+        iv = implied_vol76(premium, F, strike, T, RISK_FREE_RATE, opt)
+        if iv is None:
+            continue
+        smile.append({
+            "strike": strike,
+            "option_type": opt,
+            "pct_from_spot": round(pct_from_spot * 100, 2),
+            "iv": round(iv * 100, 2),
+        })
+    smile.sort(key=lambda c: c["strike"])
+
+    # ── Term structure: ATM IV at every available expiry, so a jump
+    # between two expiries (e.g. an event sitting between them) is visible
+    # at a glance rather than inferred from scanning each one separately.
+    term_structure = []
+    for exp in expiries:
+        exp_date = date_type.fromisoformat(exp)
+        exp_rows = by_expiry.get(exp, [])
+        exp_fut = next(
+            (r.get("last_price") for r in exp_rows
+             if r.get("option_type") == "FUT" and (r.get("last_price") or 0) > 0),
+            None,
+        )
+        exp_trading_days = trading_days_between(today_date, exp_date)
+        exp_T = max(exp_trading_days, 0) / 252.0
+        if exp_T <= 0:
+            exp_T = 0.25 / 252.0
+        atm_iv = _atm_iv_for_rows(exp_rows, spot, exp_T, forward=exp_fut)
+        term_structure.append({
+            "expiry": exp,
+            "days_to_expiry": (exp_date - today_date).days,
+            "atm_iv": round(atm_iv * 100, 2) if atm_iv is not None else None,
+        })
+
+    return {
+        "symbol": symbol,
+        "expiry": expiry,
+        "available_expiries": expiries,
+        "spot": spot,
+        "futures": F,
+        "zone_pct": round(VOL_SMILE_ZONE_PCT * 100, 1),
+        "as_of": ts_new,
+        "smile": smile,
+        "term_structure": term_structure,
     }

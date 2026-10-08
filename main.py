@@ -608,6 +608,26 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=600
     )
 
+    def _run_strike_iv_capture_job():
+        # Oct 8 2026: EOD capture feeding the VRP scanner's per-strike IV
+        # percentile (strike_iv_daily table) -- see gamma_exposure.py's
+        # capture_strike_iv_daily docstring. Runs just after eod_signal_save
+        # so the day's final oi_snapshots tick is captured.
+        from services.gamma_exposure import capture_strike_iv_daily
+        from services.fno_universe import INDICES as _idx
+        for sym in _idx:
+            try:
+                n = capture_strike_iv_daily(sym)
+                print(f"[strike_iv_daily] {sym}: captured {n} strikes")
+            except Exception as e:
+                print(f"[strike_iv_daily] {sym} capture failed: {e}")
+
+    scheduler.add_job(
+        _run_strike_iv_capture_job,
+        "cron", hour=15, minute=37, timezone="Asia/Kolkata", id="strike_iv_capture",
+        misfire_grace_time=600
+    )
+
     # CLEANUP (Aug 7 2026): removed the radar_cache_refresh scheduled job
     # here -- positional_radar_cache is fully orphaned, nothing reads it.
 
@@ -1555,6 +1575,17 @@ def vrp_scan(symbol: str = "NIFTY", expiry: str = None):
     return get_vrp_scan(symbol.upper(), expiry)
 
 
+@app.get("/vol-surface/{symbol}")
+def vol_surface(symbol: str = "NIFTY", expiry: str = None):
+    # Oct 8 2026: IV-by-strike ("smile") for one expiry + ATM IV across
+    # every expiry ("term structure") -- context so a seller can see WHY
+    # the VRP scanner ranked a strike the way it did, rather than taking
+    # its VRP number on faith. See gamma_exposure.py's get_vol_surface
+    # docstring.
+    from services.gamma_exposure import get_vol_surface
+    return get_vol_surface(symbol.upper(), expiry)
+
+
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
@@ -1609,6 +1640,22 @@ def vix_history(range: str = "6m"):
 def admin_backfill_vix_history(daily_years: int = 5, intraday_days: int = 60):
     from api.vix_backfill import backfill_vix_history
     return backfill_vix_history(daily_years, intraday_days)
+
+@app.get("/admin/run-strike-iv-capture")
+def admin_run_strike_iv_capture():
+    # Oct 8 2026: manual trigger for the 15:37 IST strike_iv_daily cron --
+    # lets a day's capture be seeded on demand instead of waiting for the
+    # next scheduled fire (e.g. the day this job was added, or catching up
+    # after a missed run).
+    from services.gamma_exposure import capture_strike_iv_daily
+    from services.fno_universe import INDICES as _idx
+    results = {}
+    for sym in _idx:
+        try:
+            results[sym] = capture_strike_iv_daily(sym)
+        except Exception as e:
+            results[sym] = f"error: {e}"
+    return {"captured": results}
 
 @app.get("/admin/job-status")
 def admin_job_status():
