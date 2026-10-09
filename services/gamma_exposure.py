@@ -1090,6 +1090,91 @@ def _compute_gamma_exposure(date: str = None):
     return result
 
 
+# Oct 9 2026: "wall velocity" — Manish's own read on why NIFTY's short-gamma
+# squeeze into the 22,500 call wall this morning didn't turn into a gamma
+# rally: the squeeze strength badge (STEADY -19%) was already fading, but
+# nothing on the page showed whether the Call Wall strike itself was
+# rebuilding at the same level (writers reloading -> squeeze absorbed) vs.
+# genuinely retreating (writers backing off -> real squeeze). gex_regime_log
+# already captures call_wall_strike/put_wall_strike/net_gex every 3-min
+# refresh cycle for the three indices (see the "always-on regime log" block
+# above) -- this just reads that existing history back out instead of
+# needing a new table or a new capture job.
+WALL_TREND_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+
+
+def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
+    """Session history of Call Wall / Put Wall strikes and Net GEX for one
+    index, from gex_regime_log. Powers the wall-velocity sparkline + trend
+    arrow on the Option Sellers / Gamma Exposure page: a flat wall strike
+    across multiple points means writers are re-anchoring the wall right
+    where price tests it (squeeze likely to get absorbed); a wall strike
+    that steps away from spot after a cross means the squeeze is real.
+    Scoped to NIFTY/BANKNIFTY/FINNIFTY only, matching gex_regime_log."""
+    symbol = symbol.upper()
+    if symbol not in WALL_TREND_SYMBOLS:
+        return {"symbol": symbol, "points": [], "error": "wall trend is only tracked for NIFTY/BANKNIFTY/FINNIFTY"}
+
+    supabase = get_supabase()
+    today, _ts = _resolve_gex_day(supabase, symbol, date)
+
+    rows = (
+        supabase.from_("gex_regime_log")
+        .select("as_of_data_ts,cmp,regime,net_gex,net_gex_near_spot,call_wall_strike,put_wall_strike")
+        .eq("symbol", symbol)
+        .gte("as_of_data_ts", f"{today}T00:00:00+00:00")
+        .lt("as_of_data_ts", f"{today}T23:59:59+00:00")
+        .order("as_of_data_ts", desc=False)
+        .limit(limit)
+        .execute()
+        .data or []
+    )
+
+    points = [
+        {
+            "t": r["as_of_data_ts"],
+            "cmp": r.get("cmp"),
+            "regime": r.get("regime"),
+            "net_gex": r.get("net_gex"),
+            "net_gex_near_spot": r.get("net_gex_near_spot"),
+            "call_wall_strike": r.get("call_wall_strike"),
+            "put_wall_strike": r.get("put_wall_strike"),
+        }
+        for r in rows
+    ]
+
+    def _trend(values):
+        """'flat' | 'up' | 'down' | None — compares the oldest and newest
+        non-null reading in the window, ignoring None gaps."""
+        vals = [v for v in values if v is not None]
+        if len(vals) < 2:
+            return None
+        first, last = vals[0], vals[-1]
+        if last == first:
+            return "flat"
+        return "up" if last > first else "down"
+
+    call_walls = [p["call_wall_strike"] for p in points]
+    put_walls = [p["put_wall_strike"] for p in points]
+    net_gex_vals = [p["net_gex_near_spot"] for p in points]
+
+    return {
+        "symbol": symbol,
+        "date": today,
+        "points": points,
+        "call_wall_trend": _trend(call_walls),
+        "put_wall_trend": _trend(put_walls),
+        "net_gex_trend": _trend(net_gex_vals),
+        # how many of the last readings sat at the SAME call-wall strike as
+        # the most recent one -- a high count here is the "writers reloading
+        # at the same level" signal even while price keeps testing it.
+        "call_wall_pinned_count": (
+            sum(1 for v in call_walls if v is not None and v == call_walls[-1])
+            if call_walls and call_walls[-1] is not None else 0
+        ),
+    }
+
+
 def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
     """Per-strike GEX breakdown for one symbol's nearest expiry — powers the
     GEX-by-strike chart. Reuses the same IV-solve + Black-Scholes gamma

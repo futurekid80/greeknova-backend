@@ -1563,6 +1563,18 @@ def gamma_by_strike(symbol: str, date: str = None):
     return get_gex_by_strike(symbol.upper(), date)
 
 
+@app.get("/gamma-wall-trend/{symbol}")
+def gamma_wall_trend(symbol: str, date: str = None):
+    # Oct 9 2026: session history of Call Wall / Put Wall / Net GEX for an
+    # index, read back from gex_regime_log (already captured every 3-min
+    # refresh cycle -- see gamma_exposure.py's _compute_gamma_exposure).
+    # Powers the wall-velocity sparkline: tells apart "wall rebuilding at
+    # the same strike" (squeeze absorbed) from "wall genuinely retreating"
+    # (real squeeze) -- the question that prompted this.
+    from services.gamma_exposure import get_wall_trend
+    return get_wall_trend(symbol.upper(), date)
+
+
 @app.get("/vrp-scan/{symbol}")
 def vrp_scan(symbol: str = "NIFTY", expiry: str = None):
     # Oct 2026: weekly short-strike VRP (Volatility Risk Premium) scanner --
