@@ -55,6 +55,7 @@ _MEMBER_TTL = 60        # seconds the beta_users list is cached
 _lock = threading.Lock()
 _token_cache = {}       # sha256(token) -> (email or None, expires_at)
 _members = {"emails": set(), "loaded_at": 0.0}
+_trials = {"active": {}, "expired": set(), "loaded_at": 0.0}  # active: email -> expires_date (iso str)
 _stats = Counter()
 _would_block_paths = Counter()
 _recent = deque(maxlen=200)
@@ -89,20 +90,61 @@ def _load_members():
     return {(r.get("email") or "").strip().lower() for r in (res.data or [])}
 
 
-def _is_member(email: str) -> bool:
+def _load_trials():
+    """Oct 9 2026: trial_users holds timed access for people who logged in
+    via Zerodha but aren't a permanent beta_users member. Returns
+    (active: email -> trial_expires_date iso str, expired: set of emails)
+    split by today's date (Asia/Kolkata), so a trial_expired decision below
+    can carry a different message than a plain not-a-member one."""
+    from utils.db import get_supabase
+    from utils.market_calendar import today_ist
+    res = get_supabase().from_("trial_users").select("email,trial_expires_date").execute()
+    today = today_ist().isoformat()
+    active, expired = {}, set()
+    for r in (res.data or []):
+        email = (r.get("email") or "").strip().lower()
+        exp = r.get("trial_expires_date")
+        if not email or not exp:
+            continue
+        if exp >= today:
+            active[email] = exp
+        else:
+            expired.add(email)
+    return active, expired
+
+
+def _refresh_members_and_trials():
     now = time.time()
     with _lock:
         stale = now - _members["loaded_at"] > _MEMBER_TTL
-    if stale:
-        try:
-            emails = _load_members()
-            with _lock:
-                _members["emails"] = emails
-                _members["loaded_at"] = now
-        except Exception as e:
-            print(f"[GATE] member list load failed: {e}")
+    if not stale:
+        return
+    try:
+        emails = _load_members()
+        active, expired = _load_trials()
+        with _lock:
+            _members["emails"] = emails
+            _members["loaded_at"] = now
+            _trials["active"] = active
+            _trials["expired"] = expired
+            _trials["loaded_at"] = now
+    except Exception as e:
+        print(f"[GATE] member/trial list load failed: {e}")
+
+
+def _access_status(email: str) -> str:
+    """Returns 'member' (permanent, beta_users), 'trial_active' (within
+    trial_users window), 'trial_expired' (trial_users row but past
+    trial_expires_date), or 'none' (never logged in / not tracked)."""
+    _refresh_members_and_trials()
     with _lock:
-        return email in _members["emails"]
+        if email in _members["emails"]:
+            return "member"
+        if email in _trials["active"]:
+            return "trial_active"
+        if email in _trials["expired"]:
+            return "trial_expired"
+    return "none"
 
 
 def _verify_token(token: str):
@@ -209,17 +251,26 @@ async def _gate(request: Request, call_next):
         elif not email:
             decision, block, status = "user_bad_token", True, 401
         else:
-            member = await run_in_threadpool(_is_member, email)
-            if member:
+            status_kind = await run_in_threadpool(_access_status, email)
+            if status_kind in ("member", "trial_active"):
                 _note_member(email)
-                decision, block, status = "user_member_ok", False, 0
+                decision, block, status = (
+                    ("user_member_ok", False, 0) if status_kind == "member"
+                    else ("user_trial_ok", False, 0)
+                )
+            elif status_kind == "trial_expired":
+                decision, block, status = "user_trial_expired", True, 403
             else:
                 decision, block, status = "user_not_member", True, 403
 
     _record(decision, path, block, _who(request) if block else "")
     if block and mode == "enforce":
-        msg = ("Sign in required" if status == 401
-               else "This email does not have GreekNova access")
+        if status == 401:
+            msg = "Sign in required"
+        elif decision == "user_trial_expired":
+            msg = "Your GreekNova trial has ended. Upgrade to keep access."
+        else:
+            msg = "This email does not have GreekNova access"
         return JSONResponse({"error": msg, "code": decision}, status_code=status)
     return await call_next(request)
 
@@ -239,6 +290,8 @@ def _stats_route(request: Request):
             "recent_would_block": list(_recent)[-25:],
             "blocked_clients": _clients.most_common(10),
             "member_list_size": len(_members["emails"]),
+            "trial_active_count": len(_trials["active"]),
+            "trial_expired_count": len(_trials["expired"]),
         }
 
 

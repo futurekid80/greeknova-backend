@@ -1692,6 +1692,48 @@ def admin_job_status():
         })
     return {"jobs": out}
 
+@app.get("/admin/trial-status")
+def admin_trial_status(request: Request):
+    """Oct 9 2026: conversion-campaign list for trial_users (see /auth/kite-login
+    and services/access_gate.py for how a trial starts and expires). Groups
+    into active / expiring_today / expired_not_converted, each with enough
+    contact info (email, name) to paste into an email/Telegram campaign.
+    Protected the same way as the other /admin/ routes -- send the shared
+    admin key as header x-gate-key."""
+    import hmac
+    key = os.getenv("GATE_STATS_KEY", "")
+    sent = request.headers.get("x-gate-key", "")
+    if not key or not hmac.compare_digest(key, sent):
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    from utils.db import get_supabase
+    from utils.market_calendar import today_ist
+    today = today_ist().isoformat()
+    res = get_supabase().from_("trial_users").select(
+        "email,name,trial_start_date,trial_expires_date,login_count,converted"
+    ).order("trial_expires_date").execute()
+
+    active, expiring_today, expired = [], [], []
+    for r in (res.data or []):
+        if r.get("converted"):
+            continue
+        exp = r.get("trial_expires_date")
+        if exp == today:
+            expiring_today.append(r)
+        elif exp and exp > today:
+            active.append(r)
+        else:
+            expired.append(r)
+
+    return {
+        "as_of": today,
+        "active": active,
+        "expiring_today": expiring_today,
+        "expired_not_converted": expired,
+        "counts": {"active": len(active), "expiring_today": len(expiring_today),
+                   "expired_not_converted": len(expired)},
+    }
+
 # Shared demo login (Oct 2026) - lets Manish hand a batch of ~50 preview
 # users one common credential (demo@greeknova.com + a fixed passcode)
 # instead of adding each person to beta_users individually. We never touch
@@ -1827,13 +1869,68 @@ def auth_kite_login(body: KiteLoginRequest):
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Auto-add to the beta list on first Zerodha login -- identity is proven
-    # by Zerodha itself here, so there's no separate "is this email allowed"
-    # gate to check first.
+    # Oct 9 2026: who gets permanent access vs. a timed trial, on first-ever
+    # Zerodha login. Identity is proven by Zerodha itself here, so there's no
+    # separate "is this email allowed" gate to check first -- the question is
+    # only permanent-member vs. new-trial vs. existing-trial.
+    #   - Already in beta_users (paid/founding/manually-added) -> permanent,
+    #     untouched. This is the ONLY path with standing access.
+    #   - Not in beta_users, never seen before -> brand new trial: 5 trading
+    #     days starting today (today counts as day 1), so even a Friday
+    #     login gets a real trading week, not just one session.
+    #   - Not in beta_users, already in trial_users -> just update their
+    #     last-seen/login_count. Their expiry is set once at trial start and
+    #     never resets on a later login (so a trial can't be "renewed" by
+    #     simply logging out and back in).
     try:
-        admin.from_("beta_users").upsert({"email": kite_email, "name": kite_user_name or kite_email}).execute()
+        is_member = bool(
+            admin.from_("beta_users").select("email").eq("email", kite_email).execute().data
+        )
     except Exception as e:
-        print(f"[KiteLogin] beta_users upsert warning: {e}")
+        print(f"[KiteLogin] beta_users lookup warning: {e}")
+        is_member = False
+
+    if is_member:
+        try:
+            admin.from_("beta_users").upsert({"email": kite_email, "name": kite_user_name or kite_email}).execute()
+        except Exception as e:
+            print(f"[KiteLogin] beta_users upsert warning: {e}")
+    else:
+        try:
+            existing_trial = (
+                admin.from_("trial_users").select("email,login_count").eq("email", kite_email).execute().data
+            )
+        except Exception as e:
+            print(f"[KiteLogin] trial_users lookup warning: {e}")
+            existing_trial = None
+
+        if existing_trial:
+            try:
+                from datetime import datetime, timezone
+                prev_count = (existing_trial[0] or {}).get("login_count") or 1
+                admin.from_("trial_users").update({
+                    "last_login_at": datetime.now(timezone.utc).isoformat(),
+                    "login_count": int(prev_count) + 1,
+                }).eq("email", kite_email).execute()
+            except Exception as e:
+                print(f"[KiteLogin] trial_users touch warning: {e}")
+        else:
+            from utils.market_calendar import today_ist, get_next_trading_day
+            start = today_ist()
+            expires = start
+            for _ in range(4):  # start is trading day 1; 4 more -> day 5
+                expires = get_next_trading_day(expires)
+            try:
+                admin.from_("trial_users").insert({
+                    "email": kite_email,
+                    "name": kite_user_name or kite_email,
+                    "kite_user_id": kite_user_id,
+                    "trial_start_date": start.isoformat(),
+                    "trial_expires_date": expires.isoformat(),
+                }).execute()
+                print(f"[KiteLogin] new trial for {kite_email}: {start} -> {expires}")
+            except Exception as e:
+                print(f"[KiteLogin] trial_users insert warning: {e}")
 
     # Best-effort: remember this access token against the user's email so
     # their own positions/holdings/quotes can be pulled later via the same
