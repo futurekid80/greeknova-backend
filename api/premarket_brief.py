@@ -124,11 +124,19 @@ def get_premarket_brief(supabase) -> dict:
     today = now_ist.date()
 
     from utils.market_calendar import is_trading_day
-    check = today
-    if not is_trading_day(check):
+    # Oct 9 2026 fix: this used to start from `today` itself and only step
+    # back when today wasn't a trading day -- so on an ordinary trading-day
+    # MORNING (before 9:15am, before today's own session has even opened,
+    # let alone closed), it resolved last_trading_day to TODAY. Every "last
+    # close" lookup downstream (GIFT Nifty's gap reference, FII/DII, EOD
+    # reuse) then looked for a session that doesn't exist yet and silently
+    # fell back or returned nothing. This page is explicitly "before
+    # 9:15am" (see module docstring) -- its "last trading day" must always
+    # be the last COMPLETED session, i.e. always step back at least one day
+    # first, then keep stepping back over weekends/holidays.
+    check = today - timedelta(days=1)
+    while not is_trading_day(check):
         check -= timedelta(days=1)
-        while not is_trading_day(check):
-            check -= timedelta(days=1)
     last_trading_day = check.isoformat()
 
     # PERF FIX (Sep 12 2026): GIFT Nifty, commodities, EOD-report reuse,
