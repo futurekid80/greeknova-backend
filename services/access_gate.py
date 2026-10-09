@@ -147,6 +147,13 @@ def _access_status(email: str) -> str:
     return "none"
 
 
+def _is_member(email: str) -> bool:
+    """Back-compat for callers (kite_byot.py) written against the old
+    binary check. Now means 'has access' - permanent member or active
+    trial - matching what _access_status/_gate use everywhere else."""
+    return _access_status(email) in ("member", "trial_active")
+
+
 def _verify_token(token: str):
     """Returns (email or None, error_flag)."""
     key = hashlib.sha256(token.encode()).hexdigest()
