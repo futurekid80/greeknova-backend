@@ -1709,13 +1709,26 @@ def admin_trial_status(request: Request):
     from utils.db import get_supabase
     from utils.market_calendar import today_ist
     today = today_ist().isoformat()
-    res = get_supabase().from_("trial_users").select(
+    supabase = get_supabase()
+    res = supabase.from_("trial_users").select(
         "email,name,trial_start_date,trial_expires_date,login_count,converted"
     ).order("trial_expires_date").execute()
 
+    # Oct 9 2026: a paid member (any plan -- annual/quarterly/monthly/founding,
+    # added to beta_users manually or by a future payment webhook) must drop
+    # off this list regardless of whatever trial_users.converted says, since
+    # nothing currently sets that flag. Checking live beta_users membership
+    # here -- rather than trusting a flag -- is what keeps a paying customer
+    # from confusingly showing up as "still needs chasing".
+    member_emails = {
+        (r.get("email") or "").strip().lower()
+        for r in (supabase.from_("beta_users").select("email").execute().data or [])
+    }
+
     active, expiring_today, expired = [], [], []
     for r in (res.data or []):
-        if r.get("converted"):
+        email = (r.get("email") or "").strip().lower()
+        if r.get("converted") or email in member_emails:
             continue
         exp = r.get("trial_expires_date")
         if exp == today:
