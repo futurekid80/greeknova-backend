@@ -135,6 +135,25 @@ def bs76_gamma(F: float, K: float, T: float, r: float, sigma: float) -> float:
     return df * _norm_pdf(d1) / (F * sigma * math.sqrt(T))
 
 
+def bs76_delta(F: float, K: float, T: float, r: float, sigma: float, option_type: str) -> float:
+    """Black-76 delta w.r.t. the futures price. CE delta in [0, df], PE delta
+    in [-df, 0] (the df = exp(-rT) discount factor keeps it exact at T->0
+    rather than assuming a clean [0,1]/[-1,0] range -- negligible in
+    practice for NSE's short weekly/monthly tenors, but correct is free).
+    At/after expiry collapses to the intrinsic step: 1 if ITM, 0 if OTM for
+    a call (mirrored for a put) -- no divide-by-zero like gamma would hit."""
+    if T <= 0 or sigma <= 0 or F <= 0 or K <= 0:
+        if option_type == "CE":
+            return 1.0 if F > K else 0.0
+        return -1.0 if F < K else 0.0
+    d1 = (math.log(F / K) + 0.5 * sigma * sigma * T) / (sigma * math.sqrt(T))
+    df = math.exp(-r * T)
+    if option_type == "CE":
+        return df * _norm_cdf(d1)
+    else:
+        return -df * _norm_cdf(-d1)
+
+
 def _vega76(F: float, K: float, T: float, r: float, sigma: float) -> float:
     if T <= 0 or sigma <= 0 or F <= 0 or K <= 0:
         return 0.0

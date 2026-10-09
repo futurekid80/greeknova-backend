@@ -35,7 +35,7 @@ import math
 
 from api.uoa import is_market_hours, is_post_market
 from services.black_scholes import (
-    implied_vol76, bs76_gamma, bs76_theta_per_day, bs76_vega_per_point, _norm_cdf,
+    implied_vol76, bs76_gamma, bs76_delta, bs76_theta_per_day, bs76_vega_per_point, _norm_cdf,
 )
 from utils.market_calendar import trading_days_between
 from services.fno_universe import LOT_SIZES
@@ -556,6 +556,7 @@ def _compute_gamma_exposure(date: str = None):
         theta_strike: dict = {}   # strike -> {"CE": Rs/day decaying, "PE": ...}  (|theta| x OI)
         vega_strike: dict = {}    # strike -> {"CE": Rs per 1 IV point, "PE": ...} (vega x OI)
         greek_by_strike: dict = {}  # strike -> {opt: (|theta|/share/day, vega/share/pt, premium)}
+        delta_strike: dict = {}   # strike -> {"CE": +delta x OI, "PE": -delta x OI (signed)}
         for r in chain:
             strike = float(r["strike"])
             if abs(strike - spot) / spot > MAX_STRIKE_MONEYNESS:
@@ -573,6 +574,12 @@ def _compute_gamma_exposure(date: str = None):
             per_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})
             per_strike[strike][opt] += gex
             iv_by_strike.setdefault(strike, {})[opt] = iv
+            # DEX (delta exposure): signed delta x OI at this strike -- CE
+            # delta is +ve, PE delta is already -ve, so summing CE+PE below
+            # gives a signed net directional exposure (same OI-weighting
+            # convention as net_gex, not an actual observed dealer book).
+            dlt = bs76_delta(F, strike, T, RISK_FREE_RATE, iv, opt)
+            delta_strike.setdefault(strike, {"CE": 0.0, "PE": 0.0})[opt] += dlt * oi
             # Theta / Vega on the same solved IV (Sep 26 2026). oi is in shares.
             _th = abs(bs76_theta_per_day(F, strike, T, RISK_FREE_RATE, iv, opt))
             _vg = bs76_vega_per_point(F, strike, T, RISK_FREE_RATE, iv)
@@ -647,6 +654,24 @@ def _compute_gamma_exposure(date: str = None):
         net_gex_near_spot_rupees_cr = (
             round(local_net_gex * spot * spot * 0.01 / RUPEE_SCALE, 2)
             if lot_size else None
+        )
+
+        # ── DEX (delta exposure): the companion number to GEX. GEX tells
+        # you whether a move will accelerate (short gamma) or get damped
+        # (long gamma); it says nothing about which direction the existing
+        # option OI is already leaning, or whether fresh hedging flow from
+        # a wall-break is genuine new pressure vs. just closing out delta
+        # dealers already owed. net_dex is the same OI-weighted sum as
+        # net_gex, swapping gamma for signed delta. Tracked over time (see
+        # gex_regime_log persistence below) as "delta flow" -- a large
+        # swing in net_dex while price crosses a wall is real hedge-driven
+        # pressure; a flat net_dex despite the wall breaking means fresh
+        # writing (reload) is absorbing it as fast as it comes, which is
+        # the "squeeze through the wall, no rally" case from Oct 9 2026.
+        net_dex_per_strike = {k: (v["CE"] + v["PE"]) for k, v in delta_strike.items()}
+        net_dex = sum(net_dex_per_strike.values())
+        local_net_dex = sum(
+            v for k, v in net_dex_per_strike.items() if abs(k - spot) / spot <= LOCAL_BAND_PCT
         )
 
         # ── Flip point: walk strikes low -> high, collect every sign
@@ -979,6 +1004,8 @@ def _compute_gamma_exposure(date: str = None):
             "local_flip_point": local_flip_point,
             "net_gex": round(net_gex, 2),
             "net_gex_near_spot": round(local_net_gex, 2),
+            "net_dex": round(net_dex, 2),
+            "net_dex_near_spot": round(local_net_dex, 2),
             "lot_size": lot_size,
             "net_gex_rupees_cr": net_gex_rupees_cr,
             "net_gex_near_spot_rupees_cr": net_gex_near_spot_rupees_cr,
@@ -1099,6 +1126,8 @@ def _compute_gamma_exposure(date: str = None):
                 "regime": r["regime"],
                 "net_gex": r["net_gex"],
                 "net_gex_near_spot": r["net_gex_near_spot"],
+                "net_dex": r["net_dex"],
+                "net_dex_near_spot": r["net_dex_near_spot"],
                 "call_wall_strike": r["call_wall_strike"],
                 "put_wall_strike": r["put_wall_strike"],
                 "flip_point": r["flip_point"],
@@ -1148,7 +1177,7 @@ def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
 
     rows = (
         supabase.from_("gex_regime_log")
-        .select("as_of_data_ts,cmp,regime,net_gex,net_gex_near_spot,call_wall_strike,put_wall_strike")
+        .select("as_of_data_ts,cmp,regime,net_gex,net_gex_near_spot,net_dex,net_dex_near_spot,call_wall_strike,put_wall_strike")
         .eq("symbol", symbol)
         .gte("as_of_data_ts", f"{today}T00:00:00+00:00")
         .lt("as_of_data_ts", f"{today}T23:59:59+00:00")
@@ -1165,6 +1194,7 @@ def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
             "regime": r.get("regime"),
             "net_gex": r.get("net_gex"),
             "net_gex_near_spot": r.get("net_gex_near_spot"),
+            "net_dex_near_spot": r.get("net_dex_near_spot"),
             "call_wall_strike": r.get("call_wall_strike"),
             "put_wall_strike": r.get("put_wall_strike"),
         }
@@ -1182,9 +1212,55 @@ def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
             return "flat"
         return "up" if last > first else "down"
 
+    def _dex_trend(values, flat_frac: float = 0.15):
+        """Like _trend, but for a continuous float where exact equality
+        never happens -- 'flat' means the move from first to last is small
+        relative to the swing seen across the whole window (not a fixed
+        absolute threshold, since DEX scale varies a lot by symbol/day)."""
+        vals = [v for v in values if v is not None]
+        if len(vals) < 2:
+            return None
+        first, last = vals[0], vals[-1]
+        span = max(vals) - min(vals)
+        if span == 0:
+            return "flat"
+        if abs(last - first) / span < flat_frac:
+            return "flat"
+        return "up" if last > first else "down"
+
     call_walls = [p["call_wall_strike"] for p in points]
     put_walls = [p["put_wall_strike"] for p in points]
     net_gex_vals = [p["net_gex_near_spot"] for p in points]
+    net_dex_vals = [p["net_dex_near_spot"] for p in points]
+    net_dex_trend = _dex_trend(net_dex_vals)
+
+    # ── Delta flow classification (Oct 9 2026): the GEX+DEX combo meant to
+    # answer "price crossed the wall and dealers are short gamma -- so why
+    # didn't it rally?" directly, instead of needing a one-off diagnostic.
+    # A real squeeze needs BOTH short gamma (dealers forced to chase) AND
+    # a genuine swing in net_dex near spot (actual fresh directional hedge
+    # flow, not just existing delta being closed out). If the call wall is
+    # pinned/reloading at the same strike while net_dex barely moves, that's
+    # writers absorbing the move as fast as it comes -- the Oct 9 case.
+    dex_vals_clean = [v for v in net_dex_vals if v is not None]
+    dex_swing = (max(dex_vals_clean) - min(dex_vals_clean)) if len(dex_vals_clean) >= 2 else None
+    call_wall_pinned_count = (
+        sum(1 for v in call_walls if v is not None and v == call_walls[-1])
+        if call_walls and call_walls[-1] is not None else 0
+    )
+    latest_regime = points[-1]["regime"] if points else None
+
+    delta_flow = None  # "building" | "absorbed" | None (not enough data / not short gamma)
+    if latest_regime == "SHORT_GAMMA" and net_dex_trend is not None:
+        # Wall reloading at the same strike while delta barely shifts ->
+        # absorbed. Wall moving/thinning while delta genuinely swings in
+        # the direction of the move -> building (real squeeze fuel).
+        if call_wall_pinned_count >= max(3, len(points) // 2) and net_dex_trend == "flat":
+            delta_flow = "absorbed"
+        elif net_dex_trend != "flat":
+            delta_flow = "building"
+        else:
+            delta_flow = "absorbed"
 
     return {
         "symbol": symbol,
@@ -1193,13 +1269,13 @@ def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
         "call_wall_trend": _trend(call_walls),
         "put_wall_trend": _trend(put_walls),
         "net_gex_trend": _trend(net_gex_vals),
+        "net_dex_trend": net_dex_trend,
+        "net_dex_swing": round(dex_swing, 2) if dex_swing is not None else None,
+        "delta_flow": delta_flow,
         # how many of the last readings sat at the SAME call-wall strike as
         # the most recent one -- a high count here is the "writers reloading
         # at the same level" signal even while price keeps testing it.
-        "call_wall_pinned_count": (
-            sum(1 for v in call_walls if v is not None and v == call_walls[-1])
-            if call_walls and call_walls[-1] is not None else 0
-        ),
+        "call_wall_pinned_count": call_wall_pinned_count,
     }
 
 
