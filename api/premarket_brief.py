@@ -18,7 +18,19 @@ from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor
 
 
-def _get_gift_nifty():
+def _get_gift_nifty(supabase, last_trading_day: str):
+    # Oct 9 2026 fix: this used to diff GIFT Nifty's LTP against Kite's own
+    # `ohlc.close` field for the GIFT NIFTY instrument -- but GIFT Nifty
+    # trades almost round-the-clock (it doesn't cleanly close/reopen like
+    # NSE cash does), so that field is NOT a reliable "yesterday's close"
+    # -- it was quietly returning a near-current value, making every gap
+    # look like ~0% ("Flattish open expected") even on a real gap morning
+    # (confirmed live: GIFT Nifty +116.5/+0.52% per sgxnifty.org showed as
+    # +8.00/+0.04% here). The whole POINT of this card is "what gap should
+    # I expect at 9:15am", which is a comparison against NIFTY's actual
+    # prior CASH close -- so use spot_daily_bars (same source the VRP
+    # scanner's gap-iv-scan already trusts for this exact comparison)
+    # instead of trusting GIFT Nifty's own self-reported OHLC.
     try:
         from services.kite_auth import get_kite_client
         kite = get_kite_client()
@@ -27,7 +39,25 @@ def _get_gift_nifty():
         if not d:
             return None
         ltp = d.get("last_price", 0)
-        prev_close = d.get("ohlc", {}).get("close", 0)
+        if not ltp:
+            return None
+
+        prev_close = None
+        try:
+            bar_q = supabase.from_("spot_daily_bars")\
+                .select("close").eq("symbol", "NIFTY")\
+                .eq("trade_date", last_trading_day)\
+                .limit(1).execute()
+            if bar_q.data:
+                prev_close = float(bar_q.data[0]["close"])
+        except Exception as e:
+            print(f"[Premarket] GIFT Nifty prev-close lookup failed: {e}")
+
+        if not prev_close:
+            # Fall back to GIFT Nifty's own OHLC close rather than showing
+            # nothing -- worse precision, but still better than no number.
+            prev_close = d.get("ohlc", {}).get("close", 0)
+
         change = round(ltp - prev_close, 2) if prev_close else 0
         pct = round(change / prev_close * 100, 2) if prev_close else 0
         return {
@@ -181,7 +211,7 @@ def get_premarket_brief(supabase) -> dict:
         return index_levels
 
     with ThreadPoolExecutor(max_workers=5) as ex:
-        f_gift        = ex.submit(_get_gift_nifty)
+        f_gift        = ex.submit(_get_gift_nifty, supabase, last_trading_day)
         f_commodities = ex.submit(_get_commodities)
         f_fii_dii     = ex.submit(_fetch_fii_dii)
         f_conviction  = ex.submit(_fetch_overnight_conviction)
