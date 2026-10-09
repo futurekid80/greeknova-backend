@@ -672,6 +672,33 @@ def _compute_gamma_exposure(date: str = None):
             if abs(nearest - spot) / spot <= 0.06:  # only report a flip that's plausibly in play
                 flip_point = nearest
 
+        # ── Local flip point: a second, looser number alongside the
+        # cumulative one above. Instead of a running total across the whole
+        # chain, this looks only at each strike's OWN net GEX (CE - PE at
+        # that strike) and finds where that single-strike sign changes
+        # nearest spot. This is the "nearest wall crossover" definition most
+        # public GEX dashboards (e.g. Fyers' Gamma Flip) show, and it will
+        # often report a value on days the stricter cumulative flip_point
+        # stays null (e.g. a deep short-gamma day where far-OTM put OI keeps
+        # the running total negative across the whole chain). It's noisier
+        # strike-to-strike and is NOT used for regime classification -- it's
+        # a display/comparison field only.
+        local_flip_point = None
+        local_crossings = []
+        prev_k, prev_net = None, None
+        for k in strikes_sorted:
+            net = net_per_strike[k]
+            if prev_net is not None and ((prev_net < 0 <= net) or (prev_net > 0 >= net)):
+                span = k - prev_k
+                if span > 0 and (net - prev_net) != 0:
+                    frac = (0 - prev_net) / (net - prev_net)
+                    local_crossings.append(round(prev_k + frac * span, 2))
+                else:
+                    local_crossings.append(k)
+            prev_k, prev_net = k, net
+        if local_crossings:
+            local_flip_point = min(local_crossings, key=lambda f: abs(f - spot))
+
         call_wall_strike = call_wall[0] if call_wall else None
         call_wall_gamma_oi = round(call_wall[1]["CE"], 2) if call_wall else None
         put_wall_strike = put_wall[0] if put_wall else None
@@ -949,6 +976,7 @@ def _compute_gamma_exposure(date: str = None):
             "put_wall_gamma_oi": put_wall_gamma_oi,
             "strike_ladder": strike_ladder,
             "flip_point": flip_point,
+            "local_flip_point": local_flip_point,
             "net_gex": round(net_gex, 2),
             "net_gex_near_spot": round(local_net_gex, 2),
             "lot_size": lot_size,
@@ -1281,6 +1309,23 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         if abs(nearest - spot) / spot <= 0.06:
             flip_point = nearest
 
+    # Local flip point -- see the matching comment in _compute_gamma_exposure.
+    local_flip_point = None
+    local_crossings = []
+    prev_k, prev_net = None, None
+    for k in strikes_sorted:
+        net = net_per_strike[k]
+        if prev_net is not None and ((prev_net < 0 <= net) or (prev_net > 0 >= net)):
+            span = k - prev_k
+            if span > 0 and (net - prev_net) != 0:
+                frac = (0 - prev_net) / (net - prev_net)
+                local_crossings.append(round(prev_k + frac * span, 2))
+            else:
+                local_crossings.append(k)
+        prev_k, prev_net = k, net
+    if local_crossings:
+        local_flip_point = min(local_crossings, key=lambda f: abs(f - spot))
+
     strikes_out = [
         {
             "strike": k,
@@ -1300,6 +1345,7 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         "call_wall_strike": call_wall[0] if call_wall else None,
         "put_wall_strike": put_wall[0] if put_wall else None,
         "flip_point": flip_point,
+        "local_flip_point": local_flip_point,
         "strikes": strikes_out,
         "as_of": ts_new,
     }
