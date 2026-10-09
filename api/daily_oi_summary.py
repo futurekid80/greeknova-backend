@@ -353,7 +353,31 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
                 fut_oi_chg_map_next[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
 
         # ── Add fut_vol, fut_oi_chg_pct (+next), fut_oi_close (+next), fut_signal ───
+        # BUG FIX (Oct 9 2026): this loop used to run unconditionally and
+        # always set row["fut_price_chg_pct"] etc, even when fut_open_res/
+        # fut_close_res came back with zero rows (e.g. this job firing mid
+        # deploy-cutover, right as the old process is being replaced, or any
+        # other transient query hiccup). Since the write below is an upsert
+        # that replaces the whole row, a single bad run would silently null
+        # out a PREVIOUSLY GOOD fut_price_chg_pct for every symbol that day --
+        # and because Stealth Buildup's post-market branch in
+        # positional_intelligence.py treats a None fut_price_chg_pct as
+        # "skip this stock", the entire Stealth Buildup panel would quietly
+        # go empty for the rest of the day with no error anywhere. On a
+        # normal trading day both snapshot queries return hundreds of rows,
+        # so an empty result here is itself the signal something's wrong --
+        # skip the FUT-derived fields (leave existing values untouched)
+        # rather than writing nulls over good data.
+        skip_fut_fields = not (fut_open_res.data and fut_close_res.data)
+        if skip_fut_fields:
+            print(f"[DAILY_OI_SUMMARY] WARNING: FUT open/close snapshot query came back "
+                  f"empty (open={len(fut_open_res.data or [])} rows, "
+                  f"close={len(fut_close_res.data or [])} rows) for {trade_date} -- "
+                  f"skipping fut_price_chg_pct/fut_oi_chg_pct/fut_signal this run so "
+                  f"existing values aren't overwritten with nulls.")
         for row in rows:
+            if skip_fut_fields:
+                continue
             sym = row["symbol"]
             fut_oi = fut_oi_chg_map.get(sym, 0)
             # BUG FIX (Oct 5 2026): this used to overwrite row["price_chg_pct"]
