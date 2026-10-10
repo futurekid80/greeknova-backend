@@ -33,7 +33,17 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         .limit(1).execute()
 
     if not ts_q.data:
-        return {"error": f"No data for {symbol} on {date}"}
+        # BUG FIX (Oct 10 2026): this error dict was missing "symbol". The
+        # frontend only applies a fetch result when json.symbol === the
+        # symbol it asked for (a guard against a slow stale request landing
+        # after a newer one) -- with no "symbol" key here that check always
+        # failed for a genuinely-empty symbol (e.g. MIDCPNIFTY on its first
+        # weekend before any trading day has captured data for it), so the
+        # page silently kept showing whatever symbol was on screen before
+        # the click instead of this error. Confirmed live: clicking
+        # MIDCPNIFTY left NIFTY's numbers on screen with no indication
+        # anything had failed.
+        return {"error": f"No data for {symbol} on {date}", "symbol": symbol}
 
     eod_ts = ts_q.data[0]["timestamp"]
 
@@ -84,7 +94,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     all_rows_unfiltered = list(latest_by_key.values())
 
     if not all_rows_unfiltered:
-        return {"error": "No OI data found"}
+        return {"error": "No OI data found", "symbol": symbol}
 
     today_str = date_type.today().isoformat()
     expiries = sorted(set(
@@ -157,7 +167,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
                        if (ce_oi.get(s, 0) + pe_oi.get(s, 0)) >= threshold]
 
     if not all_strikes:
-        return {"error": "No strike data"}
+        return {"error": "No strike data", "symbol": symbol}
 
     atm_strike = min(all_strikes, key=lambda s: abs(s - cmp)) if cmp else None
 
