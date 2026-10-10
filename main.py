@@ -12,7 +12,7 @@ from commoditynova.mcx_oi_map_router import router as mcx_oi_map_router
 from api.daily_oi_summary import compute_daily_summary
 
 
-INDICES = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"]
+INDICES = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","SENSEX"]
 # BUG FIX (Aug 27 2026): TOP30 was a hardcoded, independently-maintained
 # copy of the symbol list -- this is the list that actually drives the
 # live options-chain capture loop (INDICES + TOP30), so every time a new
@@ -36,7 +36,7 @@ from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
 # tuple would have silently left it tracked as if it were a STOCK (wrong
 # spot symbol, wrong strike interval). Now derives from INDICES directly.
 TOP30 = [s for s in _ALL_SYMBOLS if s not in INDICES]
-INDEX_NSE_MAP = {"NIFTY":"NSE:NIFTY 50","BANKNIFTY":"NSE:NIFTY BANK","FINNIFTY":"NSE:NIFTY FIN SERVICE","MIDCPNIFTY":"NSE:NIFTY MID SELECT"}
+INDEX_NSE_MAP = {"NIFTY":"NSE:NIFTY 50","BANKNIFTY":"NSE:NIFTY BANK","FINNIFTY":"NSE:NIFTY FIN SERVICE","MIDCPNIFTY":"NSE:NIFTY MID SELECT","SENSEX":"BSE:SENSEX"}
 STOCK_NSE_MAP = {s: f"NSE:{s}" for s in TOP30}
 # BUG FIX (Sep 12 2026): this was an independently hardcoded dict (same
 # class of bug flagged in the TOP30 comment above -- it happened again:
@@ -104,6 +104,17 @@ def run_full_capture():
         except Exception as e: print(f"  ⚠️ Stock CMP: {e}")
 
         instruments = kite.instruments("NFO")
+        # Oct 2026: SENSEX trades on BSE's F&O segment (BFO), not NFO --
+        # every other tracked symbol does. Pull that segment's instrument
+        # dump too so SENSEX's own options/futures are findable below by
+        # the same `i["name"] == symbol` match used for everything else.
+        # Best-effort: if this fails, SENSEX just gets skipped this cycle
+        # (the `if not found: continue` below already handles that) rather
+        # than failing the whole capture run.
+        try:
+            instruments = instruments + kite.instruments("BFO")
+        except Exception as e:
+            print(f"  ⚠️ BFO instruments fetch failed (SENSEX capture skipped this cycle): {e}")
 
         for symbol in INDICES + TOP30:
             is_index = symbol in INDICES
@@ -168,9 +179,15 @@ def run_full_capture():
                 # Add FUT instruments for nearest expiries
                 for exp in fut_expiries[:num_expiries]:
                     nearest.extend([i for i in fut_instruments if i["expiry"] == exp])
-                quotes = kite.quote(["NFO:" + i["tradingsymbol"] for i in nearest])
+                # BUG FIX (Oct 2026): was a hardcoded "NFO:" prefix, which
+                # silently produced zero matches for SENSEX (its contracts
+                # quote as "BFO:SENSEX..."). Each instrument dict already
+                # carries its own correct exchange (from whichever of the
+                # NFO/BFO dumps above it came from), so use that instead of
+                # assuming NFO for everything.
+                quotes = kite.quote([f"{i['exchange']}:{i['tradingsymbol']}" for i in nearest])
                 for inst in nearest:
-                    key = f"NFO:{inst['tradingsymbol']}"
+                    key = f"{inst['exchange']}:{inst['tradingsymbol']}"
                     if key in quotes:
                         q = quotes[key]
                         records.append({
@@ -2054,7 +2071,7 @@ def index_data():
                 return supabase.from_("oi_snapshots")\
                     .select("symbol,strike,option_type,oi,volume,last_price,expiry")\
                     .eq("timestamp", ts)\
-                    .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"])\
+                    .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","SENSEX"])\
                     .range(rng[0], rng[1])\
                     .execute()
             try:
@@ -2755,7 +2772,7 @@ def stealth_buildup():
             seen.add(r["symbol"])
 
     # ── Fetch ATM±5 strikes CE/PE OI for last trading day ────────────────
-    STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25}
+    STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25, "SENSEX": 100}
 
     oi_res = supabase.from_("oi_snapshots")\
         .select("symbol, strike, option_type, oi, expiry, timestamp")\

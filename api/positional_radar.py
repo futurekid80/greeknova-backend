@@ -557,7 +557,7 @@ def get_positional_radar(min_consec: int = 0):
 
         results.append({
             "symbol":              sym,
-            "is_index":            sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
+            "is_index":            sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"],
             "signal":              signal,
             "bias":                bias,
             "conviction_level":    conviction_display["level"],

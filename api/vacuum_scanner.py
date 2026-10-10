@@ -208,7 +208,7 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
             results.append({
                 "symbol":        symbol,
                 "cmp":           cmp,
-                "is_index":      symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
+                "is_index":      symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"],
                 "vacuums":       vacuums,
                 "nearest_above": above[0] if above else None,
                 "nearest_below": below[0] if below else None,
@@ -223,7 +223,7 @@ def get_vacuum_scanner(max_distance_pct: float = 10.0):
             approaching.append({
                 "symbol":       symbol,
                 "cmp":          cmp,
-                "is_index":     symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
+                "is_index":     symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"],
                 "nearest_zone": nearest,
                 "all_zones":    near_zones,
                 "expiry":       active_expiry,

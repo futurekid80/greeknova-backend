@@ -18,7 +18,7 @@ import pytz
 IST = pytz.timezone("Asia/Kolkata")
 
 STRIKE_INTERVALS = {
-    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25,
+    "NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25, "SENSEX": 100,
 }
 DEFAULT_INTERVAL = 5
 

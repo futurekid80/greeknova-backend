@@ -1113,8 +1113,10 @@ def _compute_gamma_exposure(date: str = None):
     # gex_signal_log can't show: it only has rows for squeeze-candidate
     # moments, so an index sitting in LONG_GAMMA for hours/days is invisible
     # in it. Scoped to the indices only -- cheap, and these are the
-    # ones worth a regime history for. MIDCPNIFTY added Oct 10 2026.
-    INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+    # ones worth a regime history for. MIDCPNIFTY and SENSEX added Oct 10
+    # 2026 (SENSEX trades on BFO, not NFO, but this log only reads the
+    # already-computed symbols_out rows -- no segment-specific code here).
+    INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
     try:
         regime_rows = [
             {
@@ -1157,7 +1159,7 @@ def _compute_gamma_exposure(date: str = None):
 # refresh cycle for the three indices (see the "always-on regime log" block
 # above) -- this just reads that existing history back out instead of
 # needing a new table or a new capture job.
-WALL_TREND_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
+WALL_TREND_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"}
 
 
 def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):

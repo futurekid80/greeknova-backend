@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta, date as date_type
 import time
 import time as time_module
 
-INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 # BUG FIX (Aug 26 2026): STOCKS and STOCK_NSE_MAP were both hardcoded,
 # independently-maintained copies that would silently drift out of sync
 # every time a symbol got added elsewhere. Now derived from the single
@@ -16,6 +16,7 @@ INDEX_NSE_MAP = {
     "BANKNIFTY":"NSE:NIFTY BANK",
     "FINNIFTY": "NSE:NIFTY FIN SERVICE",
     "MIDCPNIFTY":"NSE:NIFTY MID SELECT",
+    "SENSEX":   "BSE:SENSEX",
 }
 STOCK_NSE_MAP = {s: f"NSE:{s}" for s in STOCKS}
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
@@ -220,6 +221,8 @@ def compute_and_store_cpr(trade_date: str = None):
         "NIFTY":     256265,
         "BANKNIFTY": 260105,
         "FINNIFTY":  257801,
+        "MIDCPNIFTY":288009,
+        "SENSEX":    265,
     }
     token_map: dict = {**INDEX_TOKENS}
     try:
@@ -374,6 +377,8 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
         "NIFTY":     256265,
         "BANKNIFTY": 260105,
         "FINNIFTY":  257801,
+        "MIDCPNIFTY":288009,
+        "SENSEX":    265,
     }
     token_map = {**INDEX_TOKENS}
     try:

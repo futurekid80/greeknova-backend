@@ -62,6 +62,8 @@ INDEX_TOKENS = {
     "NIFTY":     256265,
     "BANKNIFTY": 260105,
     "FINNIFTY":  257801,
+    "MIDCPNIFTY":288009,
+    "SENSEX":    265,
 }
 
 

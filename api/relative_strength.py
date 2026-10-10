@@ -5,12 +5,13 @@ from datetime import datetime, timezone
 # elsewhere. Now derived from the single canonical list so it can't drift
 # again.
 from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
-STOCK_NSE_MAP = {s: f"NSE:{s}" for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")}
+STOCK_NSE_MAP = {s: f"NSE:{s}" for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX")}
 INDEX_NSE_MAP = {
     "NIFTY":     "NSE:NIFTY 50",
     "BANKNIFTY": "NSE:NIFTY BANK",
     "FINNIFTY":  "NSE:NIFTY FIN SERVICE",
     "MIDCPNIFTY":"NSE:NIFTY MID SELECT",
+    "SENSEX":    "BSE:SENSEX",
 }
 
 def get_relative_strength(benchmark: str = "NIFTY"):

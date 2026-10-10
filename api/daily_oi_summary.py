@@ -38,7 +38,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             kite = get_kite_client()
             instruments = kite.instruments("NSE")
             token_map = {}
-            INDEX_TOKENS = {"NIFTY": 256265, "BANKNIFTY": 260105, "FINNIFTY": 257801, "MIDCPNIFTY": 288009}
+            INDEX_TOKENS = {"NIFTY": 256265, "BANKNIFTY": 260105, "FINNIFTY": 257801, "MIDCPNIFTY": 288009, "SENSEX": 265}
             token_map.update(INDEX_TOKENS)
             for inst in instruments:
                 if inst["tradingsymbol"] in SYMBOLS:
@@ -75,7 +75,7 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             import time as _time
             kite = get_kite_client()
             instruments = kite.instruments("NSE")
-            token_map = {**{"NIFTY": 256265, "BANKNIFTY": 260105, "FINNIFTY": 257801, "MIDCPNIFTY": 288009}}
+            token_map = {**{"NIFTY": 256265, "BANKNIFTY": 260105, "FINNIFTY": 257801, "MIDCPNIFTY": 288009, "SENSEX": 265}}
             for inst in instruments:
                 if inst["tradingsymbol"] in SYMBOLS:
                     token_map[inst["tradingsymbol"]] = inst["instrument_token"]

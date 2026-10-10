@@ -123,7 +123,7 @@ def get_eod_report(supabase, date: str = None):
         iv_res = supabase.from_("iv_history")\
             .select("symbol, atm_iv, atm_ce_iv, atm_pe_iv, dte")\
             .eq("trade_date", date)\
-            .in_("symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])\
+            .in_("symbol", ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"])\
             .execute()
         iv_data = {r["symbol"]: r for r in (iv_res.data or [])}
     except:

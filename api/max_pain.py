@@ -118,7 +118,7 @@ def get_max_pain_all():
             "days_to_expiry": days_to_expiry,
             "expiry": expiry_str[:10] if expiry_str else None,
             "pcr": pcr,
-            "is_index": symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
+            "is_index": symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"],
             "direction": "ABOVE" if cmp > max_pain else "BELOW",
         })
     

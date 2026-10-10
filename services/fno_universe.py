@@ -11,7 +11,7 @@ F&O contracts, got nothing back, and silently produced a gap. This module
 asks Kite directly instead, so that gap can't happen again.
 """
 
-INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"]
 
 # LOT_SIZES: symbol -> current NSE lot size, sourced live from Kite's NFO
 # instrument dump (the only place lot sizes actually live -- NSE revises
@@ -26,13 +26,25 @@ def refresh_lot_sizes():
     """Refetches current lot sizes for every live F&O stock from Kite and
     updates LOT_SIZES in place. Never raises -- leaves the existing map
     untouched on any failure, same fail-safe pattern as
-    get_live_fno_symbols_debug() above."""
+    get_live_fno_symbols_debug() above.
+
+    Oct 2026: also pulls BFO (BSE F&O -- SENSEX, not NFO) so SENSEX's lot
+    size populates here the same automatic way every NFO symbol's does,
+    instead of needing its own hardcoded entry. Best-effort -- a BFO fetch
+    failure just means SENSEX's lot size doesn't refresh this cycle, same
+    as any other single symbol would fail silently; doesn't block the NFO
+    half."""
     try:
         from services.kite_auth import get_kite_client
         kite = get_kite_client()
         nfo_instruments = kite.instruments("NFO")
+        try:
+            bfo_instruments = kite.instruments("BFO")
+        except Exception as e:
+            print(f"[fno_universe] BFO instruments fetch failed (SENSEX lot size won't refresh this cycle): {e}")
+            bfo_instruments = []
         fresh: dict = {}
-        for i in nfo_instruments:
+        for i in nfo_instruments + bfo_instruments:
             if i.get("instrument_type") not in ("CE", "PE", "FUT"):
                 continue
             name = i.get("name")
