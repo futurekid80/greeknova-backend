@@ -1,4 +1,4 @@
-"""Intraday straddle premium chart — NIFTY/BANKNIFTY/FINNIFTY only for now.
+"""Intraday straddle premium chart — NIFTY/BANKNIFTY/FINNIFTY/MIDCPNIFTY only for now.
 
 Different job from Strategy Builder's straddle payoff diagram (which shows
 P&L *at expiry* across a price range, computed client-side from a single
@@ -23,8 +23,8 @@ def get_straddle_chart(symbol: str = "NIFTY", strike: float = None, expiry: str 
     supabase = get_supabase()
 
     symbol = symbol.upper()
-    if symbol not in ("NIFTY", "BANKNIFTY", "FINNIFTY"):
-        return {"error": "Straddle Chart currently supports NIFTY, BANKNIFTY, FINNIFTY only"}
+    if symbol not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"):
+        return {"error": "Straddle Chart currently supports NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY only"}
 
     today = datetime.now(timezone.utc).date()
 

@@ -132,7 +132,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             nearest = nearest_expiry_map.get(sym)
             if nearest and exp == nearest:
                 filtered.append(r)
-            elif sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"]:
+            elif sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]:
                 # For indices allow all expiries (they have multiple active)
                 filtered.append(r)
         return filtered
@@ -218,7 +218,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             "cmp":           float(cmp),
             "last_price":    float(new_ltp),
             "ltp_chg_pct":   ltp_chg,
-            "is_index":      sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "is_index":      sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
             "is_otm":        is_otm,
             "otm_pct":       otm_pct,
             "volume":        new_vol,

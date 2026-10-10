@@ -104,7 +104,7 @@ RISK_FREE_RATE = 0.065  # 6.5% India 10yr Gsec
 # so staleness here is silent until that happens -- keep it in sync when you
 # notice drift, but the live fetch is the real source of truth.
 _FALLBACK_SYMBOLS = [
-    "NIFTY", "BANKNIFTY", "FINNIFTY",
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
     "360ONE","ABB","ABCAPITAL","ADANIENSOL","ADANIENT","ADANIGREEN","ADANIPORTS",
     "ADANIPOWER","ALKEM","AMBER","AMBUJACEM","ANANDRATHI","ANGELONE","APLAPOLLO","APOLLOHOSP",
     "ASHOKLEY","ASIANPAINT","ASTRAL","ATHERENERG","AUBANK","AUROPHARMA","AXISBANK",
@@ -612,7 +612,7 @@ def get_iv_analysis(symbol: str = None, date: str = None):
             "lower_range":         lower_range,
             "upper_range_2sd":     upper_range_2sd,
             "lower_range_2sd":     lower_range_2sd,
-            "is_index":            sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "is_index":            sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
         })
 
     # Sort by IVR descending

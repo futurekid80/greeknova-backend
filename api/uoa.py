@@ -15,11 +15,12 @@ UOA_CACHE_TTL = 240  # 4 minutes
 # elsewhere. Now derived from the single canonical list so it can't drift
 # again.
 from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
-STOCK_NSE_MAP = {s: f"NSE:{s}" for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY")}
+STOCK_NSE_MAP = {s: f"NSE:{s}" for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY")}
 INDEX_NSE_MAP = {
     "NIFTY": "NSE:NIFTY 50",
     "BANKNIFTY": "NSE:NIFTY BANK",
     "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+    "MIDCPNIFTY": "NSE:NIFTY MID SELECT",
 }
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}
 
@@ -430,7 +431,7 @@ def get_uoa(date: str = None):
             "bias":               bias,
             "score":              min(score, 5),
             "time_tag":           time_tag,
-            "is_index":           sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "is_index":           sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
             "day_high":           float(stock_day_high) if stock_day_high else None,
             "day_high_pct":       day_high_pct,
             "at_day_high":        at_day_high,

@@ -3,18 +3,19 @@ from datetime import datetime, timezone, timedelta, date as date_type
 import time
 import time as time_module
 
-INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
 # BUG FIX (Aug 26 2026): STOCKS and STOCK_NSE_MAP were both hardcoded,
 # independently-maintained copies that would silently drift out of sync
 # every time a symbol got added elsewhere. Now derived from the single
 # canonical list so they can't drift again.
 from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
-STOCKS = [s for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY")]
+STOCKS = [s for s in _ALL_SYMBOLS if s not in INDICES]
 
 INDEX_NSE_MAP = {
     "NIFTY":    "NSE:NIFTY 50",
     "BANKNIFTY":"NSE:NIFTY BANK",
     "FINNIFTY": "NSE:NIFTY FIN SERVICE",
+    "MIDCPNIFTY":"NSE:NIFTY MID SELECT",
 }
 STOCK_NSE_MAP = {s: f"NSE:{s}" for s in STOCKS}
 ALL_NSE_MAP = {**INDEX_NSE_MAP, **STOCK_NSE_MAP}

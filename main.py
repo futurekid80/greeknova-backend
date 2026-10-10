@@ -12,7 +12,7 @@ from commoditynova.mcx_oi_map_router import router as mcx_oi_map_router
 from api.daily_oi_summary import compute_daily_summary
 
 
-INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
+INDICES = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"]
 # BUG FIX (Aug 27 2026): TOP30 was a hardcoded, independently-maintained
 # copy of the symbol list -- this is the list that actually drives the
 # live options-chain capture loop (INDICES + TOP30), so every time a new
@@ -29,8 +29,14 @@ INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
 #   positional_radar.py/iv_analysis.py but missed here, capping live
 #   capture at 80 symbols instead of 100"
 from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
-TOP30 = [s for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY")]
-INDEX_NSE_MAP = {"NIFTY":"NSE:NIFTY 50","BANKNIFTY":"NSE:NIFTY BANK","FINNIFTY":"NSE:NIFTY FIN SERVICE"}
+# BUG FIX (Oct 10 2026): was excluding its own separately-hardcoded
+# ("NIFTY", "BANKNIFTY", "FINNIFTY") tuple instead of the INDICES list
+# defined two lines above -- the exact drift risk the Aug 27 fix above was
+# trying to close. Adding MIDCPNIFTY to INDICES without also catching this
+# tuple would have silently left it tracked as if it were a STOCK (wrong
+# spot symbol, wrong strike interval). Now derives from INDICES directly.
+TOP30 = [s for s in _ALL_SYMBOLS if s not in INDICES]
+INDEX_NSE_MAP = {"NIFTY":"NSE:NIFTY 50","BANKNIFTY":"NSE:NIFTY BANK","FINNIFTY":"NSE:NIFTY FIN SERVICE","MIDCPNIFTY":"NSE:NIFTY MID SELECT"}
 STOCK_NSE_MAP = {s: f"NSE:{s}" for s in TOP30}
 # BUG FIX (Sep 12 2026): this was an independently hardcoded dict (same
 # class of bug flagged in the TOP30 comment above -- it happened again:
@@ -2048,7 +2054,7 @@ def index_data():
                 return supabase.from_("oi_snapshots")\
                     .select("symbol,strike,option_type,oi,volume,last_price,expiry")\
                     .eq("timestamp", ts)\
-                    .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY"])\
+                    .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY"])\
                     .range(rng[0], rng[1])\
                     .execute()
             try:
@@ -2749,7 +2755,7 @@ def stealth_buildup():
             seen.add(r["symbol"])
 
     # ── Fetch ATM±5 strikes CE/PE OI for last trading day ────────────────
-    STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50}
+    STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25}
 
     oi_res = supabase.from_("oi_snapshots")\
         .select("symbol, strike, option_type, oi, expiry, timestamp")\

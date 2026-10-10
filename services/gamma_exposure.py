@@ -1112,9 +1112,9 @@ def _compute_gamma_exposure(date: str = None):
     # still leaves a trail of how regime/net_gex/walls drifted. That's what
     # gex_signal_log can't show: it only has rows for squeeze-candidate
     # moments, so an index sitting in LONG_GAMMA for hours/days is invisible
-    # in it. Scoped to the three indices only -- cheap, and these are the
-    # ones worth a regime history for. Best-effort, same as above.
-    INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+    # in it. Scoped to the indices only -- cheap, and these are the
+    # ones worth a regime history for. MIDCPNIFTY added Oct 10 2026.
+    INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
     try:
         regime_rows = [
             {
@@ -1157,7 +1157,7 @@ def _compute_gamma_exposure(date: str = None):
 # refresh cycle for the three indices (see the "always-on regime log" block
 # above) -- this just reads that existing history back out instead of
 # needing a new table or a new capture job.
-WALL_TREND_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY"}
+WALL_TREND_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"}
 
 
 def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
@@ -1167,10 +1167,10 @@ def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
     across multiple points means writers are re-anchoring the wall right
     where price tests it (squeeze likely to get absorbed); a wall strike
     that steps away from spot after a cross means the squeeze is real.
-    Scoped to NIFTY/BANKNIFTY/FINNIFTY only, matching gex_regime_log."""
+    Scoped to WALL_TREND_SYMBOLS, matching gex_regime_log."""
     symbol = symbol.upper()
     if symbol not in WALL_TREND_SYMBOLS:
-        return {"symbol": symbol, "points": [], "error": "wall trend is only tracked for NIFTY/BANKNIFTY/FINNIFTY"}
+        return {"symbol": symbol, "points": [], "error": f"wall trend is only tracked for {'/'.join(sorted(WALL_TREND_SYMBOLS))}"}
 
     supabase = get_supabase()
     today, _ts = _resolve_gex_day(supabase, symbol, date)

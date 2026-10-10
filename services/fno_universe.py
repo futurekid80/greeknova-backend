@@ -11,7 +11,7 @@ F&O contracts, got nothing back, and silently produced a gap. This module
 asks Kite directly instead, so that gap can't happen again.
 """
 
-INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY"]
+INDICES = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
 
 # LOT_SIZES: symbol -> current NSE lot size, sourced live from Kite's NFO
 # instrument dump (the only place lot sizes actually live -- NSE revises

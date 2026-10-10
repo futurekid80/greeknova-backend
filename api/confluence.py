@@ -207,7 +207,7 @@ def get_confluence():
             "pe_wall": pe_wall,
             "dist_ce": round(dist_ce, 1),
             "dist_pe": round(dist_pe, 1),
-            "is_index": symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+            "is_index": symbol in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
         })
 
     confluence_signals.sort(key=lambda x: (x["signal_count"], abs(x["pcr"] - 1)), reverse=True)
@@ -291,7 +291,7 @@ def get_confluence():
                 "oi_chg_pct": oi_chg,
                 "vol_confirms": vol_confirms,
                 "conviction": conviction,
-                "is_index": sym in ["NIFTY", "BANKNIFTY", "FINNIFTY"],
+                "is_index": sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"],
             })
 
         # Sort by absolute move size — biggest movers first
