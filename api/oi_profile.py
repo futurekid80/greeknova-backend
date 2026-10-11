@@ -1,9 +1,10 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
 from collections import defaultdict
+from services.strike_zones import strikes_away, in_zone
 
 
-def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
+def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, strike_zone: str = "all"):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).date()
 
@@ -169,6 +170,25 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     if not all_strikes:
         return {"error": "No strike data", "symbol": symbol}
 
+    # ── Strikes-away-from-ATM selector (Oct 11 2026 ask) ─────────────────────
+    # Measured against the FULL raw strike ladder (all_strikes_raw), not the
+    # already-%-trimmed all_strikes, so "ATM±1" always means the literal next
+    # listed strike regardless of how wide the default %-band happens to be.
+    strike_sa_map = {}
+    if cmp and cmp > 0 and all_strikes_raw:
+        sorted_raw = sorted(all_strikes_raw)
+        atm_strike_raw = min(sorted_raw, key=lambda s: abs(s - cmp))
+        fake_index_map = {symbol: {
+            "sorted_strikes": sorted_raw,
+            "atm_strike": atm_strike_raw,
+            "atm_idx": sorted_raw.index(atm_strike_raw),
+        }}
+        strike_sa_map = {s: strikes_away(symbol, s, fake_index_map) for s in all_strikes}
+        if strike_zone and strike_zone != "all":
+            all_strikes = [s for s in all_strikes if in_zone(strike_sa_map.get(s), strike_zone)]
+            if not all_strikes:
+                return {"error": f"No strikes in the selected zone ({strike_zone})", "symbol": symbol}
+
     atm_strike = min(all_strikes, key=lambda s: abs(s - cmp)) if cmp else None
 
     # Calculate metrics
@@ -234,6 +254,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
             "is_pe_wall":    s == pe_wall,
             "is_atm":        s == atm_strike,
             "in_value_area": in_value_area,
+            "strikes_away":  strike_sa_map.get(s),
         })
 
     # ── OPTIMIZED Wall Migration using RPC ────────────────────────────────────
@@ -424,6 +445,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None):
         "date":            date,
         "expiry":          active_expiry,
         "expiries":        expiries,
+        "strike_zone":     strike_zone,
         "cmp":             cmp,
         "atm_strike":      atm_strike,
         "poc_strike":      poc_strike,

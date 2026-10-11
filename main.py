@@ -1566,9 +1566,9 @@ def auto_refresh_token():
         print(f"❌ Railway auto-login failed: {e}")
 
 @app.get("/uoa")
-def uoa(date: str = None):
+def uoa(date: str = None, strike_zone: str = "all"):
     from api.uoa import get_uoa
-    return get_uoa(date)
+    return get_uoa(date, strike_zone)
 
 @app.get("/gamma-squeeze")
 def gamma_squeeze(date: str = None):
@@ -2108,9 +2108,9 @@ def index_data():
         return {"timestamp": None, "rows": [], "cmps": []}
 
 @app.get("/options-jungle")
-def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
+def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None, strike_zone: str = "all"):
     from api.options_jungle import get_options_jungle
-    return get_options_jungle(oi_threshold, vol_threshold, date)
+    return get_options_jungle(oi_threshold, vol_threshold, date, strike_zone)
 
 @app.get("/relative-strength")
 def relative_strength(benchmark: str = "NIFTY"):
@@ -2621,9 +2621,9 @@ def stock_signal_history(symbol: str, days: int = 20):
         return {"symbol": symbol.upper(), "history": [], "total": 0, "error": str(e)}
 
 @app.get("/oi-profile/{symbol}")
-def oi_profile(symbol: str, date: str = None, expiry: str = None):
+def oi_profile(symbol: str, date: str = None, expiry: str = None, strike_zone: str = "all"):
     from api.oi_profile import get_oi_profile
-    return get_oi_profile(symbol=symbol, date=date, expiry=expiry)
+    return get_oi_profile(symbol=symbol, date=date, expiry=expiry, strike_zone=strike_zone)
 
 @app.get("/straddle-chart/{symbol}")
 def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):

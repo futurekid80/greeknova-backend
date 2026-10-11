@@ -1,6 +1,7 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
 from services.technical_levels import compute_levels, confirmation_for
+from services.strike_zones import build_strike_index_map, strikes_away, in_zone
 
 # Persistence tracking — survives across calls within same process
 _oi_persistence: dict = {}   # tradingsymbol -> {"first_seen": ts, "snapshots": set, "all_snapshots": set, "last_date": str}
@@ -8,7 +9,7 @@ _vol_persistence: dict = {}
 _all_snapshots_today: set = set()  # all timestamps seen today
 _all_snapshots_date: str = ""
 
-def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
+def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None, strike_zone: str = "all"):
     global _oi_persistence, _vol_persistence
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -169,6 +170,10 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
     # to OI Spike signals below (e.g. Put Writing + price above PDH).
     tech_levels = compute_levels(supabase)
 
+    # Per-symbol "how many strikes away from ATM" lookup, for the
+    # ATM/±1/±2/±5/±10/All selector (Oct 11 2026).
+    strike_index_map = build_strike_index_map(new_data, cmp_map)
+
     def to_ist(ts):
         try:
             clean = ts.split('+')[0].split('Z')[0]
@@ -214,6 +219,10 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             is_otm  = False
             otm_pct = 0
 
+        sa = strikes_away(sym, strike, strike_index_map)
+        if not in_zone(sa, strike_zone):
+            continue
+
         base = {
             "symbol":        sym,
             "tradingsymbol": row["tradingsymbol"],
@@ -226,6 +235,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
             "is_index":      sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"],
             "is_otm":        is_otm,
             "otm_pct":       otm_pct,
+            "strikes_away":  sa,
             "volume":        new_vol,
             "oi":            new_oi,
         }
@@ -319,6 +329,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
         "snapshots":     len(timestamps),
         "oi_threshold":  oi_threshold,
         "vol_threshold": vol_threshold,
+        "strike_zone":   strike_zone,
         "oi_spikes":     oi_spikes[:100],
         "vol_spikes":    vol_spikes[:100],
         "oi_total":      len(oi_spikes),

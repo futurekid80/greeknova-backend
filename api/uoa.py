@@ -2,6 +2,7 @@ from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
 import time as time_module
 from services.technical_levels import compute_levels, confirmation_for_bias
+from services.strike_zones import build_strike_index_map, strikes_away, in_zone
 
 # Persistence cache
 _signal_history: dict = {}
@@ -45,14 +46,19 @@ def is_post_market() -> bool:
     total = now_utc.hour * 60 + now_utc.minute
     return total > MARKET_CLOSE_UTC
 
-def get_uoa(date: str = None):
+def get_uoa(date: str = None, strike_zone: str = "all"):
     global _uoa_cache, _uoa_cache_time
 
     # ── Cache check — skip expensive recompute if fresh ──────────────────────
+    # NOTE (Oct 11 2026): the cache stores the FULL, unsliced signal list
+    # (with strikes_away attached to every signal) under "all_signals" --
+    # zone filtering + the [:50] slice happen below on every call, cached or
+    # not, so switching the strike-zone selector never forces a recompute of
+    # the expensive DB scan, just a cheap in-memory filter of what's cached.
     cache_ttl = UOA_CACHE_TTL if is_market_hours() else 600
     if _uoa_cache and (time_module.time() - _uoa_cache_time) < cache_ttl:
-        print(f"[UOA] Returning cached result ({int(time_module.time() - _uoa_cache_time)}s old)")
-        return _uoa_cache
+        print(f"[UOA] Returning cached base ({int(time_module.time() - _uoa_cache_time)}s old)")
+        return _finalize_uoa_result(_uoa_cache, strike_zone)
 
     supabase = get_supabase()
     today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
@@ -233,6 +239,10 @@ def get_uoa(date: str = None):
     # Per-symbol 9/21 EMA + PDH/PDL/PWH/PWL, for the "confirmation" tag next
     # to each signal below (e.g. Put Writing + price above PDH).
     tech_levels = compute_levels(supabase)
+
+    # Per-symbol "how many strikes away from ATM" lookup, for the
+    # ATM/±1/±2/±5/±10/All selector (Oct 11 2026).
+    strike_index_map = build_strike_index_map(new_data, cmp_map)
 
     # ── Day high map ──────────────────────────────────────────────────────────
     day_high_map: dict = {}
@@ -443,6 +453,7 @@ def get_uoa(date: str = None):
             "day_high":           float(stock_day_high) if stock_day_high else None,
             "day_high_pct":       day_high_pct,
             "at_day_high":        at_day_high,
+            "strikes_away":       strikes_away(sym, strike, strike_index_map),
         })
 
     uoa_signals.sort(key=lambda x: (x["score"], abs(x["ltp_chg_from_open"])), reverse=True)
@@ -476,22 +487,34 @@ def get_uoa(date: str = None):
         except:
             return ts[11:16]
 
-    result = {
+    base_result = {
         "timestamp":         ts_new,
         "open_timestamp":    ts_open,
         "open_time":         to_ist(ts_open),
         "close_time":        to_ist(ts_new),
         "date":              today,
-        "total":             len(uoa_signals),
-        "signals":           uoa_signals[:50],
+        "all_signals":       uoa_signals,  # full, unsliced -- zone filter + [:50] applied in _finalize_uoa_result
         "snapshot_count":    total_snaps,
         "mins_to_close":     max(0, mins_to_close),
         "is_post_market":    post_market,
         "market_close_time": "15:40",
     }
 
-    # Cache the result
-    _uoa_cache = result
+    # Cache the unfiltered base — strike_zone filtering never invalidates this
+    _uoa_cache = base_result
     _uoa_cache_time = time_module.time()
     print(f"[UOA] Computed fresh — {len(uoa_signals)} signals, cached for {cache_ttl}s")
+    return _finalize_uoa_result(base_result, strike_zone)
+
+
+def _finalize_uoa_result(base_result: dict, strike_zone: str) -> dict:
+    """Applies the ATM/±1/±2/±5/±10/All filter and the top-50 cap to a
+    cached (or freshly computed) base result's full signal list. Cheap --
+    no DB access -- so this runs on every call regardless of cache state."""
+    all_signals = base_result["all_signals"]
+    filtered = [s for s in all_signals if in_zone(s.get("strikes_away"), strike_zone)]
+    result = {k: v for k, v in base_result.items() if k != "all_signals"}
+    result["total"] = len(filtered)
+    result["signals"] = filtered[:50]
+    result["strike_zone"] = strike_zone
     return result
