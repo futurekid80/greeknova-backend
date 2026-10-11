@@ -333,10 +333,14 @@ def _check_technical_levels(supabase):
     5-min cycle), not on "currently above/below", so a stock sitting above
     its PDH all day doesn't spam one alert per cycle.
     """
-    from services.technical_levels import compute_levels
+    from services.technical_levels import refresh_levels_sync
     from api.push_notifications import broadcast_alert
 
-    levels = compute_levels(supabase)
+    # Blocking is fine here -- this runs on the scheduler's own 5-min tick,
+    # not in a request path. Doing a real (synchronous) refresh on every
+    # tick is also what keeps the shared cache warm for Jungle/UOA's
+    # request-path compute_levels() calls, which never block.
+    levels = refresh_levels_sync(supabase)
     if not levels:
         return
 

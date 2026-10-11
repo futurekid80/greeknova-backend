@@ -12,6 +12,7 @@ current for the 52-week-high and spot-volume-scanner features -- reused
 here rather than a new data source, same reasoning as week52_high.py).
 """
 import time as _time
+import threading
 from datetime import date as date_type, timedelta
 
 EMA_FAST = 9
@@ -21,6 +22,8 @@ _cache = None
 _cache_time = 0
 CACHE_TTL = 300  # 5 min -- daily bars don't change intraday, no need to
                  # recompute on every page/check
+_refreshing = False
+_refresh_lock = threading.Lock()
 
 
 def _ema(period: int, closes: list):
@@ -41,20 +44,23 @@ def _week_key(d: date_type):
     return (y, w)
 
 
-def compute_levels(supabase, force: bool = False) -> dict:
-    """Returns {symbol: {ema9, ema21, ema_bullish, pdh, pdl, pwh, pwl}} for
-    every symbol with daily bars. Cached for CACHE_TTL across all callers/
-    symbols -- cheap enough to just compute everything once per cycle
-    rather than filtering per-request."""
+def _fetch_and_compute(supabase) -> dict:
+    """The actual computation -- ~15 sequential paginated Supabase calls
+    (14k+ rows across every symbol's last ~90 days of daily bars). Several
+    seconds even when Supabase is healthy. BLOCKING -- only call this
+    directly from a background job (push_checker.py's scheduler tick, via
+    refresh_levels_sync below), never from a request handler. Updates the
+    shared module-level cache on success.
+    """
     global _cache, _cache_time
-    now = _time.time()
-    if not force and _cache is not None and (now - _cache_time) < CACHE_TTL:
-        return _cache
-
     today = date_type.today()
-    cutoff = (today - timedelta(days=90)).isoformat()  # ~60 trading days --
-                                                         # comfortably enough
-                                                         # for EMA21 to settle
+    cutoff = (today - timedelta(days=60)).isoformat()  # ~40 trading days --
+                                                         # a decent EMA21
+                                                         # convergence margin,
+                                                         # while keeping this
+                                                         # ~10 pages instead
+                                                         # of the ~15 a full
+                                                         # 90-day window needed
 
     rows = []
     offset = 0
@@ -108,8 +114,51 @@ def compute_levels(supabase, force: bool = False) -> dict:
         }
 
     _cache = result
-    _cache_time = now
+    _cache_time = _time.time()
     return result
+
+
+def refresh_levels_sync(supabase) -> dict:
+    """Blocking refresh. Safe to call from a background job (push_checker's
+    5-min scheduler tick) where taking several seconds is fine -- this is
+    what keeps the cache warm so request-path callers (below) almost never
+    hit a cold cache during market hours."""
+    return _fetch_and_compute(supabase)
+
+
+def compute_levels(supabase, force: bool = False) -> dict:
+    """Request-path safe: NEVER blocks the caller on the expensive fetch.
+    Returns whatever's in the cache right now (possibly stale, possibly
+    empty on a cold start) immediately, and -- if the cache is stale or
+    missing -- kicks off a background thread to refresh it for next time
+    (single-flight, so concurrent requests don't all spawn their own
+    refresh). Jungle/UOA's confirmation tags simply don't appear on the
+    first request or two after a deploy/cold start rather than the whole
+    page hanging for the ~10 sequential Supabase pages this needs.
+    """
+    global _refreshing
+    now = _time.time()
+    is_stale = _cache is None or (now - _cache_time) >= CACHE_TTL
+
+    if force or is_stale:
+        with _refresh_lock:
+            start_refresh = not _refreshing
+            if start_refresh:
+                _refreshing = True
+
+        if start_refresh:
+            def _bg_refresh():
+                global _refreshing
+                try:
+                    _fetch_and_compute(supabase)
+                except Exception as e:
+                    print(f"[TechLevels] Background refresh failed: {e}")
+                finally:
+                    with _refresh_lock:
+                        _refreshing = False
+            threading.Thread(target=_bg_refresh, daemon=True).start()
+
+    return _cache if _cache is not None else {}
 
 
 # ── Confirmation tag for an existing OI/UOA signal row ──────────────────────
