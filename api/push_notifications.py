@@ -45,7 +45,7 @@ def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10,
     if vol_threshold is not None:
         row["vol_threshold"] = vol_threshold
     if enabled_signals is not None:
-        row["enabled_signals"] = [s for s in enabled_signals if s in ALL_SIGNAL_TYPES]
+        row["enabled_signals"] = [s for s in enabled_signals if s in VALID_SIGNAL_TYPES]
 
     try:
         supabase.from_("push_subscriptions").upsert(row, on_conflict="endpoint").execute()
@@ -75,6 +75,22 @@ ALL_SIGNAL_TYPES = [
     "FAR_OTM_ACTIVITY", "VOLUME_SURGE", "NEAR_STRIKE_UNWIND",
 ]
 
+# Technical-level signals (Oct 2026) -- deliberately NOT folded into
+# ALL_SIGNAL_TYPES above. Manish's explicit ask: these must be opt-in only,
+# never auto-on just because a device has never customized its signal list.
+# ALL_SIGNAL_TYPES staying NULL-means-"all of THIS list" (unchanged) is what
+# keeps a never-customized device from getting these without asking --
+# see the enabled_signals check in broadcast_alert() below.
+OPT_IN_SIGNAL_TYPES = [
+    "EMA_BULLISH_CROSS", "EMA_BEARISH_CROSS",
+    "PDH_CROSS", "PDL_CROSS", "PWH_CROSS", "PWL_CROSS",
+]
+
+# Every signal name that's legal to store in enabled_signals -- used for
+# validating incoming preference saves. (ALL_SIGNAL_TYPES alone stays the
+# "default enabled" set; this combined list is only for "is this name real".)
+VALID_SIGNAL_TYPES = ALL_SIGNAL_TYPES + OPT_IN_SIGNAL_TYPES
+
 
 def get_preferences(supabase, endpoint: str) -> dict:
     """
@@ -102,7 +118,7 @@ def get_preferences(supabase, endpoint: str) -> dict:
 
 def save_preferences(supabase, endpoint: str, enabled_signals: list, spike_threshold: float = None, vol_threshold: float = None) -> dict:
     """Save which alert types this specific device wants to receive, and at what OI%/Vol% thresholds."""
-    valid = [s for s in enabled_signals if s in ALL_SIGNAL_TYPES]
+    valid = [s for s in enabled_signals if s in VALID_SIGNAL_TYPES]
     update = {"enabled_signals": valid}
     if spike_threshold is not None:
         update["spike_threshold"] = spike_threshold
@@ -252,11 +268,18 @@ def broadcast_alert(supabase, alert: dict):
         if vol_pct is not None and vol_pct < vol_threshold:
             continue
 
-        # NULL enabled_signals = device never customized = everything on.
-        # Once a device saves preferences, enabled_signals becomes a real
-        # list and only those exact signal types get sent to it.
+        # NULL enabled_signals = device never customized = everything in
+        # ALL_SIGNAL_TYPES is on by default. OPT_IN_SIGNAL_TYPES (EMA/PDH/
+        # PDL/PWH/PWL crosses) are the exception -- those must be explicitly
+        # present in enabled_signals to ever fire, NULL included, so a
+        # device that's never touched its preferences doesn't suddenly
+        # start getting a signal type it never asked for.
         enabled_signals = sub.get("enabled_signals")
-        if enabled_signals is not None and alert.get("signal") not in enabled_signals:
+        signal = alert.get("signal")
+        if signal in OPT_IN_SIGNAL_TYPES:
+            if not enabled_signals or signal not in enabled_signals:
+                continue
+        elif enabled_signals is not None and signal not in enabled_signals:
             continue
 
         # Front-load the strike/OI%/Vol% into the title itself — the OS

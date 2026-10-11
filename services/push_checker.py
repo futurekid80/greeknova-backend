@@ -14,12 +14,19 @@ from datetime import datetime, timezone
 _previous_keys: set = set()
 _last_reset_date: str = ""
 
+# Per-symbol last-known state for the technical-level crosses (EMA 9/21,
+# PDH/PDL, PWH/PWL) -- cleared every new day so the first check of the day
+# only establishes a baseline (no alert) rather than firing on a stale
+# carry-over state from yesterday's close.
+_tech_state: dict = {}
+
 
 def _reset_if_new_day():
-    global _previous_keys, _last_reset_date
+    global _previous_keys, _last_reset_date, _tech_state
     today = datetime.now(timezone.utc).date().isoformat()
     if today != _last_reset_date:
         _previous_keys = set()
+        _tech_state = {}
         _last_reset_date = today
 
 
@@ -62,6 +69,10 @@ def run_push_checks(supabase):
         _check_near_strike_unwind(supabase)
     except Exception as e:
         print(f"[PushCheck] Near-strike unwind failed: {e}")
+    try:
+        _check_technical_levels(supabase)
+    except Exception as e:
+        print(f"[PushCheck] Technical levels failed: {e}")
 
 
 def _check_options_jungle(supabase):
@@ -311,3 +322,105 @@ def _check_near_strike_unwind(supabase):
             "oiPct": round(chg_pct, 1),
             "ltp": latest.get("last_price"),
         })
+
+
+def _check_technical_levels(supabase):
+    """Opt-in-only alerts: 9/21 EMA cross, and price crossing the previous
+    day's or previous week's high/low, per symbol. Unlike the OI/UOA checks
+    above, these aren't about any single option contract -- they're about
+    the underlying stock/index, so one alert per symbol per event, not per
+    strike. Only fires on an actual CROSS (state change from the previous
+    5-min cycle), not on "currently above/below", so a stock sitting above
+    its PDH all day doesn't spam one alert per cycle.
+    """
+    from services.technical_levels import compute_levels
+    from api.push_notifications import broadcast_alert
+
+    levels = compute_levels(supabase)
+    if not levels:
+        return
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    cmp_rows = []
+    offset = 0
+    while True:
+        batch = supabase.from_("cmp_prices").select("symbol,cmp,timestamp") \
+            .gte("timestamp", f"{today}T00:00:00+00:00") \
+            .order("timestamp", desc=True) \
+            .range(offset, offset + 999).execute()
+        if not batch.data:
+            break
+        cmp_rows.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+        offset += 1000
+
+    cmp_map = {}
+    seen = set()
+    for r in cmp_rows:
+        if r["symbol"] not in seen:
+            cmp_map[r["symbol"]] = r["cmp"]
+            seen.add(r["symbol"])
+
+    for sym, lv in levels.items():
+        cmp = cmp_map.get(sym)
+        if not cmp:
+            continue
+        prev = _tech_state.get(sym, {})
+
+        ema_bullish = lv.get("ema_bullish")
+        if ema_bullish is not None:
+            prev_ema = prev.get("ema_bullish")
+            if prev_ema is not None and ema_bullish != prev_ema:
+                sig = "EMA_BULLISH_CROSS" if ema_bullish else "EMA_BEARISH_CROSS"
+                broadcast_alert(supabase, {
+                    "signal": sig,
+                    "symbol": sym,
+                    "message": f"{sym}: 9 EMA crossed {'above' if ema_bullish else 'below'} "
+                               f"21 EMA on the daily chart -- {'bullish' if ema_bullish else 'bearish'} trend shift",
+                    "ltp": cmp,
+                    "url": "/jungle",
+                })
+            prev["ema_bullish"] = ema_bullish
+
+        pdh, pdl = lv.get("pdh"), lv.get("pdl")
+        if pdh:
+            above_pdh = cmp > pdh
+            if prev.get("above_pdh") is False and above_pdh:
+                broadcast_alert(supabase, {
+                    "signal": "PDH_CROSS", "symbol": sym,
+                    "message": f"{sym} crossed above previous day high (₹{pdh:,.1f})",
+                    "ltp": cmp, "url": "/jungle",
+                })
+            prev["above_pdh"] = above_pdh
+        if pdl:
+            below_pdl = cmp < pdl
+            if prev.get("below_pdl") is False and below_pdl:
+                broadcast_alert(supabase, {
+                    "signal": "PDL_CROSS", "symbol": sym,
+                    "message": f"{sym} crossed below previous day low (₹{pdl:,.1f})",
+                    "ltp": cmp, "url": "/jungle",
+                })
+            prev["below_pdl"] = below_pdl
+
+        pwh, pwl = lv.get("pwh"), lv.get("pwl")
+        if pwh:
+            above_pwh = cmp > pwh
+            if prev.get("above_pwh") is False and above_pwh:
+                broadcast_alert(supabase, {
+                    "signal": "PWH_CROSS", "symbol": sym,
+                    "message": f"{sym} crossed above previous week high (₹{pwh:,.1f})",
+                    "ltp": cmp, "url": "/jungle",
+                })
+            prev["above_pwh"] = above_pwh
+        if pwl:
+            below_pwl = cmp < pwl
+            if prev.get("below_pwl") is False and below_pwl:
+                broadcast_alert(supabase, {
+                    "signal": "PWL_CROSS", "symbol": sym,
+                    "message": f"{sym} crossed below previous week low (₹{pwl:,.1f})",
+                    "ltp": cmp, "url": "/jungle",
+                })
+            prev["below_pwl"] = below_pwl
+
+        _tech_state[sym] = prev

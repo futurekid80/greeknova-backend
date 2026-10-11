@@ -1,6 +1,7 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
 import time as time_module
+from services.technical_levels import compute_levels, confirmation_for_bias
 
 # Persistence cache
 _signal_history: dict = {}
@@ -229,6 +230,10 @@ def get_uoa(date: str = None):
             cmp_map[c["symbol"]] = c["cmp"]
             seen_cmp.add(c["symbol"])
 
+    # Per-symbol 9/21 EMA + PDH/PDL/PWH/PWL, for the "confirmation" tag next
+    # to each signal below (e.g. Put Writing + price above PDH).
+    tech_levels = compute_levels(supabase)
+
     # ── Day high map ──────────────────────────────────────────────────────────
     day_high_map: dict = {}
 
@@ -431,6 +436,7 @@ def get_uoa(date: str = None):
             "signal_type":        signal_type,
             "signal_desc":        signal_desc,
             "bias":               bias,
+            "confirmation":       confirmation_for_bias(sym, bias, cmp, tech_levels),
             "score":              min(score, 5),
             "time_tag":           time_tag,
             "is_index":           sym in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "SENSEX"],

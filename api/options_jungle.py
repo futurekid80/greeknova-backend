@@ -1,5 +1,6 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta, date as date_type
+from services.technical_levels import compute_levels, confirmation_for
 
 # Persistence tracking — survives across calls within same process
 _oi_persistence: dict = {}   # tradingsymbol -> {"first_seen": ts, "snapshots": set, "all_snapshots": set, "last_date": str}
@@ -164,6 +165,10 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
 
     old_map = {f"{r['symbol']}_{r['tradingsymbol']}": r for r in old_data}
 
+    # Per-symbol 9/21 EMA + PDH/PDL/PWH/PWL, for the "confirmation" tag next
+    # to OI Spike signals below (e.g. Put Writing + price above PDH).
+    tech_levels = compute_levels(supabase)
+
     def to_ist(ts):
         try:
             clean = ts.split('+')[0].split('Z')[0]
@@ -265,6 +270,7 @@ def get_options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, 
                 "vol_change":      vol_change,
                 "direction":       direction,
                 "interpretation":  interp,
+                "confirmation":    confirmation_for(sym, interp, cmp, tech_levels),
                 "first_seen":      to_ist(persist["first_seen"]),
                 "snapshot_count":  len(persist["snapshots"]),
                 "gaps":            max(0, gaps),
