@@ -2625,6 +2625,16 @@ def oi_profile(symbol: str, date: str = None, expiry: str = None, strike_zone: s
     from api.oi_profile import get_oi_profile
     return get_oi_profile(symbol=symbol, date=date, expiry=expiry, strike_zone=strike_zone)
 
+@app.post("/custom-scanner")
+async def custom_scanner(request: Request):
+    from services.custom_scanner import run_custom_scan
+    body = await request.json()
+    conditions = body.get("conditions")
+    date = body.get("date")
+    if not conditions or not isinstance(conditions, list):
+        return {"error": "conditions (a non-empty list) is required", "matches": [], "total": 0}
+    return run_custom_scan(conditions, date)
+
 @app.get("/straddle-chart/{symbol}")
 def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):
     from api.straddle_chart import get_straddle_chart
