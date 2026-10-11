@@ -415,6 +415,7 @@ def get_uoa(date: str = None):
             "tradingsymbol":      ts,
             "strike":             strike,
             "option_type":        opt_type,
+            "expiry":             row.get("expiry"),
             "cmp":                float(cmp),
             "ltp":                float(new_ltp),
             "open_ltp":           float(open_ltp),
