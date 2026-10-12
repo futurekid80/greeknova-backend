@@ -4,7 +4,7 @@ from collections import defaultdict
 from services.strike_zones import strikes_away, in_zone
 
 
-def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, strike_zone: str = "all"):
+def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, strike_zone: str = "all", at_time: str = None):
     supabase = get_supabase()
     today = datetime.now(timezone.utc).date()
 
@@ -24,14 +24,36 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, 
             date = check
             break
 
-    # Get EOD timestamp for today's profile
-    ts_q = supabase.from_("oi_snapshots")\
-        .select("timestamp")\
-        .eq("symbol", symbol)\
-        .gte("timestamp", f"{date}T00:00:00+00:00")\
-        .lt("timestamp",  f"{date}T23:59:59+00:00")\
-        .order("timestamp", desc=True)\
-        .limit(1).execute()
+    # Get EOD timestamp for today's profile -- or, when the caller is
+    # scrubbing the Open Interest Timeline slider (Task #38, Oct 12 2026),
+    # the latest capture AT OR BEFORE at_time instead of the day's latest.
+    if at_time:
+        ts_q = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", symbol)\
+            .gte("timestamp", f"{date}T00:00:00+00:00")\
+            .lte("timestamp", at_time)\
+            .order("timestamp", desc=True)\
+            .limit(1).execute()
+        if not ts_q.data:
+            # at_time lands before the day's first capture (e.g. slider
+            # dragged all the way left) -- use the earliest snapshot of the
+            # day instead of erroring out.
+            ts_q = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", symbol)\
+                .gte("timestamp", f"{date}T00:00:00+00:00")\
+                .lt("timestamp",  f"{date}T23:59:59+00:00")\
+                .order("timestamp", desc=False)\
+                .limit(1).execute()
+    else:
+        ts_q = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", symbol)\
+            .gte("timestamp", f"{date}T00:00:00+00:00")\
+            .lt("timestamp",  f"{date}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1).execute()
 
     if not ts_q.data:
         # BUG FIX (Oct 10 2026): this error dict was missing "symbol". The
@@ -439,7 +461,50 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, 
         row["prev_pe_oi"] = prev_pe
         row["ce_oi_delta"] = row["ce_oi"] - prev_ce
         row["pe_oi_delta"] = row["pe_oi"] - prev_pe
-        
+
+    # ── Today's opening OI per strike (Open Interest Timeline, Task #38) ────
+    # Only fetched when at_time is in play -- i.e. the Timeline slider is
+    # actually being used -- so the plain OI Profile page (no at_time) pays
+    # no extra query cost for a feature it doesn't show. Lets the Timeline
+    # view show "change since today's 9:15 open" at whatever point on the
+    # day the slider is scrubbed to, the same way prev_oi_map above shows
+    # "change since yesterday's close" for the regular OI Profile view.
+    day_open_map: dict = {}
+    if at_time:
+        try:
+            open_ts_q = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", symbol)\
+                .gte("timestamp", f"{date}T00:00:00+00:00")\
+                .lt("timestamp",  f"{date}T23:59:59+00:00")\
+                .order("timestamp", desc=False)\
+                .limit(1).execute()
+            if open_ts_q.data:
+                open_ts = open_ts_q.data[0]["timestamp"]
+                open_rows = supabase.from_("oi_snapshots")\
+                    .select("strike, option_type, oi")\
+                    .eq("symbol", symbol)\
+                    .eq("timestamp", open_ts)\
+                    .eq("expiry", active_expiry)\
+                    .in_("option_type", ["CE", "PE"])\
+                    .limit(2000).execute()
+                for r in (open_rows.data or []):
+                    s = float(r["strike"])
+                    oi = int(r["oi"] or 0)
+                    key = f"{s}_{r['option_type']}"
+                    day_open_map[key] = oi
+        except Exception as e:
+            print(f"[OI Profile] Day-open OI fetch failed: {e}")
+
+        for row in profile:
+            s = row["strike"]
+            open_ce = day_open_map.get(f"{s}_CE", 0)
+            open_pe = day_open_map.get(f"{s}_PE", 0)
+            row["open_ce_oi"] = open_ce
+            row["open_pe_oi"] = open_pe
+            row["ce_oi_chg_open"] = row["ce_oi"] - open_ce
+            row["pe_oi_chg_open"] = row["pe_oi"] - open_pe
+
     return {
         "symbol":          symbol,
         "date":            date,
@@ -460,4 +525,67 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, 
         "wall_migration":  wall_migration,
         "vacuum_count":    sum(1 for p in profile if p["is_vacuum"]),
         "has_prev_oi":     len(prev_oi_map) > 0,
+        "snapshot_ts":     eod_ts,
+        "at_time":         at_time,
+        "has_open_oi":     len(day_open_map) > 0,
     }
+
+
+def get_oi_timeline_times(symbol: str = "NIFTY", date: str = None):
+    """Returns every distinct 5-min capture timestamp for a symbol on a
+    given day (defaults to today, or the latest day with data), formatted
+    for the Open Interest Timeline slider (Task #38, Oct 12 2026).
+
+    Filters on option_type="FUT" rather than pulling the full option chain
+    per timestamp -- every captured symbol (index or stock) gets exactly
+    1-3 FUT rows per cycle (one per tracked future expiry), so this is a
+    cheap way to get one row per capture cycle instead of ~150."""
+    supabase = get_supabase()
+    today = datetime.now(timezone.utc).date()
+
+    if not date:
+        date = today.isoformat()
+        for i in range(7):
+            check = (today - timedelta(days=i)).isoformat()
+            r = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", symbol).eq("option_type", "FUT")\
+                .gte("timestamp", f"{check}T00:00:00+00:00")\
+                .lt("timestamp",  f"{check}T23:59:59+00:00")\
+                .limit(1).execute()
+            if r.data:
+                date = check
+                break
+
+    rows = []
+    for offset in range(0, 5000, 1000):
+        batch = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", symbol).eq("option_type", "FUT")\
+            .gte("timestamp", f"{date}T00:00:00+00:00")\
+            .lt("timestamp",  f"{date}T23:59:59+00:00")\
+            .order("timestamp", desc=False)\
+            .range(offset, offset + 999)\
+            .execute()
+        if not batch.data:
+            break
+        rows.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+
+    ist = timezone(timedelta(hours=5, minutes=30))
+    seen = set()
+    timestamps = []
+    for r in rows:
+        ts = r["timestamp"]
+        if ts in seen:
+            continue
+        seen.add(ts)
+        try:
+            dt = datetime.fromisoformat(ts.replace('Z', '').replace('+00:00', '')).replace(tzinfo=timezone.utc)
+            label = dt.astimezone(ist).strftime('%H:%M')
+        except Exception:
+            label = ts
+        timestamps.append({"ts": ts, "label": label})
+
+    return {"symbol": symbol, "date": date, "timestamps": timestamps}

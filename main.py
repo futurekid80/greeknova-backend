@@ -2649,9 +2649,17 @@ def stock_signal_history(symbol: str, days: int = 20):
         return {"symbol": symbol.upper(), "history": [], "total": 0, "error": str(e)}
 
 @app.get("/oi-profile/{symbol}")
-def oi_profile(symbol: str, date: str = None, expiry: str = None, strike_zone: str = "all"):
+def oi_profile(symbol: str, date: str = None, expiry: str = None, strike_zone: str = "all", at_time: str = None):
     from api.oi_profile import get_oi_profile
-    return get_oi_profile(symbol=symbol, date=date, expiry=expiry, strike_zone=strike_zone)
+    return get_oi_profile(symbol=symbol, date=date, expiry=expiry, strike_zone=strike_zone, at_time=at_time)
+
+# Open Interest Timeline slider (Task #38, Oct 12 2026) -- lightweight list
+# of today's capture timestamps, used to populate the slider; the actual
+# per-timestamp OI profile comes from /oi-profile's at_time param above.
+@app.get("/oi-timeline-times/{symbol}")
+def oi_timeline_times(symbol: str, date: str = None):
+    from api.oi_profile import get_oi_timeline_times
+    return get_oi_timeline_times(symbol=symbol, date=date)
 
 @app.post("/custom-scanner")
 async def custom_scanner(request: Request):
