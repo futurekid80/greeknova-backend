@@ -2039,26 +2039,54 @@ def index_data():
         # though the underlying oi_snapshots rows were there all along. One
         # retry clears it in practice since the reset doesn't repeat back
         # to back.
-        try:
-            ts_res = supabase.from_("oi_snapshots")\
+        # BUG FIX (Oct 12 2026): picking the single latest NIFTY FUT
+        # timestamp and trusting it to be a complete snapshot for every
+        # index broke in practice -- some capture cycles write TWO distinct
+        # NIFTY FUT timestamps a few hundred ms to a couple seconds apart
+        # (one complete batch with all 5 indices, one partial batch missing
+        # SENSEX, most likely from SENSEX's separate BFO instrument/quote
+        # fetch occasionally lagging or failing independently of NFO's).
+        # When the partial, SENSEX-less write happens to land LATER than
+        # the complete one, this picked it as "latest" and the exact-
+        # timestamp join below returned zero SENSEX rows -- silently
+        # dropping SENSEX's card from the Market Pulse homepage for up to
+        # one 5-min cycle, reported live by Manish on a Monday open.
+        # Fix: scan back through the last few distinct NIFTY FUT
+        # timestamps (newest first) and use the first one that SENSEX also
+        # has a FUT row at, instead of blindly trusting the newest.
+        def _fetch_recent_nifty_fut_timestamps():
+            return supabase.from_("oi_snapshots")\
                 .select("timestamp")\
                 .eq("symbol", "NIFTY")\
                 .eq("option_type", "FUT")\
                 .order("timestamp", desc=True)\
-                .limit(1)\
+                .limit(10)\
                 .execute()
+        try:
+            ts_res = _fetch_recent_nifty_fut_timestamps()
         except Exception as e:
             print(f"[INDEX-DATA] timestamp query failed, retrying once: {e}")
-            ts_res = supabase.from_("oi_snapshots")\
-                .select("timestamp")\
-                .eq("symbol", "NIFTY")\
-                .eq("option_type", "FUT")\
-                .order("timestamp", desc=True)\
-                .limit(1)\
-                .execute()
+            ts_res = _fetch_recent_nifty_fut_timestamps()
         if not ts_res.data:
             return {"timestamp": None, "rows": [], "cmps": []}
-        ts = ts_res.data[0]["timestamp"]
+        candidate_timestamps = [r["timestamp"] for r in ts_res.data]
+        ts = candidate_timestamps[0]
+        try:
+            sensex_ts_res = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", "SENSEX")\
+                .eq("option_type", "FUT")\
+                .in_("timestamp", candidate_timestamps)\
+                .execute()
+            sensex_timestamps = {r["timestamp"] for r in (sensex_ts_res.data or [])}
+            for cand in candidate_timestamps:
+                if cand in sensex_timestamps:
+                    ts = cand
+                    break
+            else:
+                print(f"[INDEX-DATA] none of the last {len(candidate_timestamps)} NIFTY FUT timestamps have a matching SENSEX row -- falling back to the latest NIFTY-only one")
+        except Exception as e:
+            print(f"[INDEX-DATA] SENSEX-completeness check failed, using latest NIFTY FUT timestamp: {e}")
 
         # Fetch index OI data + CMP in parallel
         from concurrent.futures import ThreadPoolExecutor
