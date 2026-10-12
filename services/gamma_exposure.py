@@ -1111,10 +1111,37 @@ def _compute_gamma_exposure(date: str = None):
             spot_dir = spot - spot_open
             max_pain_drift_confirms = bool(mp_dir * spot_dir > 0)  # same sign -> drifting with price
 
+        # or_width_pct: OR_high/OR_low spread as a % of the opening print --
+        # exposed so a consumer can tell a 1% opening range apart from a 5%
+        # one instead of treating every midpoint-contained stock the same
+        # (V2.1 design note, Oct 12 2026). _open_ts is the first-tick
+        # timestamp the 45-min OR window was built from; exposed so a
+        # consumer can confirm the OR itself was actually formed (not a
+        # degenerate single-print window) before trusting distance-from-it.
+        or_high = _or["or_high"] if _or else None
+        or_low = _or["or_low"] if _or else None
+        or_width_pct = (
+            round((or_high - or_low) / spot_open * 100, 2)
+            if (_or and spot_open and or_high > or_low) else None
+        )
+
         range_confidence_inputs = {
             "vix_change_pct": vix_change_pct,  # market-wide, same for every symbol this refresh
             "or_status": or_status,            # "INSIDE" | "ABOVE" | "BELOW" | None (no data yet)
             "or_pct_outside": or_pct_outside,
+            # NOTE: or_pct_outside is 0.0 whenever or_status == "INSIDE" --
+            # it carries no information on *where* inside the range price
+            # sits. or_high/or_low/spot_open below let a consumer compute
+            # real distance-from-boundary continuously, including "inside".
+            "or_high": or_high,
+            "or_low": or_low,
+            "or_width_pct": or_width_pct,
+            "spot_open": spot_open,
+            # Not yet exposed: repeated boundary re-entries/challenges over
+            # the full day. or_map only scans the first OR_WINDOW_MIN=45min
+            # window, so this dict has no way to say "price touched the
+            # boundary 4 times" vs "price touched it once" -- that needs new
+            # full-day scanning logic, scoped separately, not built here.
             "oi_skew_pct": oi_skew_pct,
             "ce_oi_chg_pct": ce_oi_chg_pct,
             "pe_oi_chg_pct": pe_oi_chg_pct,
