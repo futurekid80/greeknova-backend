@@ -124,11 +124,25 @@ def fetch_latest_oi_diff(supabase, date: str = None):
     new_data = filter_to_nearest_expiry(new_data_raw)
     old_data = filter_to_nearest_expiry(old_data_raw)
 
+    # BUG FIX (Oct 12 2026): was bound to `today` (wall-clock date, or the
+    # `date` param), but ts_new above already has its own fallback to the
+    # latest AVAILABLE snapshot day when the current day has no capture yet
+    # (e.g. Monday morning before the first cycle runs, weekends, holidays).
+    # Binding this query to wall-clock `today` instead of ts_new's actual
+    # date meant cmp_map came back completely empty whenever those two
+    # diverged -- which silently emptied index_map downstream (every symbol
+    # skipped in run_custom_scan's "if symbol not in index_map: continue"
+    # gate), producing a confident, error-free "0 symbols matched" even
+    # though the underlying OI diff data had real, large unwinding/buildup
+    # moves in it. Options Jungle/UOA have this same `today`-bound cmp
+    # query (see oi_diff.py's module docstring on duplication) but aren't
+    # gated on cmp the way the custom scanner is, so they never surfaced it.
+    cmp_date = ts_new[:10]
     cmp_raw = []
     for offset in range(0, 10000, 1000):
         batch = supabase.from_("cmp_prices")\
             .select("*")\
-            .gte("timestamp", f"{today}T00:00:00+00:00")\
+            .gte("timestamp", f"{cmp_date}T00:00:00+00:00")\
             .order("timestamp", desc=True)\
             .range(offset, offset + 999)\
             .execute()
