@@ -574,7 +574,14 @@ def get_oi_timeline_times(symbol: str = "NIFTY", date: str = None):
             break
 
     ist = timezone(timedelta(hours=5, minutes=30))
+    # BUG FIX (Oct 12 2026): some 5-min cycles write a symbol's FUT row
+    # twice at slightly different sub-second timestamps (same bug class as
+    # the SENSEX-missing-from-dashboard fix earlier today) -- deduped by
+    # minute label, keeping the LATEST of each minute's duplicates, so the
+    # slider shows one tick per 5-min mark instead of two nearly-identical
+    # ones back to back.
     seen = set()
+    seen_labels: dict = {}
     timestamps = []
     for r in rows:
         ts = r["timestamp"]
@@ -586,6 +593,11 @@ def get_oi_timeline_times(symbol: str = "NIFTY", date: str = None):
             label = dt.astimezone(ist).strftime('%H:%M')
         except Exception:
             label = ts
-        timestamps.append({"ts": ts, "label": label})
+        if label in seen_labels:
+            # keep the later of the two (closer to a complete capture)
+            timestamps[seen_labels[label]] = {"ts": ts, "label": label}
+        else:
+            seen_labels[label] = len(timestamps)
+            timestamps.append({"ts": ts, "label": label})
 
     return {"symbol": symbol, "date": date, "timestamps": timestamps}
