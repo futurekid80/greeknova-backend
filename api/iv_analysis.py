@@ -570,17 +570,31 @@ def get_iv_analysis(symbol: str = None, date: str = None):
                 strategies = ["Calendar Spread", "Directional spreads"]
 
         # ── Collect for iv_history persistence ───────────────────────────────
-        today_iv_rows.append({
-            "trade_date": today,
-            "symbol":     sym,
-            "atm_strike": atm_strike,
-            "atm_iv":     current_iv,
-            "atm_ce_iv":  iv_ce,
-            "atm_pe_iv":  iv_pe,
-            "expiry":     nearest_expiry,
-            "dte":        dte,
-            "cmp":        cmp,
-        })
+        # BUG FIX (Oct 12 2026): don't persist expiry-day (DTE=0) IV reads.
+        # Right at 0 DTE the ATM option is almost pure intrinsic value with
+        # ~no time premium left, so the Newton-Raphson solver above becomes
+        # numerically unstable -- it can converge to a near-zero sigma (or
+        # fail to converge on one leg entirely, e.g. COFORGE 2026-08-25
+        # persisted atm_ce_iv=0.13 with atm_pe_iv=null). Unlike the 30-day
+        # backfill path above (which already floors at >=5.0), this "today"
+        # path had no such guard, so one bad expiry-day print would sit in
+        # iv_history forever (it can't be backfilled/corrected -- see the
+        # low_confidence comment above) and permanently skew that symbol's
+        # IVR/IVP floor for every mentee looking at the IV page. Still shown
+        # in today's `results` below -- only the permanent-history write is
+        # skipped.
+        if dte >= 1:
+            today_iv_rows.append({
+                "trade_date": today,
+                "symbol":     sym,
+                "atm_strike": atm_strike,
+                "atm_iv":     current_iv,
+                "atm_ce_iv":  iv_ce,
+                "atm_pe_iv":  iv_pe,
+                "expiry":     nearest_expiry,
+                "dte":        dte,
+                "cmp":        cmp,
+            })
 
         results.append({
             "symbol":              sym,
