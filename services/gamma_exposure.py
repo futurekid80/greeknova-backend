@@ -480,6 +480,58 @@ def _compute_gamma_exposure(date: str = None):
             cmp_map[c["symbol"]] = c["cmp"]
             seen_cmp.add(c["symbol"])
 
+    # ── Range Confidence inputs (Oct 12 2026): a non-directional seller's
+    # real risk isn't "will gamma amplify a move" (that's regime, above) --
+    # it's "will today's move hold a direction long enough to breach my
+    # strikes." These are the raw, cheap-to-compute signals a human seller
+    # already eyeballs (VIX move, has the open broken and failed to
+    # reclaim, is max pain crawling with spot, is OI building lopsided) --
+    # returned as RAW fields, not pre-blended into a score, so the
+    # frontend can combine/tune them the same way it already does for
+    # vScore/tScore/gScore without a backend redeploy every time the
+    # weighting changes. ───────────────────────────────────────────────────
+    vix_change_pct = None
+    try:
+        _vix = supabase.from_("vix_snapshots").select("change_pct,timestamp") \
+            .gte("timestamp", f"{today}T00:00:00+00:00").order("timestamp", desc=True) \
+            .limit(1).execute()
+        if _vix.data:
+            vix_change_pct = float(_vix.data[0]["change_pct"])
+    except Exception as _e:
+        print(f"[gamma_exposure] vix snapshot unavailable: {_e}")
+
+    # Opening-range (first 45 min) high/low + the day's very first print,
+    # per symbol -- one batched query across the whole universe rather than
+    # one per symbol (same perf lesson as the cmp_map fix above).
+    OR_WINDOW_MIN = 45
+    or_raw = _paginated_fetch(lambda lo, hi: supabase.from_("cmp_prices")
+        .select("symbol,cmp,timestamp")
+        .gte("timestamp", f"{today}T00:00:00+00:00")
+        .lte("timestamp", (ts_new_dt - timedelta(hours=0)).isoformat())
+        .order("timestamp")
+        .range(lo, hi), max_offset=50000)
+    or_map: dict = {}  # symbol -> {"open": float, "or_high": float, "or_low": float, "or_end_ts": str}
+    for r in or_raw:
+        sym_ = r.get("symbol")
+        if sym_ not in eligible_symbols:
+            continue
+        px = r.get("cmp")
+        if not px or px <= 0:
+            continue
+        px = float(px)
+        slot = or_map.setdefault(sym_, {"open": px, "or_high": px, "or_low": px, "_open_ts": r["timestamp"]})
+        if slot["open"] is None:
+            slot["open"] = px
+            slot["_open_ts"] = r["timestamp"]
+        try:
+            elapsed_min = (datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00")) -
+                           datetime.fromisoformat(slot["_open_ts"].replace("Z", "+00:00"))).total_seconds() / 60.0
+        except Exception:
+            elapsed_min = 0
+        if elapsed_min <= OR_WINDOW_MIN:
+            slot["or_high"] = max(slot["or_high"], px)
+            slot["or_low"] = min(slot["or_low"], px)
+
     # ── Recent live Alerts-feed events, for confirming a squeeze with actual
     # order flow at its exact wall strike (not just the modeled gamma) ──────
     alert_cutoff = (ts_new_dt - timedelta(minutes=ALERT_LOOKBACK_MIN)).isoformat()
@@ -989,8 +1041,91 @@ def _compute_gamma_exposure(date: str = None):
             "iv_crush_watch": bool(iv_regime == "RICH" and dte <= 10),
         }
 
+        # ── Range Confidence raw inputs (Oct 12 2026) ───────────────────────
+        # 1. Opening-range status: has spot broken the first-45-min range and
+        #    failed to reclaim it? Either side (above OR below) is bad for a
+        #    non-directional seller -- both mean the day is trending, not
+        #    ranging.
+        _or = or_map.get(sym)
+        or_status = None
+        or_pct_outside = None
+        if _or and _or["or_high"] > _or["or_low"]:
+            if spot > _or["or_high"]:
+                or_status = "ABOVE"
+                or_pct_outside = round((spot - _or["or_high"]) / spot * 100, 2)
+            elif spot < _or["or_low"]:
+                or_status = "BELOW"
+                or_pct_outside = round((_or["or_low"] - spot) / spot * 100, 2)
+            else:
+                or_status = "INSIDE"
+                or_pct_outside = 0.0
+
+        # 2. OI skew: CE vs PE %OI-change-since-open, near spot only (same
+        #    +/-5% band as the gamma regime read) -- a lopsided build on one
+        #    side (independent of who initiated it -- see the Oct 12 2026
+        #    scoping note on why naive Flow isn't directional on its own)
+        #    is still a legitimate "something one-sided is happening" flag.
+        _ce_open = _ce_now = _pe_open = _pe_now = 0
+        for k in strikes_sorted:
+            if abs(k - spot) / spot > LOCAL_BAND_PCT:
+                continue
+            for opt, acc_open, acc_now in (("CE", "_ce_open", "_ce_now"), ("PE", "_pe_open", "_pe_now")):
+                now_oi = latest_oi_lookup.get((sym, k, opt)) or 0
+                open_oi = oi_open_by_key.get((sym, k, opt)) or 0
+                if opt == "CE":
+                    _ce_open += open_oi; _ce_now += now_oi
+                else:
+                    _pe_open += open_oi; _pe_now += now_oi
+        ce_oi_chg_pct = round((_ce_now - _ce_open) / _ce_open * 100, 1) if _ce_open else None
+        pe_oi_chg_pct = round((_pe_now - _pe_open) / _pe_open * 100, 1) if _pe_open else None
+        oi_skew_pct = (
+            round(ce_oi_chg_pct - pe_oi_chg_pct, 1)
+            if ce_oi_chg_pct is not None and pe_oi_chg_pct is not None else None
+        )  # positive = calls building faster (bearish-tilt flag), negative = puts building faster (bullish-tilt flag)
+
+        # 3. Max pain drift: is the max-pain strike crawling in the same
+        #    direction as spot since the open, or staying put? Reuses the
+        #    same loss-minimization formula as /max-pain. Approximated over
+        #    this function's own chain (already filtered to >=MIN_OPEN_OI,
+        #    within MAX_STRIKE_MONEYNESS of spot) rather than the fully
+        #    unfiltered chain /max-pain uses -- close enough for a drift
+        #    *direction* read, cheap, no extra query.
+        def _max_pain(oi_lookup_fn):
+            min_loss, mp = float("inf"), None
+            for s in strikes_sorted:
+                loss = 0.0
+                for k in strikes_sorted:
+                    if s > k:
+                        loss += (s - k) * (oi_lookup_fn(k, "CE") or 0)
+                    elif s < k:
+                        loss += (k - s) * (oi_lookup_fn(k, "PE") or 0)
+                if loss < min_loss:
+                    min_loss, mp = loss, s
+            return mp
+        max_pain_now = _max_pain(lambda k, o: latest_oi_lookup.get((sym, k, o)))
+        max_pain_open = _max_pain(lambda k, o: oi_open_by_key.get((sym, k, o)))
+        spot_open = _or["open"] if _or else None
+        max_pain_drift_confirms = None
+        if max_pain_now is not None and max_pain_open is not None and spot_open and max_pain_now != max_pain_open:
+            mp_dir = max_pain_now - max_pain_open
+            spot_dir = spot - spot_open
+            max_pain_drift_confirms = bool(mp_dir * spot_dir > 0)  # same sign -> drifting with price
+
+        range_confidence_inputs = {
+            "vix_change_pct": vix_change_pct,  # market-wide, same for every symbol this refresh
+            "or_status": or_status,            # "INSIDE" | "ABOVE" | "BELOW" | None (no data yet)
+            "or_pct_outside": or_pct_outside,
+            "oi_skew_pct": oi_skew_pct,
+            "ce_oi_chg_pct": ce_oi_chg_pct,
+            "pe_oi_chg_pct": pe_oi_chg_pct,
+            "max_pain_now": max_pain_now,
+            "max_pain_open": max_pain_open,
+            "max_pain_drift_confirms": max_pain_drift_confirms,
+        }
+
         row_out = {
             **greek_fields,
+            **range_confidence_inputs,
             "symbol": sym,
             "cmp": spot,
             "expiry": expiry,
