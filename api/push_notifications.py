@@ -6,10 +6,57 @@ server-triggered push — works even when the tab is closed or backgrounded.
 """
 import os
 import json
+import time
 from pywebpush import webpush, WebPushException
+from services.strike_zones import build_strike_index_map, strikes_away as _strikes_away
 
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_CONTACT_EMAIL = os.environ.get("VAPID_CONTACT_EMAIL") or "mailto:support@greeknova.app"
+
+# (Oct 12 2026): per-symbol strike-index-map cache for computing each
+# alert's distance from ATM at persist time (Manish's ask, via a mentee's
+# feedback: "bring the same ATM +/- filter to Alerts"). Short TTL (under
+# the 5-min capture cadence) so multiple alerts firing for the same symbol
+# within one push_checker.py pass (e.g. several OI_SPIKE strikes on NIFTY)
+# reuse one lookup instead of re-querying oi_snapshots/cmp_prices per alert.
+_strike_map_cache: dict = {}
+_STRIKE_MAP_TTL = 240  # seconds
+
+
+def _get_strikes_away(supabase, symbol: str, strike) -> int | None:
+    """Looks up how many strikes `strike` sits from `symbol`'s ATM, using
+    that symbol's most recent capture cycle. Returns None if symbol/strike
+    is missing or no usable cmp/strike data exists yet (e.g. right after a
+    fresh deploy before the first capture) -- same "unknown, exclude from
+    any specific zone" contract as strike_zones.in_zone() expects."""
+    if not symbol or strike is None:
+        return None
+
+    cached = _strike_map_cache.get(symbol)
+    if cached and time.time() - cached[1] < _STRIKE_MAP_TTL:
+        index_map = cached[0]
+    else:
+        try:
+            ts_res = supabase.from_("oi_snapshots").select("timestamp") \
+                .eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
+            if not ts_res.data:
+                return None
+            latest_ts = ts_res.data[0]["timestamp"]
+            rows = supabase.from_("oi_snapshots").select("strike") \
+                .eq("symbol", symbol).eq("timestamp", latest_ts).execute().data or []
+            cmp_res = supabase.from_("cmp_prices").select("cmp") \
+                .eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
+            cmp = float(cmp_res.data[0]["cmp"]) if cmp_res.data else 0
+            index_map = build_strike_index_map(
+                [{"symbol": symbol, "strike": r["strike"]} for r in rows if r.get("strike") is not None],
+                {symbol: cmp},
+            )
+        except Exception as e:
+            print(f"[Push] strikes_away lookup failed for {symbol}: {e}")
+            return None
+        _strike_map_cache[symbol] = (index_map, time.time())
+
+    return _strikes_away(symbol, strike, index_map)
 
 
 def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10,
@@ -220,18 +267,19 @@ def broadcast_alert(supabase, alert: dict):
     # notifications aren't tab-dependent, but the in-app panel always was).
     try:
         supabase.from_("alert_log").insert({
-            "symbol":      alert.get("symbol"),
-            "signal":      alert.get("signal"),
-            "strike":      alert.get("strike"),
-            "option_type": alert.get("optionType"),
-            "message":     alert.get("message"),
-            "url":         alert.get("url"),
-            "oi_pct":      alert.get("oiPct"),
-            "vol_pct":     alert.get("volPct"),
-            "ltp":         alert.get("ltp"),
-            "score":       alert.get("score"),
-            "bias":        alert.get("bias"),
-            "direction":   alert.get("direction"),
+            "symbol":       alert.get("symbol"),
+            "signal":       alert.get("signal"),
+            "strike":       alert.get("strike"),
+            "option_type":  alert.get("optionType"),
+            "message":      alert.get("message"),
+            "url":          alert.get("url"),
+            "oi_pct":       alert.get("oiPct"),
+            "vol_pct":      alert.get("volPct"),
+            "ltp":          alert.get("ltp"),
+            "score":        alert.get("score"),
+            "bias":         alert.get("bias"),
+            "direction":    alert.get("direction"),
+            "strikes_away": _get_strikes_away(supabase, alert.get("symbol"), alert.get("strike")),
         }).execute()
     except Exception as e:
         print(f"[Push] alert_log persist failed: {e}")

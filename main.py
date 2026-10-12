@@ -995,6 +995,7 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbo
             "volPct":     r.get("vol_pct"),
             "ltp":        r.get("ltp"),
             "direction":  r.get("direction"),
+            "strikesAway": r.get("strikes_away"),
         } for r in rows]
         return {"alerts": alerts, "count": len(alerts)}
     except Exception as e:
