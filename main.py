@@ -1599,6 +1599,15 @@ def gamma_wall_trend(symbol: str, date: str = None):
     return get_wall_trend(symbol.upper(), date)
 
 
+@app.get("/session-replay/{symbol}")
+def session_replay(symbol: str, date: str = None):
+    # Oct 13 2026: full-day GEX/DEX/price replay + hourly alert bias counts
+    # for one index, powering the Session Replay page (post-mortem view of
+    # how a session unfolded -- see services/gamma_exposure.py for context).
+    from services.gamma_exposure import get_session_replay
+    return get_session_replay(symbol.upper(), date)
+
+
 @app.get("/vrp-scan/{symbol}")
 def vrp_scan(symbol: str = "NIFTY", expiry: str = None):
     # Oct 2026: weekly short-strike VRP (Volatility Risk Premium) scanner --

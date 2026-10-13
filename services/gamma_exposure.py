@@ -1443,6 +1443,142 @@ def get_wall_trend(symbol: str = "NIFTY", date: str = None, limit: int = 60):
     }
 
 
+# Oct 13 2026: Session Replay -- born from Manish asking, after Oct 13's
+# surprise NIFTY move, "could we have comprehended this from our own data"
+# and then "are we missing this because we only show JUST DATA, not a
+# visualization." The forensic answer that day used three sources (live
+# API, gex_regime_log time series, alert_log hourly counts) that all
+# independently pointed at the same 1:30-3:00pm window -- this endpoint is
+# that same cross-check, made into a reusable full-day replay instead of a
+# one-off set of SQL queries. Research into Indian competitors (Sensibull,
+# Opstra, QuantsApp, StockEdge, broker-native tools) found none of them
+# ship an intraday GEX/DEX-over-time chart with price overlay -- the
+# closest confirmed pattern anywhere is SpotGamma's HIRO (global tool),
+# which this borrows the *shape* of (price + exposure sharing a time axis,
+# named wall/flip levels, alert markers) while computing a different
+# underlying metric: classical chain-aggregated Net GEX/DEX recalculated
+# each capture cycle (gex_regime_log), not a flow-derived rolling signal.
+def get_session_replay(symbol: str = "NIFTY", date: str = None):
+    """Full-day replay for one index: Net GEX / Net DEX / spot price time
+    series (from gex_regime_log) plus hourly bullish/bearish alert counts
+    (from alert_log) and day-level summary stats. Powers the Session Replay
+    page -- a post-mortem view of how the session actually unfolded, not a
+    live/current snapshot like /gamma-squeeze or /gamma-by-strike."""
+    symbol = symbol.upper()
+    if symbol not in WALL_TREND_SYMBOLS:
+        return {
+            "symbol": symbol, "date": date, "points": [], "alert_hourly": [],
+            "summary": None,
+            "error": f"Session Replay is only available for {'/'.join(sorted(WALL_TREND_SYMBOLS))}",
+        }
+
+    supabase = get_supabase()
+    today, _ts = _resolve_gex_day(supabase, symbol, date)
+
+    rows = (
+        supabase.from_("gex_regime_log")
+        .select("as_of_data_ts,cmp,regime,net_gex,net_gex_near_spot,net_dex,"
+                "net_dex_near_spot,call_wall_strike,put_wall_strike,flip_point")
+        .eq("symbol", symbol)
+        .gte("as_of_data_ts", f"{today}T00:00:00+00:00")
+        .lt("as_of_data_ts", f"{today}T23:59:59+00:00")
+        .order("as_of_data_ts", desc=False)
+        .limit(1000)  # a full trading day at ~1.2-3min cadence is ~150-300
+                      # rows; 1000 leaves headroom without risking the
+                      # token-limit issue hit earlier pulling raw rows.
+        .execute()
+        .data or []
+    )
+
+    points = [
+        {
+            "t": r["as_of_data_ts"],
+            "cmp": r.get("cmp"),
+            "regime": r.get("regime"),
+            "net_gex": r.get("net_gex"),
+            "net_gex_near_spot": r.get("net_gex_near_spot"),
+            "net_dex": r.get("net_dex"),
+            "net_dex_near_spot": r.get("net_dex_near_spot"),
+            "call_wall_strike": r.get("call_wall_strike"),
+            "put_wall_strike": r.get("put_wall_strike"),
+            "flip_point": r.get("flip_point"),
+        }
+        for r in rows
+    ]
+
+    # ── Hourly bullish/bearish alert counts, same IST-day-boundary logic
+    # as the /alerts endpoint, aggregated server-side (not raw rows --
+    # alert_log for a busy day can run large; see the oi/alert_log size
+    # issues hit earlier this conversation).
+    from datetime import datetime, timezone, timedelta
+    try:
+        target = datetime.strptime(today, "%Y-%m-%d")
+    except ValueError:
+        target = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    ist_day_start_utc = target.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=5, minutes=30)
+    ist_day_end_utc = ist_day_start_utc + timedelta(hours=24)
+
+    alert_rows = (
+        supabase.from_("alert_log")
+        .select("created_at,bias")
+        .eq("symbol", symbol)
+        .gte("created_at", ist_day_start_utc.isoformat())
+        .lt("created_at", ist_day_end_utc.isoformat())
+        .in_("bias", ["BULLISH", "BEARISH"])
+        .execute()
+        .data or []
+    )
+
+    hourly: dict = {}
+    for r in alert_rows:
+        try:
+            ts_utc = datetime.fromisoformat(r["created_at"].replace("Z", "+00:00"))
+        except Exception:
+            continue
+        ist_hour = (ts_utc + timedelta(hours=5, minutes=30)).hour
+        bucket = hourly.setdefault(ist_hour, {"bull": 0, "bear": 0})
+        if r.get("bias") == "BULLISH":
+            bucket["bull"] += 1
+        elif r.get("bias") == "BEARISH":
+            bucket["bear"] += 1
+
+    alert_hourly = [
+        {"hour": h, "bull": hourly[h]["bull"], "bear": hourly[h]["bear"]}
+        for h in sorted(hourly.keys())
+    ]
+
+    # ── Day-level summary. Open/close come from the regime log's own cmp
+    # readings (first/last of the day) rather than a separate price table,
+    # so this stays self-contained to one table's data.
+    summary = None
+    cmps = [p["cmp"] for p in points if p.get("cmp") is not None]
+    if points and cmps:
+        gex_vals = [(p["net_gex_near_spot"], p["t"]) for p in points if p.get("net_gex_near_spot") is not None]
+        dex_vals = [(p["net_dex_near_spot"], p["t"]) for p in points if p.get("net_dex_near_spot") is not None]
+        peak_gex = min(gex_vals, key=lambda x: x[0]) if gex_vals else (None, None)
+        peak_dex = max(dex_vals, key=lambda x: abs(x[0])) if dex_vals else (None, None)
+        open_cmp, close_cmp = cmps[0], cmps[-1]
+        summary = {
+            "open": open_cmp,
+            "close": close_cmp,
+            "day_move": round(close_cmp - open_cmp, 2),
+            "day_move_pct": round((close_cmp - open_cmp) / open_cmp * 100, 2) if open_cmp else None,
+            "regime_close": points[-1].get("regime"),
+            "peak_net_gex": peak_gex[0],
+            "peak_net_gex_time": peak_gex[1],
+            "peak_net_dex": peak_dex[0],
+            "peak_net_dex_time": peak_dex[1],
+        }
+
+    return {
+        "symbol": symbol,
+        "date": today,
+        "points": points,
+        "alert_hourly": alert_hourly,
+        "summary": summary,
+    }
+
+
 def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
     """Per-strike GEX breakdown for one symbol's nearest expiry — powers the
     GEX-by-strike chart. Reuses the same IV-solve + Black-Scholes gamma
