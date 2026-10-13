@@ -1483,12 +1483,32 @@ def get_session_replay(symbol: str = "NIFTY", date: str = None):
         .gte("as_of_data_ts", f"{today}T00:00:00+00:00")
         .lt("as_of_data_ts", f"{today}T23:59:59+00:00")
         .order("as_of_data_ts", desc=False)
-        .limit(1000)  # a full trading day at ~1.2-3min cadence is ~150-300
-                      # rows; 1000 leaves headroom without risking the
-                      # token-limit issue hit earlier pulling raw rows.
+        .limit(2000)  # a full trading day at ~1.2-3min cadence is ~150-300
+                      # rows; 2000 leaves headroom without risking the
+                      # token-limit issue hit earlier pulling raw rows. Also
+                      # has to absorb the duplicate-insert bug noted below.
         .execute()
         .data or []
     )
+
+    # ── Dedupe by exact as_of_data_ts (Oct 13 2026: found live -- the final
+    # capture of the day got inserted ~190x with an identical timestamp,
+    # which flattened the end of the replay chart into a long repeated-label
+    # tail). This is a defensive fix on the READ side, same spirit as the
+    # earlier "exact-timestamp match instead of a window" class of bugs in
+    # this codebase; the INSERT-side root cause (why one cycle wrote itself
+    # 190 times) is still open -- see the note left in main.py's capture
+    # scheduler job for Manish to track separately, since it's also bloating
+    # gex_regime_log's row count (relevant to the pending DB-size cleanup).
+    seen_ts = set()
+    deduped_rows = []
+    for r in rows:
+        ts = r["as_of_data_ts"]
+        if ts in seen_ts:
+            continue
+        seen_ts.add(ts)
+        deduped_rows.append(r)
+    rows = deduped_rows
 
     points = [
         {
