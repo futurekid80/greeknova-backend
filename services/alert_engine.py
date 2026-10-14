@@ -41,15 +41,23 @@ PERSISTENCE_MILESTONES = [50, 75, 90]
 _sent_alerts: set = set()
 _sent_date:   str = ""
 
+# ── Candidate-alert state (Oct 14 2026) — see block below ────────────────────
+_regime_state: dict = {}       # symbol -> last-seen GEX regime
+_max_pain_state: dict = {}     # symbol -> last-alerted max_pain value
+_elite_seen_today: set = set() # symbols already alerted as newly-Elite today
+
 IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _reset_if_new_day():
-    global _sent_alerts, _sent_date
+    global _sent_alerts, _sent_date, _regime_state, _max_pain_state, _elite_seen_today
     today = datetime.now(IST).strftime('%Y-%m-%d')
     if today != _sent_date:
         _sent_alerts = set()
         _sent_date   = today
+        _regime_state = {}
+        _max_pain_state = {}
+        _elite_seen_today = set()
 
 
 def _get_milestone(persistence_pct: int) -> Optional[int]:
@@ -107,6 +115,29 @@ def run_alert_check():
         _check_intraday_signals()
     except Exception as e:
         print(f"[ALERTS] Alert check error: {e}")
+
+    # ── Candidate alert types (Oct 14 2026) ───────────────────────────────
+    # Manish wants to see these live before deciding which become permanent
+    # / public-facing. Each is wrapped in its own try/except so one bad
+    # check can't take down the others or the three proven alerts above.
+    # All go to the same PERSONAL_CHAT_ID as everything else in this file —
+    # nothing here is public yet.
+    try:
+        _check_near_strike_unwind()
+    except Exception as e:
+        print(f"[ALERTS] Near-strike unwind (candidate) error: {e}")
+    try:
+        _check_gex_regime_flip()
+    except Exception as e:
+        print(f"[ALERTS] GEX regime flip (candidate) error: {e}")
+    try:
+        _check_max_pain_shift()
+    except Exception as e:
+        print(f"[ALERTS] Max pain shift (candidate) error: {e}")
+    try:
+        _check_elite_tier_entry()
+    except Exception as e:
+        print(f"[ALERTS] Elite tier entry (candidate) error: {e}")
 
 
 # ── Alert 1: HIGH CONV ────────────────────────────────────────────────────────
@@ -336,3 +367,327 @@ def _check_intraday_signals():
 
     except Exception as e:
         print(f"[ALERTS] Intraday signal check error: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Candidate alert types (Oct 14 2026) — personal-only, for live evaluation.
+# Every message here states what changed (a number, a tier, a rank), never
+# what to do about it — same posture as the three alerts above, mirroring
+# the OI terminology already used across the app rather than
+# bullish/bearish-as-opinion language.
+# ═══════════════════════════════════════════════════════════════════════════
+
+NSU_NEAR_STRIKE_PCT = 4.0
+NSU_UNWIND_DROP_PCT = 40.0
+NSU_BASELINE_LOOKBACK_MIN = 20
+NSU_MIN_OI = 5000
+
+
+def _check_near_strike_unwind():
+    """A strike close to spot (CE = resistance, PE = support) whose OI has
+    collapsed over the last ~20 minutes — the same condition already
+    detected server-side for web push (services/push_checker.py), computed
+    independently here so a bug in this candidate check can never affect
+    the live push-notification path real users already receive."""
+    from utils.db import get_supabase
+    supabase = get_supabase()
+
+    now = datetime.now(timezone.utc)
+    today = now.date().isoformat()
+
+    latest_raw = []
+    for offset in range(0, 200000, 1000):
+        batch = supabase.from_("oi_snapshots") \
+            .select("symbol,strike,option_type,expiry,oi,last_price,timestamp") \
+            .gte("timestamp", (now - timedelta(minutes=7)).isoformat()) \
+            .lte("timestamp", now.isoformat()) \
+            .in_("option_type", ["CE", "PE"]) \
+            .range(offset, offset + 999).execute()
+        if not batch.data:
+            break
+        latest_raw.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+    if not latest_raw:
+        return
+
+    latest_by_key = {}
+    ts_new = None
+    for r in latest_raw:
+        key = (r["symbol"], r["strike"], r["option_type"], r["expiry"])
+        if key not in latest_by_key or r["timestamp"] > latest_by_key[key]["timestamp"]:
+            latest_by_key[key] = r
+        if ts_new is None or r["timestamp"] > ts_new:
+            ts_new = r["timestamp"]
+
+    ts_new_dt = datetime.fromisoformat(ts_new.replace("+00:00", "")).replace(tzinfo=timezone.utc)
+    baseline_center = ts_new_dt - timedelta(minutes=NSU_BASELINE_LOOKBACK_MIN)
+    baseline_raw = []
+    for offset in range(0, 200000, 1000):
+        batch = supabase.from_("oi_snapshots") \
+            .select("symbol,strike,option_type,expiry,oi,timestamp") \
+            .gte("timestamp", (baseline_center - timedelta(minutes=4)).isoformat()) \
+            .lte("timestamp", (baseline_center + timedelta(minutes=4)).isoformat()) \
+            .in_("option_type", ["CE", "PE"]) \
+            .range(offset, offset + 999).execute()
+        if not batch.data:
+            break
+        baseline_raw.extend(batch.data)
+        if len(batch.data) < 1000:
+            break
+
+    def _ts(row):
+        return datetime.fromisoformat(row["timestamp"].replace("+00:00", "")).replace(tzinfo=timezone.utc)
+
+    baseline_by_key = {}
+    for r in baseline_raw:
+        key = (r["symbol"], r["strike"], r["option_type"], r["expiry"])
+        cur = baseline_by_key.get(key)
+        if cur is None or abs((_ts(r) - baseline_center).total_seconds()) < abs((_ts(cur) - baseline_center).total_seconds()):
+            baseline_by_key[key] = r
+    if not baseline_by_key:
+        return
+
+    cmp_res = supabase.from_("cmp_prices").select("symbol,cmp,timestamp") \
+        .gte("timestamp", (now - timedelta(minutes=10)).isoformat()) \
+        .order("timestamp", desc=True).limit(2000).execute()
+    cmp_map, seen_cmp = {}, set()
+    for c in (cmp_res.data or []):
+        if c["symbol"] not in seen_cmp:
+            try:
+                cmp_map[c["symbol"]] = float(c["cmp"])
+            except (TypeError, ValueError):
+                continue
+            seen_cmp.add(c["symbol"])
+
+    nearest_expiry_map = {}
+    for r in latest_raw:
+        sym, exp = r["symbol"], r.get("expiry")
+        if not exp or exp < today:
+            continue
+        if sym not in nearest_expiry_map or exp < nearest_expiry_map[sym]:
+            nearest_expiry_map[sym] = exp
+
+    for key, latest in latest_by_key.items():
+        sym, strike, opt, expiry = key
+        if nearest_expiry_map.get(sym) != expiry:
+            continue
+        spot = cmp_map.get(sym)
+        if not spot or spot <= 0:
+            continue
+        try:
+            strike_f = float(strike)
+        except (TypeError, ValueError):
+            continue
+        if abs(strike_f - spot) / spot > NSU_NEAR_STRIKE_PCT / 100:
+            continue
+
+        base = baseline_by_key.get(key)
+        if not base:
+            continue
+        oi_now = latest.get("oi") or 0
+        oi_base = base.get("oi") or 0
+        if oi_base < NSU_MIN_OI:
+            continue
+        chg_pct = (oi_now - oi_base) / oi_base * 100
+        if chg_pct > -NSU_UNWIND_DROP_PCT:
+            continue
+
+        alert_key = f"tg_nsu_{sym}_{strike}_{opt}_{ts_new}"
+        if alert_key in _sent_alerts:
+            continue
+
+        pct_from_spot = abs(round((strike_f - spot) / spot * 100, 2))
+        side = "resistance" if opt == "CE" else "support"
+        text = (
+            f"⚡ *Near-Strike Unwind*\n"
+            f"*{sym}* {int(strike_f)} {opt} · {side} breaking ({pct_from_spot:.1f}% from spot)\n"
+            f"OI {chg_pct:.1f}% in ~{NSU_BASELINE_LOOKBACK_MIN}min · now {int(oi_now):,} · LTP ₹{latest.get('last_price')}\n"
+            f"_GreekNova · Informational only · candidate alert_"
+        )
+        if send_telegram(text):
+            _sent_alerts.add(alert_key)
+            print(f"[ALERTS] (candidate) Near-strike unwind sent: {sym} {strike} {opt}")
+
+
+def _check_gex_regime_flip():
+    """Fires when a symbol's near-spot gamma regime (SHORT_GAMMA /
+    LONG_GAMMA) changes from what it was last cycle. Uses the already
+    background-refreshed gamma_exposure cache — cheap, no extra compute."""
+    from services.gamma_exposure import get_gamma_exposure
+
+    data = get_gamma_exposure()
+    watchlist = data.get("watchlist", []) if isinstance(data, dict) else []
+
+    for row in watchlist:
+        sym = row.get("symbol")
+        regime = row.get("regime")
+        if not sym or not regime:
+            continue
+
+        prev = _regime_state.get(sym)
+        _regime_state[sym] = regime
+        if prev is None or prev == regime:
+            continue  # first sighting today (baseline) or unchanged — no alert
+
+        flip_point = row.get("flip_point") or row.get("local_flip_point")
+        spot = row.get("cmp")
+        alert_key = f"tg_regime_{sym}_{regime}_{datetime.now(IST).strftime('%Y-%m-%d_%H%M')}"
+        if alert_key in _sent_alerts:
+            continue
+
+        regime_label = {"SHORT_GAMMA": "negative (amplifying)", "LONG_GAMMA": "positive (dampening)"}.get(regime, regime)
+        flip_line = f"Flip point: {flip_point:,.0f}\n" if flip_point else ""
+        text = (
+            f"🔁 *Gamma Regime Flip*\n"
+            f"*{sym}* · spot ₹{spot:,.1f}\n" if spot else f"🔁 *Gamma Regime Flip*\n*{sym}*\n"
+        )
+        text += (
+            f"Regime changed: {regime_label}\n"
+            f"{flip_line}"
+            f"_GreekNova · Informational only · candidate alert_"
+        )
+        if send_telegram(text):
+            _sent_alerts.add(alert_key)
+            print(f"[ALERTS] (candidate) Regime flip sent: {sym} -> {regime}")
+
+
+MAX_PAIN_MIN_SHIFT_PCT = 1.0  # ignore sub-1%-of-spot noise, same scale as other debounces here
+
+
+def _check_max_pain_shift():
+    """Fires when nearest-expiry max pain moves by >= MAX_PAIN_MIN_SHIFT_PCT
+    of spot since the last time this check alerted for that symbol."""
+    from api.max_pain import get_max_pain_all
+
+    data = get_max_pain_all()
+    symbols = data.get("symbols", []) if isinstance(data, dict) else []
+
+    for row in symbols:
+        sym = row.get("symbol")
+        mp = row.get("max_pain")
+        cmp = row.get("cmp")
+        if not sym or not mp or not cmp:
+            continue
+
+        prev_mp = _max_pain_state.get(sym)
+        if prev_mp is None:
+            _max_pain_state[sym] = mp  # baseline only, no alert on first sighting
+            continue
+        if prev_mp == mp:
+            continue
+
+        shift_pct = abs(mp - prev_mp) / cmp * 100
+        if shift_pct < MAX_PAIN_MIN_SHIFT_PCT:
+            continue
+
+        alert_key = f"tg_maxpain_{sym}_{mp}_{datetime.now(IST).strftime('%Y-%m-%d_%H%M')}"
+        if alert_key in _sent_alerts:
+            continue
+
+        text = (
+            f"🎯 *Max Pain Shift*\n"
+            f"*{sym}* {row.get('expiry','')} · spot ₹{cmp:,.1f}\n"
+            f"Max pain moved {int(prev_mp):,} → {int(mp):,}\n"
+            f"_GreekNova · Informational only · candidate alert_"
+        )
+        if send_telegram(text):
+            _max_pain_state[sym] = mp
+            _sent_alerts.add(alert_key)
+            print(f"[ALERTS] (candidate) Max pain shift sent: {sym} {prev_mp} -> {mp}")
+
+
+def _check_elite_tier_entry():
+    """Fires once per symbol per day, the first cycle it's seen in Elite
+    tier of Positional Intelligence's Stealth Buildup."""
+    from api.positional_intelligence import get_positional_intelligence
+
+    data = get_positional_intelligence()
+    stealth = data.get("stealth_buildup", []) if isinstance(data, dict) else []
+
+    for row in stealth:
+        if row.get("tier") != "ELITE":
+            continue
+        sym = row.get("symbol")
+        if not sym or sym in _elite_seen_today:
+            continue
+
+        text = (
+            f"🏆 *Elite Tier Entry*\n"
+            f"*{sym}* · ₹{row.get('cmp')}\n"
+            f"Top-3 FUT OI rank · OI {row.get('today_oi_chg', 0):+.1f}% · Price {row.get('price_chg', 0):+.2f}%\n"
+            f"_GreekNova · Informational only · candidate alert_"
+        )
+        if send_telegram(text):
+            _elite_seen_today.add(sym)
+            print(f"[ALERTS] (candidate) Elite tier entry sent: {sym}")
+
+
+# ── Scheduled digests (candidate) — called directly from main.py's
+# scheduler at fixed IST times, not from run_alert_check() ──────────────────
+
+def send_premarket_digest():
+    """Once daily, ~8:30 AM IST. Folds in the expiry reminder so it's one
+    message, not two."""
+    try:
+        from utils.db import get_supabase
+        from api.premarket_brief import get_premarket_brief
+        from api.max_pain import get_max_pain_all
+
+        supabase = get_supabase()
+        brief = get_premarket_brief(supabase) or {}
+        gift = brief.get("gift_nifty") or {}
+        fii_dii = brief.get("fii_dii") or {}
+
+        mp = get_max_pain_all()
+        expiring_today = sorted({
+            r["symbol"] for r in (mp.get("symbols") or [])
+            if r.get("days_to_expiry") == 0
+        })
+        expiry_line = f"📅 Expiry today: {', '.join(expiring_today)}\n" if expiring_today else ""
+
+        gift_line = ""
+        if gift.get("pct_change") is not None:
+            gift_line = f"GIFT NIFTY: {gift.get('pct_change'):+.2f}%\n"
+
+        fii_line = ""
+        if fii_dii.get("fii_net") is not None:
+            fii_line = f"FII net: ₹{fii_dii.get('fii_net'):,.0f} Cr · DII net: ₹{fii_dii.get('dii_net', 0):,.0f} Cr\n"
+
+        text = (
+            f"📋 *Pre-Market — {brief.get('date','')}*\n"
+            f"{expiry_line}"
+            f"{gift_line}"
+            f"{fii_line}"
+            f"_GreekNova · Informational only · candidate alert_"
+        )
+        send_telegram(text)
+        print("[ALERTS] (candidate) Pre-market digest sent")
+    except Exception as e:
+        print(f"[ALERTS] Pre-market digest error: {e}")
+
+
+def send_eod_digest():
+    """Once daily, ~15:45 IST, after close."""
+    try:
+        from api.positional_intelligence import get_positional_intelligence
+
+        data = get_positional_intelligence()
+        summary = data.get("summary", {}) if isinstance(data, dict) else {}
+        elite_names = sorted({
+            r["symbol"] for r in (data.get("stealth_buildup") or [])
+            if r.get("tier") == "ELITE"
+        })
+        elite_line = f"Elite: {', '.join(elite_names[:10])}\n" if elite_names else ""
+
+        text = (
+            f"📊 *EOD Wrap — {data.get('date','')}*\n"
+            f"Long Buildup: {summary.get('long_bias', 0)} · Short Buildup: {summary.get('short_bias', 0)}\n"
+            f"Stealth Buildup today: {summary.get('stealth_buildup', 0)} stocks\n"
+            f"{elite_line}"
+            f"_GreekNova · Informational only · candidate alert_"
+        )
+        send_telegram(text)
+        print("[ALERTS] (candidate) EOD digest sent")
+    except Exception as e:
+        print(f"[ALERTS] EOD digest error: {e}")

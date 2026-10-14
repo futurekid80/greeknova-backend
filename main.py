@@ -494,6 +494,27 @@ async def lifespan(app: FastAPI):
             print(f"[earnings] refresh job failed: {e}")
     scheduler.add_job(_run_earnings_refresh_job, "cron", hour=7, minute=50, timezone="Asia/Kolkata", id="earnings_refresh")
 
+    # Candidate Telegram digests (Oct 14 2026) — personal-only, for Manish to
+    # watch live before deciding which alert types become permanent/public.
+    def _run_premarket_digest_job():
+        try:
+            from services.alert_engine import send_premarket_digest
+            send_premarket_digest()
+        except Exception as e:
+            print(f"[ALERTS] Pre-market digest job failed: {e}")
+    scheduler.add_job(_run_premarket_digest_job, "cron", hour=8, minute=40, timezone="Asia/Kolkata", id="premarket_digest")
+
+    def _run_eod_digest_job():
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            if not is_trading_day(today_ist()):
+                return
+            from services.alert_engine import send_eod_digest
+            send_eod_digest()
+        except Exception as e:
+            print(f"[ALERTS] EOD digest job failed: {e}")
+    scheduler.add_job(_run_eod_digest_job, "cron", hour=15, minute=45, timezone="Asia/Kolkata", id="eod_digest")
+
     def _run_spot_bars_heal_job():
         """Daily 08:50 IST: F&O stocks that joined recently only get one new bar a day from the EOD
         append, so they never had history. Find symbols with too few recent bars and backfill just those."""
