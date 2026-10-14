@@ -1973,11 +1973,16 @@ def auth_kite_login(body: KiteLoginRequest):
             except Exception as e:
                 print(f"[KiteLogin] trial_users touch warning: {e}")
         else:
-            from utils.market_calendar import today_ist, get_next_trading_day
+            # Oct 14 2026: changed from a 5-TRADING-day trial to a strict
+            # 7-CALENDAR-day trial per Manish's call -- the clock runs on
+            # real days from first Zerodha login, weekends/holidays included,
+            # no extension for non-trading days. Trial users are Zerodha-
+            # authenticated like everyone else, so they're still bound by
+            # access_gate.py's daily-freshness check on top of this window.
+            from utils.market_calendar import today_ist
+            from datetime import timedelta
             start = today_ist()
-            expires = start
-            for _ in range(4):  # start is trading day 1; 4 more -> day 5
-                expires = get_next_trading_day(expires)
+            expires = start + timedelta(days=7)
             try:
                 admin.from_("trial_users").insert({
                     "email": kite_email,
