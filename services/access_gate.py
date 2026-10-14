@@ -56,6 +56,7 @@ _lock = threading.Lock()
 _token_cache = {}       # sha256(token) -> (email or None, expires_at)
 _members = {"emails": set(), "loaded_at": 0.0}
 _trials = {"active": {}, "expired": set(), "loaded_at": 0.0}  # active: email -> expires_date (iso str)
+_kite_logins = {"dates": {}, "loaded_at": 0.0}  # email -> last_login_date (iso str), anyone who's ever logged in via Zerodha
 _stats = Counter()
 _would_block_paths = Counter()
 _recent = deque(maxlen=200)
@@ -113,6 +114,23 @@ def _load_trials():
     return active, expired
 
 
+def _load_kite_logins():
+    """email -> last_login_date (iso str), for every email that has ever
+    logged in via Zerodha. An email with no row here never went through
+    Zerodha (e.g. the shared demo account, or a beta_users row added by hand
+    before anyone built this), so it's not held to the daily-freshness rule
+    below -- there's nothing to go stale."""
+    from utils.db import get_supabase
+    res = get_supabase().from_("kite_login_log").select("email,last_login_date").execute()
+    out = {}
+    for r in (res.data or []):
+        email = (r.get("email") or "").strip().lower()
+        d = r.get("last_login_date")
+        if email and d:
+            out[email] = d
+    return out
+
+
 def _refresh_members_and_trials():
     now = time.time()
     with _lock:
@@ -122,14 +140,35 @@ def _refresh_members_and_trials():
     try:
         emails = _load_members()
         active, expired = _load_trials()
+        try:
+            kite_logins = _load_kite_logins()
+        except Exception as e:
+            print(f"[GATE] kite_login_log load failed (table may not exist yet): {e}")
+            kite_logins = None
         with _lock:
             _members["emails"] = emails
             _members["loaded_at"] = now
             _trials["active"] = active
             _trials["expired"] = expired
             _trials["loaded_at"] = now
+            if kite_logins is not None:
+                _kite_logins["dates"] = kite_logins
+                _kite_logins["loaded_at"] = now
     except Exception as e:
         print(f"[GATE] member/trial list load failed: {e}")
+
+
+def _kite_session_stale(email: str) -> bool:
+    """True only for an email that HAS logged in via Zerodha before but not
+    today (Asia/Kolkata). An email never seen in kite_login_log returns
+    False (nothing to check) -- covers the demo account and any legacy
+    non-Zerodha beta user."""
+    from utils.market_calendar import today_ist
+    with _lock:
+        last = _kite_logins["dates"].get(email)
+    if not last:
+        return False
+    return last != today_ist().isoformat()
 
 
 def _access_status(email: str) -> str:
@@ -260,11 +299,21 @@ async def _gate(request: Request, call_next):
         else:
             status_kind = await run_in_threadpool(_access_status, email)
             if status_kind in ("member", "trial_active"):
-                _note_member(email)
-                decision, block, status = (
-                    ("user_member_ok", False, 0) if status_kind == "member"
-                    else ("user_trial_ok", False, 0)
-                )
+                # Oct 14 2026: being a member/active trial proves identity and
+                # payment/eligibility, but Zerodha requires the Zerodha login
+                # itself to still be current -- someone who logged in via
+                # Kite days ago and hasn't been back today shouldn't see data
+                # just because their GreekNova (Supabase) session is still
+                # valid. Only applies to emails that have a Zerodha login on
+                # record at all, so the shared demo account is unaffected.
+                if await run_in_threadpool(_kite_session_stale, email):
+                    decision, block, status = "kite_session_stale", True, 401
+                else:
+                    _note_member(email)
+                    decision, block, status = (
+                        ("user_member_ok", False, 0) if status_kind == "member"
+                        else ("user_trial_ok", False, 0)
+                    )
             elif status_kind == "trial_expired":
                 decision, block, status = "user_trial_expired", True, 403
             else:
@@ -272,10 +321,12 @@ async def _gate(request: Request, call_next):
 
     _record(decision, path, block, _who(request) if block else "")
     if block and mode == "enforce":
-        if status == 401:
-            msg = "Sign in required"
+        if decision == "kite_session_stale":
+            msg = "Your Zerodha session has expired. Please log in with Zerodha again."
         elif decision == "user_trial_expired":
             msg = "Your GreekNova trial has ended. Upgrade to keep access."
+        elif status == 401:
+            msg = "Sign in required"
         else:
             msg = "This email does not have GreekNova access"
         return JSONResponse({"error": msg, "code": decision}, status_code=status)

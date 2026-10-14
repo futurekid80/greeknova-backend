@@ -2005,6 +2005,25 @@ def auth_kite_login(body: KiteLoginRequest):
     except Exception as e:
         print(f"[KiteLogin] kite_identities upsert skipped: {e}")
 
+    # Oct 14 2026: Zerodha was explicit that without a Zerodha login a user
+    # shouldn't see data at all, including someone who logged in earlier and
+    # has since logged out of Zerodha. GreekNova's own sign-in (Supabase)
+    # stays valid far longer than that, so access_gate.py enforces a separate
+    # rule on top of plain membership: anyone who has ever logged in via
+    # Zerodha must have done so again TODAY (Asia/Kolkata), checked against
+    # this table. Must not block login if it fails -- worst case someone's
+    # daily check is a day stale, not that no one can log in.
+    try:
+        from utils.market_calendar import today_ist
+        admin.from_("kite_login_log").upsert({
+            "email": kite_email,
+            "kite_user_id": kite_user_id,
+            "last_login_date": today_ist().isoformat(),
+            "last_login_at": "now()",
+        }, on_conflict="email").execute()
+    except Exception as e:
+        print(f"[KiteLogin] kite_login_log upsert failed: {e}")
+
     try:
         link_res = admin.auth.admin.generate_link({"type": "magiclink", "email": kite_email})
     except Exception as e:
