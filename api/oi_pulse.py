@@ -465,11 +465,28 @@ def _get_eod_pulse(supabase):
     items = []
     for r in rows.data:
         sym = r["symbol"]
-        fut_oi_chg = float(r.get("fut_oi_chg_pct") or 0)
-        oi_chg = fut_oi_chg if fut_oi_chg != 0 else round(float(r.get("oi_chg_pct") or 0), 2)
+        # BUG FIX (Oct 14 2026): this used to fall back to the unrelated
+        # options+futures combined `oi_chg_pct` whenever fut_oi_chg_pct was
+        # 0 -- treating a genuinely flat futures-OI day the same as "no FUT
+        # data for this symbol". That's wrong: 0.0 is a real, valid value
+        # (near-month FUT OI simply didn't move today), not a sentinel for
+        # missing data. Caught via INDIANB on 2026-10-14: its near-month FUT
+        # OI was flat (fut_oi_chg_pct=0.0, correctly NEUTRAL in the EOD
+        # report), but this scanner displayed +18.47% -- the symbol's total
+        # OI change (options+futures combined) from oi_chg_pct -- as if it
+        # were the FUT change, and fed that same wrong number into
+        # classify() below, so the signal/badge was wrong too. Only fall
+        # back when fut_oi_chg_pct is actually missing (None/absent), never
+        # when it's a real zero.
+        _fut_raw = r.get("fut_oi_chg_pct")
+        fut_oi_chg = float(_fut_raw) if _fut_raw is not None else None
+        oi_chg = fut_oi_chg if fut_oi_chg is not None else round(float(r.get("oi_chg_pct") or 0), 2)
         _next_raw = r.get("fut_oi_chg_pct_next")
         fut_oi_chg_next = round(float(_next_raw), 2) if _next_raw is not None else None
-        fut_oi_chg_combined = round(fut_oi_chg + fut_oi_chg_next, 2) if fut_oi_chg_next is not None else None
+        fut_oi_chg_combined = (
+            round(oi_chg + fut_oi_chg_next, 2)
+            if fut_oi_chg_next is not None else None
+        )
         price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         ltp = cmp_map.get(sym, 0)
         is_index = sym in INDEX_NSE_MAP
