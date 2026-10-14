@@ -48,6 +48,27 @@ PUBLIC_EXACT = {"/", "/health", "/market-status", "/waitlist-join",
                 "/auth/kite-login", "/auth/demo-login"}
 PUBLIC_PREFIXES = ("/public/",)
 
+# Oct 14 2026: the two endpoints behind Manish's personal "Morning Market
+# Report" scheduled task (api/premarket_brief.py, api/eod_report.py) are
+# normal member-gated "user" paths -- real signed-in members reach them
+# fine because the frontend's window.fetch monkeypatch (lib/authFetch.ts)
+# attaches their Supabase token automatically. The scheduled task is a
+# server-side cron caller with no browser and no Supabase session, so it
+# has no token to send -- it started 401ing ("Sign in required") the
+# moment GATE_MODE went to enforce today. Found while investigating "the
+# pre-market report doesn't run and fails every day" -- the report artifact
+# was frozen on Oct 9 data days before enforce even went live, so whatever
+# broke it originally is still unconfirmed, but this is a second, now
+# guaranteed-reproducible, blocker on top of that.
+# Fix: a narrow internal-key bypass for exactly these two paths, checked
+# BEFORE the normal member/token check below -- not added to SYSTEM_PREFIXES
+# or PUBLIC_EXACT, which would also open them to the browser/anonymous path
+# Zerodha asked us to close off (any domain, any unauthenticated caller).
+# Only a request carrying the correct X-Internal-Key header skips the
+# member check; everyone else (including an unauthenticated browser) still
+# falls through to the normal user-gate logic below, unaffected.
+INTERNAL_FEED_PATHS = {"/premarket-brief", "/eod-report"}
+
 # Callable by machines/cron or admin tools - not gated here (see docstring).
 SYSTEM_PREFIXES = (
     "/admin/", "/capture-now", "/force-login", "/archive-", "/run-",
@@ -294,6 +315,16 @@ async def _gate(request: Request, call_next):
     if kind != "user":
         _record(kind, path, False)
         return await call_next(request)
+
+    if path in INTERNAL_FEED_PATHS:
+        import hmac
+        feed_key = os.getenv("INTERNAL_FEED_KEY", "")
+        sent = request.headers.get("x-internal-key", "")
+        if feed_key and hmac.compare_digest(sent, feed_key):
+            _record("internal_feed_ok", path, False)
+            return await call_next(request)
+        # wrong/missing key -- fall through to the normal member/token
+        # check below, same as any other caller of this path
 
     auth = request.headers.get("authorization", "")
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
