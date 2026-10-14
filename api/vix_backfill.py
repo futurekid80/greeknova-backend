@@ -89,3 +89,45 @@ def backfill_vix_history(daily_years: int = 5, intraday_days: int = 60):
         result["intraday_rows"] = len(intraday_rows)
 
     return result
+
+
+def append_vix_daily_close(days_back: int = 20) -> dict:
+    """Catch up vix_daily_history for the last `days_back` calendar days.
+
+    Oct 14 2026: found vix_daily_history frozen at 2026-10-01 -- the only
+    thing that ever writes to it is backfill_vix_history() above, called
+    once manually via /admin/backfill-vix-history. There was never a
+    recurring job appending each new day's close, so the "Daily close"
+    chart on the VIX page silently went stale (Manish noticed ~13 trading
+    days later). This is the lightweight recurring counterpart: fetch only
+    a short recent window (not daily_years=5) and upsert, so it's cheap
+    enough to run every trading day. Safe to rerun -- same upsert-on-date
+    as the full backfill.
+    """
+    from services.kite_auth import get_kite_client
+    kite = get_kite_client()
+    supabase = get_supabase()
+
+    end = datetime.now()
+    start = end - timedelta(days=days_back)
+    result = {"daily_rows": 0, "errors": []}
+    try:
+        candles = kite.historical_data(
+            INDIA_VIX_TOKEN,
+            start.strftime("%Y-%m-%d %H:%M:%S"),
+            end.strftime("%Y-%m-%d %H:%M:%S"),
+            "day",
+        )
+        rows = [{
+            "date": c["date"].strftime("%Y-%m-%d") if hasattr(c["date"], "strftime") else str(c["date"])[:10],
+            "open": c["open"],
+            "high": c["high"],
+            "low": c["low"],
+            "close": c["close"],
+        } for c in candles]
+        if rows:
+            supabase.table("vix_daily_history").upsert(rows, on_conflict="date").execute()
+            result["daily_rows"] = len(rows)
+    except Exception as e:
+        result["errors"].append(str(e))
+    return result

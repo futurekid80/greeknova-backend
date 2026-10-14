@@ -515,6 +515,23 @@ async def lifespan(app: FastAPI):
             print(f"[ALERTS] EOD digest job failed: {e}")
     scheduler.add_job(_run_eod_digest_job, "cron", hour=15, minute=45, timezone="Asia/Kolkata", id="eod_digest")
 
+    def _run_vix_daily_close_job():
+        """Daily 15:40 IST: append today's INDIA VIX close to vix_daily_history.
+        (Oct 14 2026) This table was only ever written by the one-off
+        /admin/backfill-vix-history endpoint -- nothing kept it current, so
+        the VIX page's "Daily close" chart had been stuck at Oct 1 for two
+        weeks before Manish noticed. This job is the fix going forward."""
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            if not is_trading_day(today_ist()):
+                return
+            from api.vix_backfill import append_vix_daily_close
+            res = append_vix_daily_close(days_back=5)
+            print(f"[VIX] Daily close append: {res}")
+        except Exception as e:
+            print(f"[VIX] Daily close job failed: {e}")
+    scheduler.add_job(_run_vix_daily_close_job, "cron", hour=15, minute=40, timezone="Asia/Kolkata", id="vix_daily_close")
+
     def _run_spot_bars_heal_job():
         """Daily 08:50 IST: F&O stocks that joined recently only get one new bar a day from the EOD
         append, so they never had history. Find symbols with too few recent bars and backfill just those."""
@@ -1718,6 +1735,14 @@ def vix_history(range: str = "6m"):
 def admin_backfill_vix_history(daily_years: int = 5, intraday_days: int = 60):
     from api.vix_backfill import backfill_vix_history
     return backfill_vix_history(daily_years, intraday_days)
+
+@app.get("/admin/append-vix-daily-close")
+def admin_append_vix_daily_close(days_back: int = 20):
+    """Lightweight catch-up for vix_daily_history gaps (see vix_daily_close
+    scheduled job). days_back=20 is enough to cover the 2026-10-02..10-14
+    gap found on Oct 14 2026."""
+    from api.vix_backfill import append_vix_daily_close
+    return append_vix_daily_close(days_back)
 
 @app.get("/admin/run-strike-iv-capture")
 def admin_run_strike_iv_capture():
