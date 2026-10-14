@@ -35,7 +35,17 @@ from starlette.concurrency import run_in_threadpool
 from starlette.middleware.base import BaseHTTPMiddleware
 
 PUBLIC_EXACT = {"/", "/health", "/market-status", "/waitlist-join",
-                "/docs", "/openapi.json", "/redoc"}
+                "/docs", "/openapi.json", "/redoc",
+                # Oct 14 2026: GATE_MODE=enforce went live today and these
+                # two were missed -- they're how someone GETS a token in the
+                # first place, so demanding one to call them is a lockout,
+                # not a protection. Caught same-day via a real failed login
+                # ("Zerodha login could not be verified"): every kite-login
+                # and demo-login call was 401ing on its own gate. Both still
+                # do their own real verification (Kite's checksum exchange;
+                # the demo code check) -- this only exempts them from the
+                # bearer-token requirement that nothing can satisfy yet.
+                "/auth/kite-login", "/auth/demo-login"}
 PUBLIC_PREFIXES = ("/public/",)
 
 # Callable by machines/cron or admin tools - not gated here (see docstring).
