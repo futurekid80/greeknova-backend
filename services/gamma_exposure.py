@@ -749,6 +749,26 @@ def _compute_gamma_exposure(date: str = None):
             if abs(nearest - spot) / spot <= 0.06:  # only report a flip that's plausibly in play
                 flip_point = nearest
 
+        # ── Directional flip points: Oct 15 2026 addition. `flip_point`
+        # above collapses every crossing down to a single "nearest to spot"
+        # number, which hides the case where there's a real crossing on the
+        # OTHER side of spot too (e.g. spot sitting between an upside and a
+        # downside flip). Surface both sides explicitly so "what's the flip
+        # zone below spot" doesn't require re-deriving it from the chain by
+        # hand. Same 6% plausibility guard as flip_point, applied per side.
+        upside_flip_point = None
+        downside_flip_point = None
+        above = [c for c in crossings if c > spot]
+        below = [c for c in crossings if c < spot]
+        if above:
+            nearest_above = min(above, key=lambda f: f - spot)
+            if (nearest_above - spot) / spot <= 0.06:
+                upside_flip_point = nearest_above
+        if below:
+            nearest_below = max(below, key=lambda f: f - spot)  # closest from below = largest (least negative) gap
+            if (spot - nearest_below) / spot <= 0.06:
+                downside_flip_point = nearest_below
+
         # ── Local flip point: a second, looser number alongside the
         # cumulative one above. Instead of a running total across the whole
         # chain, this looks only at each strike's OWN net GEX (CE - PE at
@@ -1163,6 +1183,8 @@ def _compute_gamma_exposure(date: str = None):
             "put_wall_gamma_oi": put_wall_gamma_oi,
             "strike_ladder": strike_ladder,
             "flip_point": flip_point,
+            "upside_flip_point": upside_flip_point,
+            "downside_flip_point": downside_flip_point,
             "local_flip_point": local_flip_point,
             "net_gex": round(net_gex, 2),
             "net_gex_near_spot": round(local_net_gex, 2),
@@ -1295,6 +1317,8 @@ def _compute_gamma_exposure(date: str = None):
                 "call_wall_strike": r["call_wall_strike"],
                 "put_wall_strike": r["put_wall_strike"],
                 "flip_point": r["flip_point"],
+                "upside_flip_point": r["upside_flip_point"],
+                "downside_flip_point": r["downside_flip_point"],
                 "pct_to_call_wall": r["pct_to_call_wall"],
                 "pct_to_put_wall": r["pct_to_put_wall"],
             }
@@ -1478,7 +1502,8 @@ def get_session_replay(symbol: str = "NIFTY", date: str = None):
     rows = (
         supabase.from_("gex_regime_log")
         .select("as_of_data_ts,cmp,regime,net_gex,net_gex_near_spot,net_dex,"
-                "net_dex_near_spot,call_wall_strike,put_wall_strike,flip_point")
+                "net_dex_near_spot,call_wall_strike,put_wall_strike,flip_point,"
+                "upside_flip_point,downside_flip_point")
         .eq("symbol", symbol)
         .gte("as_of_data_ts", f"{today}T00:00:00+00:00")
         .lt("as_of_data_ts", f"{today}T23:59:59+00:00")
@@ -1522,6 +1547,8 @@ def get_session_replay(symbol: str = "NIFTY", date: str = None):
             "call_wall_strike": r.get("call_wall_strike"),
             "put_wall_strike": r.get("put_wall_strike"),
             "flip_point": r.get("flip_point"),
+            "upside_flip_point": r.get("upside_flip_point"),
+            "downside_flip_point": r.get("downside_flip_point"),
         }
         for r in rows
     ]
@@ -1705,6 +1732,20 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         if abs(nearest - spot) / spot <= 0.06:
             flip_point = nearest
 
+    # Directional flip points -- see the matching comment in _compute_gamma_exposure.
+    upside_flip_point = None
+    downside_flip_point = None
+    above = [c for c in crossings if c > spot]
+    below = [c for c in crossings if c < spot]
+    if above:
+        nearest_above = min(above, key=lambda f: f - spot)
+        if (nearest_above - spot) / spot <= 0.06:
+            upside_flip_point = nearest_above
+    if below:
+        nearest_below = max(below, key=lambda f: f - spot)
+        if (spot - nearest_below) / spot <= 0.06:
+            downside_flip_point = nearest_below
+
     # Local flip point -- see the matching comment in _compute_gamma_exposure.
     local_flip_point = None
     local_crossings = []
@@ -1741,6 +1782,8 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         "call_wall_strike": call_wall[0] if call_wall else None,
         "put_wall_strike": put_wall[0] if put_wall else None,
         "flip_point": flip_point,
+        "upside_flip_point": upside_flip_point,
+        "downside_flip_point": downside_flip_point,
         "local_flip_point": local_flip_point,
         "strikes": strikes_out,
         "as_of": ts_new,
