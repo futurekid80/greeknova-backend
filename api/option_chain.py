@@ -210,8 +210,13 @@ MIN_VOL_FOR_IV = 50          # was 1 -- see MIN_VOL_FOR_SPIKE note below
 # current reading to also clear an absolute floor, not just a relative one,
 # so a spike is only ever flagged where there's enough real activity for it
 # to mean something.
-MIN_VOL_FOR_SPIKE = 5000      # contracts -- below this, ratio alone can't flag a spike
-MIN_VOL_BASELINE_FOR_SPIKE = 500  # neighbor average must itself be non-trivial
+# Oct 15 2026 (third pass): these now apply to a single 5-min WINDOW's
+# traded volume, not the cumulative day total -- re-tuned down accordingly
+# (the first pass's 5,000/500 floors were sized for cumulative totals and
+# barely filtered anything once interval deltas, which are naturally much
+# smaller, were introduced).
+MIN_VOL_FOR_SPIKE = 1500       # contracts traded in this window -- below this, ratio alone can't flag a spike
+MIN_VOL_BASELINE_FOR_SPIKE = 150  # neighbor window-average must itself be non-trivial
 
 
 def _local_avg(values_by_strike: dict, strikes_sorted: list, idx: int, window: int):
@@ -281,6 +286,21 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
         if ep:
             closed_episodes.append(ep)
 
+    # Oct 15 2026 (third pass): Kite's `volume` field is the day's running
+    # CUMULATIVE total, not this 5-min window's activity -- confirmed live,
+    # the first version of this scan flagged ~160 "all-day ongoing" spikes
+    # for NIFTY, because a cumulative total never goes back down relative
+    # to a neighbor once it pulls ahead, so the cross-sectional comparison
+    # never un-flags for the rest of the day. That isn't a spike *episode*,
+    # it's just "this strike has been busier than its neighbors since
+    # whenever it first pulled ahead." What's actually a discrete, timed
+    # event -- the thing worth logging for BTST planning -- is the volume
+    # traded IN each 5-min window, i.e. this snapshot's cumulative total
+    # minus the previous snapshot's. Track the previous cumulative reading
+    # per strike/side and diff against it before doing the neighbor
+    # comparison.
+    prev_cum_vol = {"ce": {}, "pe": {}}
+
     for ts in timestamps:
         ts_rows = by_ts[ts]
         ce_map = {r["strike"]: r for r in ts_rows if r["option_type"] == "CE"}
@@ -304,7 +324,8 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
             F = best or strikes[len(strikes) // 2]
 
         iv_by_strike = {"ce": {}, "pe": {}}
-        vol_by_strike = {"ce": {}, "pe": {}}
+        vol_by_strike = {"ce": {}, "pe": {}}          # cumulative day total, straight from the snapshot
+        interval_vol_by_strike = {"ce": {}, "pe": {}}  # this window's traded volume -- what the spike check actually uses
         liquid_by_strike = {"ce": {}, "pe": {}}
         for side, smap in (("ce", ce_map), ("pe", pe_map)):
             is_call = side == "ce"
@@ -315,6 +336,15 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                 vol = row.get("volume") or 0
                 oi = row.get("oi") or 0
                 vol_by_strike[side][s] = vol
+                prev = prev_cum_vol[side].get(s)
+                # First snapshot of the day for this strike: its cumulative
+                # total so far IS this window's volume (nothing to diff
+                # against). A cumulative counter resetting mid-day (new
+                # strike entering the selected range, etc.) would otherwise
+                # read as a huge negative -- clamp at 0 rather than treat
+                # that as "no volume this window".
+                interval_vol_by_strike[side][s] = vol if prev is None else max(0, vol - prev)
+                prev_cum_vol[side][s] = vol
                 liquid = oi >= MIN_OI_FOR_IV or vol >= MIN_VOL_FOR_IV
                 liquid_by_strike[side][s] = liquid
                 if liquid:
@@ -345,13 +375,15 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                 else:
                     _close(iv_key)
 
-                # Volume spike
-                vol_val = vol_by_strike[side].get(s)
+                # Volume spike -- uses THIS WINDOW's traded volume (the
+                # cumulative-vs-previous-snapshot diff above), not the raw
+                # cumulative total, so an episode can actually end.
+                vol_val = interval_vol_by_strike[side].get(s)
                 vol_key = (s, side, "VOL")
                 is_vol_spike = False
                 vol_avg = None
                 if vol_val is not None and vol_val >= MIN_VOL_FOR_SPIKE:
-                    vol_avg = _local_avg(vol_by_strike[side], strikes, idx, VOL_SPIKE_WINDOW)
+                    vol_avg = _local_avg(interval_vol_by_strike[side], strikes, idx, VOL_SPIKE_WINDOW)
                     if vol_avg and vol_avg >= MIN_VOL_BASELINE_FOR_SPIKE and vol_val >= vol_avg * VOL_SPIKE_THRESHOLD:
                         is_vol_spike = True
                 if is_vol_spike:
