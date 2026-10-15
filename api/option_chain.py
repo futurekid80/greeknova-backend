@@ -283,7 +283,11 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
 
     def _close(key):
         ep = open_episodes.pop(key, None)
-        if ep:
+        # Drop a single-snapshot flicker (flagged on exactly one 5-min
+        # tick, already gone by the next) -- it's not a real event someone
+        # could have traded into, and without this filter these dominate
+        # the log and bury the episodes that actually persisted.
+        if ep and ep.get("ticks", 1) >= 2:
             closed_episodes.append(ep)
 
     # Oct 15 2026 (third pass): Kite's `volume` field is the day's running
@@ -327,12 +331,20 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
         vol_by_strike = {"ce": {}, "pe": {}}          # cumulative day total, straight from the snapshot
         interval_vol_by_strike = {"ce": {}, "pe": {}}  # this window's traded volume -- what the spike check actually uses
         liquid_by_strike = {"ce": {}, "pe": {}}
+        # Oct 15 2026: Manish wants the LTP and Greeks alongside each spike,
+        # not just the IV/volume number, so he can judge whether writing
+        # into it actually makes sense (a "spike" on a 5-rupee option reads
+        # very differently from the same % move on a 150-rupee one). Snapshot
+        # them once per strike/side/timestamp here rather than recomputing
+        # per spike-check below.
+        ctx_by_strike = {"ce": {}, "pe": {}}
         for side, smap in (("ce", ce_map), ("pe", pe_map)):
             is_call = side == "ce"
             for s in strikes:
                 row = smap.get(s)
                 if not row:
                     continue
+                ltp = row.get("last_price") or 0
                 vol = row.get("volume") or 0
                 oi = row.get("oi") or 0
                 vol_by_strike[side][s] = vol
@@ -347,10 +359,14 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                 prev_cum_vol[side][s] = vol
                 liquid = oi >= MIN_OI_FOR_IV or vol >= MIN_VOL_FOR_IV
                 liquid_by_strike[side][s] = liquid
+                iv = None
                 if liquid:
-                    iv = calculate_iv(row.get("last_price") or 0, F, s, T, r_f, is_call)
+                    iv = calculate_iv(ltp, F, s, T, r_f, is_call)
                     if iv is not None:
                         iv_by_strike[side][s] = iv
+                sigma = (iv / 100) if iv else 0.25
+                greeks = calculate_greeks(F, s, T, r_f, sigma, is_call)
+                ctx_by_strike[side][s] = {"ltp": round(ltp, 2), "oi": oi, **greeks}
 
         for side in ("ce", "pe"):
             for idx, s in enumerate(strikes):
@@ -367,11 +383,14 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                     ep = open_episodes.get(iv_key)
                     if not ep:
                         ep = {"strike": s, "side": side.upper(), "metric": "IV", "start_time": ts,
-                              "peak_time": ts, "peak_value": iv_val, "baseline": round(iv_avg, 2)}
+                              "peak_time": ts, "peak_value": iv_val, "baseline": round(iv_avg, 2),
+                              **ctx_by_strike[side][s]}
                         open_episodes[iv_key] = ep
                     ep["end_time"] = ts
+                    ep["ticks"] = ep.get("ticks", 0) + 1
                     if iv_val > ep["peak_value"]:
                         ep["peak_value"], ep["peak_time"], ep["baseline"] = iv_val, ts, round(iv_avg, 2)
+                        ep.update(ctx_by_strike[side][s])
                 else:
                     _close(iv_key)
 
@@ -390,11 +409,14 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                     ep = open_episodes.get(vol_key)
                     if not ep:
                         ep = {"strike": s, "side": side.upper(), "metric": "VOL", "start_time": ts,
-                              "peak_time": ts, "peak_value": vol_val, "baseline": round(vol_avg, 1)}
+                              "peak_time": ts, "peak_value": vol_val, "baseline": round(vol_avg, 1),
+                              **ctx_by_strike[side][s]}
                         open_episodes[vol_key] = ep
                     ep["end_time"] = ts
+                    ep["ticks"] = ep.get("ticks", 0) + 1
                     if vol_val > ep["peak_value"]:
                         ep["peak_value"], ep["peak_time"], ep["baseline"] = vol_val, ts, round(vol_avg, 1)
+                        ep.update(ctx_by_strike[side][s])
                 else:
                     _close(vol_key)
 
@@ -410,6 +432,7 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
             ep["magnitude_pct"] = round((ep["peak_value"] / ep["baseline"] - 1) * 100, 1)
         else:
             ep["magnitude_pct"] = None
+        ep.pop("ticks", None)
 
     closed_episodes.sort(key=lambda e: e["peak_time"], reverse=True)
 
