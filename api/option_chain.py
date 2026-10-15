@@ -362,11 +362,25 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                 iv = None
                 if liquid:
                     iv = calculate_iv(ltp, F, s, T, r_f, is_call)
-                    if iv is not None:
-                        iv_by_strike[side][s] = iv
                 sigma = (iv / 100) if iv else 0.25
                 greeks = calculate_greeks(F, s, T, r_f, sigma, is_call)
                 ctx_by_strike[side][s] = {"ltp": round(ltp, 2), "oi": oi, **greeks}
+                # Oct 15 2026: "no IV spike in nearby strikes, all deep ITM on
+                # both sides, strange" -- confirmed the mechanism. Deep ITM
+                # options have almost no vega (price barely moves with IV),
+                # so the Black-Scholes solver has to swing its *implied* IV
+                # by a huge amount to explain even a one-tick LTP change --
+                # that's a numerical artifact of a flat vega curve, not a
+                # real IV event, and these strikes are also hardly where a
+                # writer would sell premium (little extrinsic value left to
+                # collect). Only trust a strike's solved IV for spike
+                # detection while it's at most moderately deep (|delta| <=
+                # 0.85) -- past that, vega is too thin for the number to
+                # mean anything.
+                if iv is not None and abs(greeks.get("delta", 0)) > 0.85:
+                    iv = None
+                if iv is not None:
+                    iv_by_strike[side][s] = iv
 
         for side in ("ce", "pe"):
             for idx, s in enumerate(strikes):
