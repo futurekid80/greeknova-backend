@@ -161,7 +161,7 @@ def _get_eod_from_summary(supabase, now_ist):
     trade_date = check.isoformat()
 
     rows = supabase.from_("daily_oi_summary")\
-        .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, close_price")\
+        .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price")\
         .eq("trade_date", trade_date)\
         .gt("fut_vol", 0)\
         .limit(500)\
@@ -191,11 +191,26 @@ def _get_eod_from_summary(supabase, now_ist):
         if vol_ratio < 1.5:
             continue
         fut_oi_chg = float(r.get("fut_oi_chg_pct") or 0)
-        oi_chg = round(fut_oi_chg if fut_oi_chg != 0 else float(r.get("oi_chg_pct") or 0), 2)
+        using_fut_oi = fut_oi_chg != 0
+        oi_chg = round(fut_oi_chg if using_fut_oi else float(r.get("oi_chg_pct") or 0), 2)
         if abs(oi_chg) < 2.0:
             continue
         # EOD uses prev_close → close price change (already correct in daily_oi_summary)
-        price_chg = round(float(r.get("price_chg_pct") or 0), 2)
+        # Oct 15 2026: that close-to-close cash figure is the right basis
+        # when oi_chg above came from options OI (oi_chg_pct), but when it
+        # came from FUTURES OI (fut_oi_chg_pct) instead, pairing it with
+        # cash price is the same basis mismatch already fixed elsewhere
+        # (api/daily_oi_summary.py, api/positional_intelligence.py,
+        # api/oi_buildup_period.py, api/positional_radar.py, main.py's
+        # writer-buyer-score) -- use fut_price_chg_pct for that case, and
+        # skip the row (don't fall back to cash) when it's missing.
+        if using_fut_oi:
+            _raw_fut_price_chg = r.get("fut_price_chg_pct")
+            if _raw_fut_price_chg is None:
+                continue
+            price_chg = round(float(_raw_fut_price_chg), 2)
+        else:
+            price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         cmp = float(r.get("close_price") or 0)
 
         sig_type, sig_label = classify_signal(oi_chg, price_chg)

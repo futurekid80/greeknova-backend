@@ -153,7 +153,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
 
     try:
         rows_res = supabase.from_("daily_oi_summary") \
-            .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol") \
+            .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price, fut_vol") \
             .gte("trade_date", lookback_start) \
             .order("trade_date", desc=False) \
             .limit(10000).execute()
@@ -203,15 +203,32 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         if len(window) < min_days:
             continue
 
+        # Oct 15 2026: compounding fut_oi_chg_pct (FUTURES OI) against cash
+        # price_chg_pct over the window had the same basis mismatch already
+        # fixed elsewhere (api/daily_oi_summary.py Oct 6 2026,
+        # api/positional_intelligence.py and main.py's writer-buyer-score,
+        # same day as this fix) -- use fut_price_chg_pct instead. Since this
+        # compounds across the whole window, a single day missing a FUT
+        # open+close snapshot pair would corrupt the product silently if
+        # defaulted to 0; skip the symbol for this period instead (same
+        # "skip, don't fall back to cash" rule as those other fixes).
         oi_factor = 1.0
         price_factor = 1.0
         vol_total = 0
+        window_missing_fut_price = False
         for r in window:
             oi_pct = float(r.get("fut_oi_chg_pct") or 0)
-            price_pct = float(r.get("price_chg_pct") or 0)
+            _raw_fut_price_chg = r.get("fut_price_chg_pct")
+            if _raw_fut_price_chg is None:
+                window_missing_fut_price = True
+                break
+            price_pct = float(_raw_fut_price_chg)
             oi_factor *= (1 + oi_pct / 100)
             price_factor *= (1 + price_pct / 100)
             vol_total += int(r.get("fut_vol") or 0)
+
+        if window_missing_fut_price:
+            continue
 
         cumulative_oi_pct = round((oi_factor - 1) * 100, 2)
         cumulative_price_pct = round((price_factor - 1) * 100, 2)

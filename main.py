@@ -1156,7 +1156,7 @@ def writer_buyer_score(symbol: str):
     #  writing calls against their FUT longs = writer behavior)
     # Buyers = Options OI spikes without FUT confirmation
     hist_res = supabase.from_("daily_oi_summary")\
-        .select("trade_date, fut_oi_chg_pct, oi_chg_pct, price_chg_pct")\
+        .select("trade_date, fut_oi_chg_pct, oi_chg_pct, price_chg_pct, fut_price_chg_pct")\
         .eq("symbol", sym)\
         .gte("trade_date", (check - _dt.timedelta(days=10)).isoformat())\
         .lte("trade_date", last_trading_day)\
@@ -1187,10 +1187,20 @@ def writer_buyer_score(symbol: str):
     else:                  fut_score = 0
 
     # ── 4. OI consistency (0-25) — TIGHTENED ─────────────────────────────
+    # Oct 15 2026: this classified fut_oi_chg_pct (FUTURES OI) together
+    # with cash price_chg_pct -- same basis mismatch already fixed for
+    # Stealth Buildup (api/daily_oi_summary.py, Oct 6 2026) and Volume
+    # Breakout (api/positional_intelligence.py, same day as this fix).
+    # Use fut_price_chg_pct instead; skip (don't fall back to cash) a day
+    # with no FUT open+close snapshot pair rather than mislabel its
+    # direction off the wrong basis.
     directions = []
     for r in hist_rows:
         fut_chg = float(r.get("fut_oi_chg_pct") or 0)
-        price_chg = float(r.get("price_chg_pct") or 0)
+        _raw_fut_price_chg = r.get("fut_price_chg_pct")
+        if _raw_fut_price_chg is None:
+            continue
+        price_chg = float(_raw_fut_price_chg)
         if abs(fut_chg) > 0.5:
             if fut_chg > 0 and price_chg >= 0.3:    directions.append("LONG")
             elif fut_chg > 0 and price_chg <= -0.3: directions.append("SHORT")

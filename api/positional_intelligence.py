@@ -145,7 +145,7 @@ def get_positional_intelligence(min_consec: int = 0):
     vol_start = (today - timedelta(days=35)).isoformat()
     try:
         vol_hist = supabase.from_("daily_oi_summary")\
-            .select("symbol, trade_date, fut_vol, fut_oi_chg_pct, price_chg_pct, close_price")\
+            .select("symbol, trade_date, fut_vol, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price")\
             .gte("trade_date", vol_start)\
             .lte("trade_date", today_str)\
             .gt("fut_vol", 0)\
@@ -551,9 +551,22 @@ def get_positional_intelligence(min_consec: int = 0):
                 hist_vols = [int(r.get("fut_vol") or 0) for r in hist_rows]
                 avg_5d = sum(hist_vols) / len(hist_vols) if hist_vols else 0
                 vol_ratio = round(today_vol / avg_5d, 2) if avg_5d > 0 else 0
-                if vol_ratio >= 1.5:
+                # Oct 15 2026: same basis mismatch already fixed for Stealth
+                # Buildup (see the Oct 6 2026 note above) was still live
+                # here -- this classified fut_oi_chg_pct (FUTURES OI)
+                # together with cash price_chg_pct, which can diverge from
+                # the FUT contract's own move (basis, especially close to
+                # expiry). Use fut_price_chg_pct instead, and skip
+                # classifying (don't fall back to cash) when no FUT
+                # open+close snapshot pair exists for that day, so this
+                # doesn't silently reintroduce the mismatch. Unlike the
+                # Stealth Buildup fix, this must NOT `continue` the outer
+                # per-symbol loop -- Series Buildup below still needs to run
+                # for this symbol even when Volume Breakout has no FUT price.
+                _raw_fut_price_chg = today_vol_row.get("fut_price_chg_pct")
+                if vol_ratio >= 1.5 and _raw_fut_price_chg is not None:
                     fut_oi = float(today_vol_row.get("fut_oi_chg_pct") or 0)
-                    price_chg = float(today_vol_row.get("price_chg_pct") or 0)
+                    price_chg = float(_raw_fut_price_chg)
                     if abs(fut_oi) >= 2.0:
                         if fut_oi > 0 and price_chg >= 0.3:
                             vol_signal = "LONG_BUILDUP"
