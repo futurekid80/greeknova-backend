@@ -8,6 +8,19 @@ from dotenv import load_dotenv
 
 load_dotenv()  # Removed hardcoded local path — uses Railway env vars directly
 
+# Oct 15 2026: every requests.Session() call below used to have no timeout
+# at all -- when Kite/Railway networking misbehaved (the "Railway IP may be
+# blocked by Kite" case already called out below), a call could hang
+# indefinitely instead of failing. That's not just slow: get_oi_pulse()
+# calls get_kite_client() -> auto_login() -> _do_login() synchronously
+# during market hours, so a hung login here hung the whole /oi-pulse
+# request forever -- confirmed live (showed as a perpetually "pending"
+# request, no response, no error), and traced to the GreekNova homepage
+# getting stuck on its loading skeleton indefinitely since that endpoint
+# never settled either way. Every network call here now has a timeout so
+# it fails fast and the caller's except/retry logic actually gets to run.
+REQUEST_TIMEOUT = 15  # seconds
+
 TOKEN_FILE = os.path.expanduser('~/.greeksnova_token')
 API_KEY    = os.getenv('KITE_API_KEY', '90q9h621tubh2kkk')
 API_SECRET = os.getenv('KITE_API_SECRET', '')
@@ -73,7 +86,8 @@ def _do_login() -> object:
     # Step 1: Password login
     login_res = session.post(
         "https://kite.zerodha.com/api/login",
-        data={"user_id": USER_ID, "password": PASSWORD}
+        data={"user_id": USER_ID, "password": PASSWORD},
+        timeout=REQUEST_TIMEOUT,
     )
     login_data = login_res.json()
 
@@ -96,7 +110,8 @@ def _do_login() -> object:
             "twofa_value":  totp_value,
             "twofa_type":   "totp",
             "skip_session": True,
-        }
+        },
+        timeout=REQUEST_TIMEOUT,
     )
     twofa_data = twofa_res.json()
 
@@ -107,7 +122,7 @@ def _do_login() -> object:
 
     # Step 3: Get request token
     login_url = f"https://kite.trade/connect/login?api_key={API_KEY}&v=3"
-    res = session.get(login_url, allow_redirects=False)
+    res = session.get(login_url, allow_redirects=False, timeout=REQUEST_TIMEOUT)
     redirect_url = res.headers.get('Location', '')
 
     for _ in range(5):
@@ -115,7 +130,7 @@ def _do_login() -> object:
             break
         if not redirect_url:
             raise Exception(f"Empty redirect URL — Kite may be blocking Railway IP. Use Mac login instead.")
-        res = session.get(redirect_url, allow_redirects=False)
+        res = session.get(redirect_url, allow_redirects=False, timeout=REQUEST_TIMEOUT)
         redirect_url = res.headers.get('Location', '')
 
     if 'request_token' not in redirect_url:
