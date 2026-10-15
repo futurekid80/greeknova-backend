@@ -396,12 +396,16 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                 if is_iv_spike:
                     ep = open_episodes.get(iv_key)
                     if not ep:
+                        ctx = ctx_by_strike[side][s]
                         ep = {"strike": s, "side": side.upper(), "metric": "IV", "start_time": ts,
                               "peak_time": ts, "peak_value": iv_val, "baseline": round(iv_avg, 2),
-                              **ctx_by_strike[side][s]}
+                              "start_oi": ctx.get("oi"), "start_ltp": ctx.get("ltp"),
+                              **ctx}
                         open_episodes[iv_key] = ep
                     ep["end_time"] = ts
                     ep["ticks"] = ep.get("ticks", 0) + 1
+                    ep["end_oi"] = ctx_by_strike[side][s].get("oi")
+                    ep["end_ltp"] = ctx_by_strike[side][s].get("ltp")
                     if iv_val > ep["peak_value"]:
                         ep["peak_value"], ep["peak_time"], ep["baseline"] = iv_val, ts, round(iv_avg, 2)
                         ep.update(ctx_by_strike[side][s])
@@ -422,12 +426,16 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                 if is_vol_spike:
                     ep = open_episodes.get(vol_key)
                     if not ep:
+                        ctx = ctx_by_strike[side][s]
                         ep = {"strike": s, "side": side.upper(), "metric": "VOL", "start_time": ts,
                               "peak_time": ts, "peak_value": vol_val, "baseline": round(vol_avg, 1),
-                              **ctx_by_strike[side][s]}
+                              "start_oi": ctx.get("oi"), "start_ltp": ctx.get("ltp"),
+                              **ctx}
                         open_episodes[vol_key] = ep
                     ep["end_time"] = ts
                     ep["ticks"] = ep.get("ticks", 0) + 1
+                    ep["end_oi"] = ctx_by_strike[side][s].get("oi")
+                    ep["end_ltp"] = ctx_by_strike[side][s].get("ltp")
                     if vol_val > ep["peak_value"]:
                         ep["peak_value"], ep["peak_time"], ep["baseline"] = vol_val, ts, round(vol_avg, 1)
                         ep.update(ctx_by_strike[side][s])
@@ -439,6 +447,32 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
     for key in list(open_episodes.keys()):
         _close(key)
 
+    # Oct 15 2026: "I'm finding it hard to make a decision by looking at it" --
+    # the table showed WHAT moved but not whether it was fresh positioning.
+    # Classic F&O read: premium direction + OI direction together tell you
+    # who's actually acting. OI climbing while premium rises is new money
+    # coming in (buildup); OI climbing while premium falls is fresh writing;
+    # OI falling means existing positions are being closed out, not new
+    # conviction -- the same price move means something very different
+    # depending on which of these it is.
+    OI_FLAT_THRESHOLD = 0.03  # under 3% OI change across the episode -> treat as noise, not a real move
+    def _classify_buildup(ep):
+        start_oi, end_oi = ep.get("start_oi"), ep.get("end_oi")
+        start_ltp, end_ltp = ep.get("start_ltp"), ep.get("end_ltp")
+        if not start_oi or end_oi is None or start_ltp is None or end_ltp is None:
+            return None
+        oi_change_pct = (end_oi - start_oi) / start_oi * 100 if start_oi else 0
+        ltp_up = end_ltp >= start_ltp
+        if abs(oi_change_pct) < OI_FLAT_THRESHOLD * 100:
+            return {"label": "Flat OI", "detail": "Repricing on existing positions, not fresh money", "oi_change_pct": round(oi_change_pct, 1)}
+        if end_oi > start_oi:
+            label = "Long Buildup" if ltp_up else "Short Buildup"
+            detail = "Fresh buying -- new money paying up for this strike" if ltp_up else "Fresh writing -- new sellers stepping in"
+        else:
+            label = "Short Covering" if ltp_up else "Long Unwinding"
+            detail = "Writers buying back/closing shorts, not new conviction" if ltp_up else "Existing longs exiting, not new selling pressure"
+        return {"label": label, "detail": detail, "oi_change_pct": round(oi_change_pct, 1)}
+
     latest_ts = timestamps[-1] if timestamps else None
     for ep in closed_episodes:
         ep["ongoing"] = ep["end_time"] == latest_ts
@@ -446,7 +480,15 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
             ep["magnitude_pct"] = round((ep["peak_value"] / ep["baseline"] - 1) * 100, 1)
         else:
             ep["magnitude_pct"] = None
+        buildup = _classify_buildup(ep)
+        ep["oi_action"] = buildup["label"] if buildup else None
+        ep["oi_action_detail"] = buildup["detail"] if buildup else None
+        ep["oi_change_pct"] = buildup["oi_change_pct"] if buildup else None
         ep.pop("ticks", None)
+        ep.pop("start_oi", None)
+        ep.pop("end_oi", None)
+        ep.pop("start_ltp", None)
+        ep.pop("end_ltp", None)
 
     closed_episodes.sort(key=lambda e: e["peak_time"], reverse=True)
 
