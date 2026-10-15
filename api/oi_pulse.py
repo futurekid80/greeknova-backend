@@ -2,11 +2,22 @@ from utils.db import get_supabase
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 import time as time_module
+import threading
 
 # Simple in-memory cache — avoids repeated heavy queries
 _pulse_cache: dict = {}
 _pulse_cache_time: float = 0
 PULSE_CACHE_TTL = 60  # seconds post-market, 15s during market
+
+# Oct 15 2026: same thundering-herd fix as api/vix_pulse.py's _vix_lock --
+# the 15s-during-market cache check below was check-then-fetch with no
+# lock, so every concurrent poller saw a stale cache at the same instant
+# and each independently called kite.quote() for the whole stock+index
+# universe, compounding the same Kite rate-limit bursts seen live during
+# the Oct 15 demo. Only the live-price fetch inside get_oi_pulse() needs
+# the lock (that's the only Kite call here); the rest of the function is
+# pure DB work and unaffected.
+_pulse_lock = threading.Lock()
 
 # BUG FIX (Aug 26 2026): was a hardcoded, independently-maintained copy of
 # the symbol list -- silently drifted out of sync every time a symbol got
@@ -550,6 +561,17 @@ def get_oi_pulse():
     if _pulse_cache and (time_module.time() - _pulse_cache_time) < 15:
         return _pulse_cache
 
+    with _pulse_lock:
+        # Double-check: another thread may have refilled the cache while
+        # we were waiting for the lock -- if so, reuse it instead of
+        # redoing all this DB work and another kite.quote() call.
+        if _pulse_cache and (time_module.time() - _pulse_cache_time) < 15:
+            return _pulse_cache
+        return _compute_oi_pulse(supabase)
+
+
+def _compute_oi_pulse(supabase):
+    global _pulse_cache, _pulse_cache_time
     live = is_market_hours()
 
     # Step 1: Get latest market-hours snapshot
