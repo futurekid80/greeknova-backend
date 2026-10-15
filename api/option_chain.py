@@ -174,3 +174,208 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
         "timestamp": latest_ts,
         "chain":     chain,
     }
+
+
+# ── IV / Volume spike log (intraday, for BTST option-writing planning) ──────
+# Oct 15 2026: Manish wants to know not just "is this strike spiking right
+# now" (the live chain highlighting) but "did any strike spike at ANY point
+# today", even if it's since faded back to normal by the time he looks --
+# that's the point of the question: a strike that ran hot at 11:30 AM is a
+# candidate for writing into the close and carrying overnight (BTST), and
+# that signal is lost the moment the next 5-min oi_snapshots capture rolls
+# in unless something keeps a record of it. oi_snapshots already holds one
+# row per strike/side every 5 minutes during market hours (main.py's
+# full_capture job) -- this replays today's snapshots chronologically and
+# flags the same kind of spike the live chain highlights, using the same
+# "unusual vs its own neighboring strikes right now" definition (not vs its
+# own earlier value -- a strike's IV normally drifts with spot/time without
+# that being a signal; what matters for writers is when a strike decouples
+# from the smile around it), then collapses consecutive flagged snapshots
+# into one episode per strike/side/metric instead of one row per 5-min tick.
+_SPIKE_CACHE: dict = {}
+_SPIKE_CACHE_TTL = 120  # seconds
+
+IV_SPIKE_WINDOW = 3          # strikes each side used as the "neighborhood"
+IV_SPIKE_THRESHOLD = 1.15    # 15% above local neighbor average
+VOL_SPIKE_WINDOW = 3
+VOL_SPIKE_THRESHOLD = 2.0    # 100% above local neighbor average -- volume is naturally spikier than IV
+MIN_OI_FOR_IV = 500
+MIN_VOL_FOR_IV = 1
+
+
+def _local_avg(values_by_strike: dict, strikes_sorted: list, idx: int, window: int):
+    vals = []
+    for off in range(-window, window + 1):
+        if off == 0:
+            continue
+        j = idx + off
+        if 0 <= j < len(strikes_sorted):
+            v = values_by_strike.get(strikes_sorted[j])
+            if v is not None:
+                vals.append(v)
+    if len(vals) < 2:
+        return None
+    return sum(vals) / len(vals)
+
+
+def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
+    import time as _time
+    cache_key = f"{symbol}:{expiry or ''}"
+    cached = _SPIKE_CACHE.get(cache_key)
+    if cached and _time.time() - cached[1] < _SPIKE_CACHE_TTL:
+        return cached[0]
+
+    supabase = get_supabase()
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    all_rows = supabase.from_("oi_snapshots")\
+        .select("timestamp, strike, option_type, oi, volume, last_price, expiry")\
+        .eq("symbol", symbol)\
+        .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .order("timestamp", desc=False).execute().data
+
+    if not all_rows:
+        result = {"symbol": symbol, "expiry": expiry, "spikes": [], "snapshots_scanned": 0}
+        _SPIKE_CACHE[cache_key] = (result, _time.time())
+        return result
+
+    available_expiries = sorted(set(r["expiry"] for r in all_rows if r["option_type"] != "FUT"))
+    active_expiry = expiry or (available_expiries[0] if available_expiries else None)
+    rows = [r for r in all_rows if r["expiry"] == active_expiry]
+
+    if not rows:
+        result = {"symbol": symbol, "expiry": active_expiry, "spikes": [], "snapshots_scanned": 0}
+        _SPIKE_CACHE[cache_key] = (result, _time.time())
+        return result
+
+    exp_date = datetime.strptime(active_expiry, "%Y-%m-%d").date()
+    today_date = today_ist()
+    trading_days_left = trading_days_between(today_date, exp_date)
+    T = max(trading_days_left, 0.5) / 252
+    r_f = 0.065
+
+    # Group by timestamp, in chronological order.
+    by_ts: dict = {}
+    for r in rows:
+        by_ts.setdefault(r["timestamp"], []).append(r)
+    timestamps = sorted(by_ts.keys())
+
+    # Running state per (strike, side, metric) -> open episode dict, keyed
+    # so a run of consecutive flagged snapshots becomes one episode.
+    open_episodes: dict = {}
+    closed_episodes: list = []
+
+    def _close(key):
+        ep = open_episodes.pop(key, None)
+        if ep:
+            closed_episodes.append(ep)
+
+    for ts in timestamps:
+        ts_rows = by_ts[ts]
+        ce_map = {r["strike"]: r for r in ts_rows if r["option_type"] == "CE"}
+        pe_map = {r["strike"]: r for r in ts_rows if r["option_type"] == "PE"}
+        strikes = sorted(set(list(ce_map.keys()) + list(pe_map.keys())))
+        if not strikes:
+            continue
+
+        fut_row = next((r for r in ts_rows if r["option_type"] == "FUT" and (r.get("last_price") or 0) > 0), None)
+        if fut_row:
+            F = fut_row["last_price"]
+        else:
+            # same ATM-straddle estimate as the live chain
+            best, best_diff = None, float("inf")
+            for s in strikes:
+                c, p = ce_map.get(s), pe_map.get(s)
+                if c and p and (c.get("last_price") or 0) > 0 and (p.get("last_price") or 0) > 0:
+                    diff = abs(c["last_price"] - p["last_price"])
+                    if diff < best_diff:
+                        best_diff, best = diff, s
+            F = best or strikes[len(strikes) // 2]
+
+        iv_by_strike = {"ce": {}, "pe": {}}
+        vol_by_strike = {"ce": {}, "pe": {}}
+        liquid_by_strike = {"ce": {}, "pe": {}}
+        for side, smap in (("ce", ce_map), ("pe", pe_map)):
+            is_call = side == "ce"
+            for s in strikes:
+                row = smap.get(s)
+                if not row:
+                    continue
+                vol = row.get("volume") or 0
+                oi = row.get("oi") or 0
+                vol_by_strike[side][s] = vol
+                liquid = oi >= MIN_OI_FOR_IV or vol >= MIN_VOL_FOR_IV
+                liquid_by_strike[side][s] = liquid
+                if liquid:
+                    iv = calculate_iv(row.get("last_price") or 0, F, s, T, r_f, is_call)
+                    if iv is not None:
+                        iv_by_strike[side][s] = iv
+
+        for side in ("ce", "pe"):
+            for idx, s in enumerate(strikes):
+                # IV spike
+                iv_val = iv_by_strike[side].get(s)
+                iv_key = (s, side, "IV")
+                is_iv_spike = False
+                iv_avg = None
+                if iv_val is not None:
+                    iv_avg = _local_avg(iv_by_strike[side], strikes, idx, IV_SPIKE_WINDOW)
+                    if iv_avg and iv_avg > 0 and iv_val >= iv_avg * IV_SPIKE_THRESHOLD:
+                        is_iv_spike = True
+                if is_iv_spike:
+                    ep = open_episodes.get(iv_key)
+                    if not ep:
+                        ep = {"strike": s, "side": side.upper(), "metric": "IV", "start_time": ts,
+                              "peak_time": ts, "peak_value": iv_val, "baseline": round(iv_avg, 2)}
+                        open_episodes[iv_key] = ep
+                    ep["end_time"] = ts
+                    if iv_val > ep["peak_value"]:
+                        ep["peak_value"], ep["peak_time"], ep["baseline"] = iv_val, ts, round(iv_avg, 2)
+                else:
+                    _close(iv_key)
+
+                # Volume spike
+                vol_val = vol_by_strike[side].get(s)
+                vol_key = (s, side, "VOL")
+                is_vol_spike = False
+                vol_avg = None
+                if vol_val is not None:
+                    vol_avg = _local_avg(vol_by_strike[side], strikes, idx, VOL_SPIKE_WINDOW)
+                    if vol_avg and vol_avg > 0 and vol_val >= vol_avg * VOL_SPIKE_THRESHOLD:
+                        is_vol_spike = True
+                if is_vol_spike:
+                    ep = open_episodes.get(vol_key)
+                    if not ep:
+                        ep = {"strike": s, "side": side.upper(), "metric": "VOL", "start_time": ts,
+                              "peak_time": ts, "peak_value": vol_val, "baseline": round(vol_avg, 1)}
+                        open_episodes[vol_key] = ep
+                    ep["end_time"] = ts
+                    if vol_val > ep["peak_value"]:
+                        ep["peak_value"], ep["peak_time"], ep["baseline"] = vol_val, ts, round(vol_avg, 1)
+                else:
+                    _close(vol_key)
+
+    # Close out anything still open at the end of the scan (still spiking as
+    # of the latest snapshot) -- these are the "live right now" ones too.
+    for key in list(open_episodes.keys()):
+        _close(key)
+
+    latest_ts = timestamps[-1] if timestamps else None
+    for ep in closed_episodes:
+        ep["ongoing"] = ep["end_time"] == latest_ts
+        if ep["baseline"]:
+            ep["magnitude_pct"] = round((ep["peak_value"] / ep["baseline"] - 1) * 100, 1)
+        else:
+            ep["magnitude_pct"] = None
+
+    closed_episodes.sort(key=lambda e: e["peak_time"], reverse=True)
+
+    result = {
+        "symbol": symbol,
+        "expiry": active_expiry,
+        "spikes": closed_episodes,
+        "snapshots_scanned": len(timestamps),
+        "latest_timestamp": latest_ts,
+    }
+    _SPIKE_CACHE[cache_key] = (result, _time.time())
+    return result

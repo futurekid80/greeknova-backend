@@ -1696,6 +1696,11 @@ def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
     return get_option_chain(symbol.upper(), expiry)
 
+@app.get("/option-chain-spikes/{symbol}")
+def option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
+    from api.option_chain import get_option_chain_spikes
+    return get_option_chain_spikes(symbol.upper(), expiry)
+
 @app.get("/historical-chain/dates/{symbol}")
 def historical_chain_dates(symbol: str):
     from api.historical_chain import get_available_dates
