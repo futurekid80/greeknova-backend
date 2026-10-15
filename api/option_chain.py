@@ -200,7 +200,18 @@ IV_SPIKE_THRESHOLD = 1.15    # 15% above local neighbor average
 VOL_SPIKE_WINDOW = 3
 VOL_SPIKE_THRESHOLD = 2.0    # 100% above local neighbor average -- volume is naturally spikier than IV
 MIN_OI_FOR_IV = 500
-MIN_VOL_FOR_IV = 1
+MIN_VOL_FOR_IV = 50          # was 1 -- see MIN_VOL_FOR_SPIKE note below
+
+# Oct 15 2026 (second pass): first live run on NIFTY flagged 169 "spikes" in
+# one day, almost all deep-OTM far wings reading as "spiking" continuously
+# for hours. A ratio-only check breaks down near zero -- a strike with
+# neighbors averaging 10 contracts of volume reads as a "250% spike" the
+# moment it prints 25, which is noise, not a writer signal. Require the
+# current reading to also clear an absolute floor, not just a relative one,
+# so a spike is only ever flagged where there's enough real activity for it
+# to mean something.
+MIN_VOL_FOR_SPIKE = 5000      # contracts -- below this, ratio alone can't flag a spike
+MIN_VOL_BASELINE_FOR_SPIKE = 500  # neighbor average must itself be non-trivial
 
 
 def _local_avg(values_by_strike: dict, strikes_sorted: list, idx: int, window: int):
@@ -339,9 +350,9 @@ def get_option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
                 vol_key = (s, side, "VOL")
                 is_vol_spike = False
                 vol_avg = None
-                if vol_val is not None:
+                if vol_val is not None and vol_val >= MIN_VOL_FOR_SPIKE:
                     vol_avg = _local_avg(vol_by_strike[side], strikes, idx, VOL_SPIKE_WINDOW)
-                    if vol_avg and vol_avg > 0 and vol_val >= vol_avg * VOL_SPIKE_THRESHOLD:
+                    if vol_avg and vol_avg >= MIN_VOL_BASELINE_FOR_SPIKE and vol_val >= vol_avg * VOL_SPIKE_THRESHOLD:
                         is_vol_spike = True
                 if is_vol_spike:
                     ep = open_episodes.get(vol_key)
