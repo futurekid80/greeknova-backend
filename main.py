@@ -1706,6 +1706,16 @@ def wolves_fresh_events():
     return get_todays_fresh_events()
 
 
+@app.get("/wolves/watchlist")
+def wolves_watchlist():
+    # Decision Watchlist -- Rank (A+/A/B/C), Confidence, Decision Score,
+    # Sector Tailwind per symbol+direction, aggregated across all 4
+    # timeframes. Rebuilt fresh every live tick (a snapshot of current
+    # state, not a cumulative log). Cheap Supabase read, no Kite calls.
+    from services.wolves_scanner import get_todays_watchlist
+    return get_todays_watchlist()
+
+
 @app.post("/wolves/run-now")
 def wolves_run_now():
     # Manual trigger for the fast live tick (hourly candles only, reads the

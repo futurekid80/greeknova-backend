@@ -1,5 +1,5 @@
 """
-Wolves Scanner -- Oct 16 2026, v2.
+Wolves Scanner -- Oct 16 2026, v4 ("maximum fidelity" pass).
 
 Ports the "3 Wolves" ADX+RSI+BB confluence signal from Manish's local
 Fyers/Streamlit scanner onto Kite data, so he can compare it against the
@@ -14,40 +14,41 @@ build_wolves_events_today / evaluate_timeframe v2):
   Weekly/Monthly -> Apex Wolf.
   Bearish: the exact mirror (hourly RSI < 40, lower-band break/breakdown,
   ADX cross with bearish DI) -- ported from _v32_is_hourly_bear_bb /
-  _v32_wolves_tier in his file, which the first pass of this port missed.
+  _v32_wolves_tier in his file.
 
 ARCHITECTURE (v2 -- rewritten after the v1 "full re-fetch every scan" design
 turned out too slow to run live): Daily/Weekly/Monthly only change once a
-day, so their ADX-cross state is computed ONCE after close
-(refresh_tf_cache) and cached in wolves_tf_cache. Live ticks during market
-hours (run_live_tick) only re-fetch Hourly candles -- one Kite call per
-symbol instead of two, and a ~30-day window instead of years -- then
-combine with the cached Daily/Weekly/Monthly flags. This is what makes a
-5-minute live cadence (matching his local tool's "Core Live" refresh)
-actually feasible under Kite's rate limits.
+day, so their ADX/BB state is computed ONCE after close (refresh_tf_cache)
+and cached in wolves_tf_cache. Live ticks during market hours
+(run_live_tick) only re-fetch Hourly candles -- one Kite call per symbol
+instead of two, and a ~30-day window instead of years -- then combine with
+the cached Daily/Weekly/Monthly flags.
 
-v3 adds the standalone "Fresh Events" layer Manish actually relies on day
+v3 added the standalone "Fresh Events" layer Manish actually relies on day
 to day -- he prioritizes a lone ADX Cross per timeframe to mend/amend
-positions, confluence or not:
-  - Standalone ADX Cross events, Hourly/Daily/Weekly/Monthly, independent
-    of the RSI/BB gate above (reuses the same adx_cross_bull/bear flags).
-  - "ADX Full Alignment" -- a distinct, stronger event when all 4
-    timeframes cross together in the same direction.
-  - Standalone RSI Cross events (prev RSI crossing 60/40), same 4
-    timeframes.
-  - The Grandfather/Father/Son multi-timeframe RSI setup (a named system,
-    confirmed against its public description since it isn't in Manish's
-    source file): Monthly RSI ("Grandfather") and Weekly RSI ("Father")
-    both > 70, Daily RSI ("Son") pulled back into 40-45 = bullish setup;
-    Daily RSI > 70 = exit. Bearish mirror: Monthly+Weekly RSI < 30, Daily
-    RSI in 55-60 = setup, Daily RSI < 30 = exit. RSI(14) throughout, per
-    Manish's confirmation. These read Daily/Weekly/Monthly RSI off
-    wolves_tf_cache as a state check (not a fresh cross), since a cross
-    needs the prior day's RSI, which isn't stored.
+positions, confluence or not: standalone ADX Cross, RSI Cross, ADX Full
+Alignment, Grandfather/Father/Son (named RSI system, confirmed against its
+public description since it isn't in Manish's source file -- RSI(14),
+bullish/bearish mirror per his confirmation).
 
-STILL NOT PORTED: the Decision Score / Rank (A+/A/B/C) / Confidence
-system and Sector Tailwind from the local tool -- scoped out as a further
-fast-follow.
+v4 ("bring things to maximum") adds, all ported from his source file's
+`build_watchlist` (line ~3568, "V2.7 decision watchlist with sector and
+explicit ADX active/fresh fields"), `_v32_decision_score`,
+`_v32_signal_freshness`, `_v32_sector_tailwind`, `_v32_bb_quality_from_eval`
+and the base `evaluate_timeframe` (quality_bull/core_bull/adx_bull etc.):
+
+  - Standalone BB events (Compression Breakout/Breakdown, plain Breakout/
+    Breakdown), per timeframe, mirroring the ADX/RSI Cross pattern.
+  - Decision Watchlist: Rank (A+/A/B/C), Confidence (High/Medium/Low),
+    Decision Score (0-100) per symbol+direction, aggregating ADX-active/
+    RSI/BB state and fresh triggers across all 4 timeframes -- written to
+    a new `wolves_watchlist` table, read via GET /wolves/watchlist.
+  - Sector Tailwind: whether other names in the same sector agree with this
+    direction this tick (ported sector map, _v32_sector_tailwind logic).
+  - Signal Freshness / Times Seen / First Seen / Last Seen on fresh events:
+    read-merge-write against today's existing rows instead of a plain
+    upsert, so a repeated event accumulates a count instead of just
+    refreshing scan_time.
 """
 import time
 from datetime import datetime, timedelta
@@ -82,6 +83,50 @@ WOLF_TIER = {
     "Weekly": "Apex Wolf",
     "Monthly": "Apex Wolf",
 }
+
+TF_ORDER = ["Hourly", "Daily", "Weekly", "Monthly"]
+IMPORTANT_TFS = ["Daily", "Weekly", "Monthly"]
+
+# Ported verbatim from builtin_sector_map() in Manish's source file -- his
+# "trading-dashboard sector map for the current 100-stock universe". Any
+# GreekNova symbol not in here falls back to "Unclassified", same as his.
+SECTOR_MAP = {
+    "RELIANCE": "Oil, Gas & Energy",
+    "HDFCBANK": "Banks", "ICICIBANK": "Banks", "SBIN": "Banks", "AXISBANK": "Banks",
+    "KOTAKBANK": "Banks", "BANKBARODA": "Banks", "PNB": "Banks", "CANBK": "Banks",
+    "INDUSINDBK": "Banks", "FEDERALBNK": "Banks", "IDFCFIRSTB": "Banks", "AUBANK": "Banks", "BANDHANBNK": "Banks",
+    "TCS": "Information Technology", "INFY": "Information Technology", "HCLTECH": "Information Technology",
+    "WIPRO": "Information Technology", "TECHM": "Information Technology", "LTM": "Information Technology",
+    "COFORGE": "Information Technology", "PERSISTENT": "Information Technology", "MPHASIS": "Information Technology", "LTTS": "Information Technology",
+    "TATASTEEL": "Metals & Mining", "JSWSTEEL": "Metals & Mining", "HINDALCO": "Metals & Mining", "VEDL": "Metals & Mining",
+    "SAIL": "Metals & Mining", "JINDALSTEL": "Metals & Mining", "NMDC": "Metals & Mining", "NATIONALUM": "Metals & Mining",
+    "COALINDIA": "Metals & Mining",
+    "ADANIENT": "Infrastructure", "ADANIPORTS": "Infrastructure", "LT": "Infrastructure",
+    "BHEL": "Capital Goods", "BEL": "Capital Goods", "HAL": "Capital Goods", "ABB": "Capital Goods", "SIEMENS": "Capital Goods", "CUMMINSIND": "Capital Goods",
+    "POWERGRID": "Power & Utilities", "NTPC": "Power & Utilities", "TATAPOWER": "Power & Utilities", "JSWENERGY": "Power & Utilities", "NHPC": "Power & Utilities",
+    "ONGC": "Oil, Gas & Energy", "BPCL": "Oil, Gas & Energy", "IOC": "Oil, Gas & Energy", "GAIL": "Oil, Gas & Energy",
+    "OIL": "Oil, Gas & Energy", "PETRONET": "Oil, Gas & Energy", "IGL": "Oil, Gas & Energy",
+    "MARUTI": "Automobiles", "M&M": "Automobiles", "BAJAJ-AUTO": "Automobiles", "EICHERMOT": "Automobiles",
+    "HEROMOTOCO": "Automobiles", "TVSMOTOR": "Automobiles", "ASHOKLEY": "Automobiles",
+    "BHARATFORG": "Auto Ancillaries", "BOSCHLTD": "Auto Ancillaries", "MOTHERSON": "Auto Ancillaries",
+    "TITAN": "Retail & Consumer Discretionary", "TRENT": "Retail & Consumer Discretionary", "DMART": "Retail & Consumer Discretionary",
+    "VBL": "Retail & Consumer Discretionary", "JUBLFOOD": "Retail & Consumer Discretionary", "INDHOTEL": "Retail & Consumer Discretionary",
+    "ITC": "FMCG & Consumption", "HINDUNILVR": "FMCG & Consumption", "NESTLEIND": "FMCG & Consumption",
+    "BRITANNIA": "FMCG & Consumption", "DABUR": "FMCG & Consumption", "MARICO": "FMCG & Consumption", "COLPAL": "FMCG & Consumption",
+    "ASIANPAINT": "Paints & Chemicals", "PIDILITIND": "Paints & Chemicals",
+    "SUNPHARMA": "Pharmaceuticals & Healthcare", "CIPLA": "Pharmaceuticals & Healthcare", "DRREDDY": "Pharmaceuticals & Healthcare",
+    "DIVISLAB": "Pharmaceuticals & Healthcare", "LUPIN": "Pharmaceuticals & Healthcare", "AUROPHARMA": "Pharmaceuticals & Healthcare",
+    "BIOCON": "Pharmaceuticals & Healthcare", "TORNTPHARM": "Pharmaceuticals & Healthcare", "ZYDUSLIFE": "Pharmaceuticals & Healthcare",
+    "APOLLOHOSP": "Pharmaceuticals & Healthcare", "MAXHEALTH": "Pharmaceuticals & Healthcare",
+    "BAJFINANCE": "Financial Services", "BAJAJFINSV": "Financial Services", "CHOLAFIN": "Financial Services",
+    "MUTHOOTFIN": "Financial Services", "PFC": "Financial Services", "RECLTD": "Financial Services",
+    "SBILIFE": "Insurance", "HDFCLIFE": "Insurance", "ICICIGI": "Insurance",
+    "LODHA": "Real Estate",
+}
+
+
+def sector_for(symbol: str) -> str:
+    return SECTOR_MAP.get(symbol, "Unclassified")
 
 
 def rma(series: pd.Series, length: int) -> pd.Series:
@@ -153,9 +198,12 @@ def safe_num(value, default=np.nan) -> float:
 
 
 def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
-    """adx_cross_bull/bear, rsi_bull/bear, bb_upper_cross/bb_lower_cross,
-    bb_compression_breakout/breakdown, bb_bull/bb_bear -- ported from the
-    live evaluate_timeframe, both bullish and bearish sides."""
+    """Per-timeframe evaluation. Keeps the v2/v3 "cross" fields
+    (adx_cross_bull/bear, rsi_cross_bull/bear, bb_upper_cross/bb_lower_cross,
+    bb_compression_breakout/breakdown) AND adds the base-evaluate_timeframe
+    state/quality fields from his source file (adx_bull/bear, adx_fresh,
+    rsi_fresh, bb_fresh, core_bull/bear, quality_bull/bear) needed for the
+    Decision Watchlist's Rank/Confidence logic."""
     empty = {
         "timeframe": timeframe,
         "adx_cross_bull": False, "adx_cross_bear": False,
@@ -164,6 +212,10 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
         "bb_upper_cross": False, "bb_lower_cross": False,
         "bb_compression_breakout": False, "bb_compression_breakdown": False,
         "bb_bull": False, "bb_bear": False,
+        "adx_bull": False, "adx_bear": False, "adx_fresh": False,
+        "rsi_fresh": False, "bb_fresh": False,
+        "core_bull": False, "core_bear": False,
+        "quality_bull": False, "quality_bear": False,
         "close": np.nan, "adx": np.nan, "rsi": np.nan, "di_gap": np.nan, "bb_width_pct": np.nan,
     }
     if df is None or len(df) < 25:
@@ -191,6 +243,8 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
     adx_cross_bull = bool(adx_cross and plus_di > minus_di)
     adx_cross_bear = bool(adx_cross and minus_di > plus_di)
 
+    rsi_bull_state = bool(rsi > RSI_BULL)
+    rsi_bear_state = bool(rsi < RSI_BEAR)
     rsi_cross_bull = bool(prev_rsi <= RSI_BULL and rsi > RSI_BULL)
     rsi_cross_bear = bool(prev_rsi >= RSI_BEAR and rsi < RSI_BEAR)
 
@@ -201,18 +255,156 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
     bb_bull = bool(close > upper)
     bb_bear = bool(close < lower)
 
+    # State/quality fields -- ported from the base evaluate_timeframe
+    # (source line ~571). adx_bull/bear is the ongoing "ADX active" state
+    # (threshold + DI direction), distinct from adx_cross_* which only fires
+    # on the bar it crosses. This is what Rank/Decision Score need.
+    adx_bull = bool(adx > ADX_THRESHOLD and plus_di > minus_di)
+    adx_bear = bool(adx > ADX_THRESHOLD and minus_di > plus_di)
+    adx_fresh = adx_cross
+    rsi_fresh = bool(rsi_cross_bull or rsi_cross_bear)
+    bb_fresh = bool(bb_upper_cross or bb_lower_cross)
+    core_bull = bool(adx_bull and rsi_bull_state)
+    core_bear = bool(adx_bear and rsi_bear_state)
+    quality_bull = bool(adx_bull and rsi_bull_state and bb_bull)
+    quality_bear = bool(adx_bear and rsi_bear_state and bb_bear)
+
     return {
         "timeframe": timeframe,
         "adx_cross_bull": adx_cross_bull, "adx_cross_bear": adx_cross_bear,
-        "rsi_bull": bool(rsi > RSI_BULL), "rsi_bear": bool(rsi < RSI_BEAR),
+        "rsi_bull": rsi_bull_state, "rsi_bear": rsi_bear_state,
         "rsi_cross_bull": rsi_cross_bull, "rsi_cross_bear": rsi_cross_bear,
         "bb_upper_cross": bb_upper_cross, "bb_lower_cross": bb_lower_cross,
         "bb_compression_breakout": bb_compression_breakout, "bb_compression_breakdown": bb_compression_breakdown,
         "bb_bull": bb_bull, "bb_bear": bb_bear,
+        "adx_bull": adx_bull, "adx_bear": adx_bear, "adx_fresh": adx_fresh,
+        "rsi_fresh": rsi_fresh, "bb_fresh": bb_fresh,
+        "core_bull": core_bull, "core_bear": core_bear,
+        "quality_bull": quality_bull, "quality_bear": quality_bear,
         "close": close, "adx": adx, "rsi": rsi,
         "di_gap": abs(plus_di - minus_di) if not (pd.isna(plus_di) or pd.isna(minus_di)) else np.nan,
         "bb_width_pct": bb_width_pct,
     }
+
+
+def _join_tfs(tfs: list[str]) -> str:
+    order = {tf: i for i, tf in enumerate(TF_ORDER)}
+    clean = sorted(set(tf for tf in tfs if tf in TF_ORDER), key=lambda x: order.get(x, 99))
+    return " + ".join(clean) if clean else "—"
+
+
+def _trigger_text(direction: str, fresh_adx: list[str], fresh_rsi: list[str], fresh_bb: list[str]) -> tuple[str, str]:
+    """Ported from _v15_trigger_text."""
+    parts, primary = [], []
+    if fresh_adx:
+        parts.append(f"ADX:{_join_tfs(fresh_adx)}")
+        primary.append("ADX")
+    if fresh_rsi:
+        parts.append(f"RSI:{_join_tfs(fresh_rsi)}")
+        primary.append("RSI")
+    if fresh_bb:
+        parts.append(f"BB:{_join_tfs(fresh_bb)}")
+        primary.append("BB")
+    if not parts:
+        return "—", "Continuation"
+    side_word = "Breakout" if direction == "Bullish" else "Breakdown"
+    if len(primary) == 1:
+        return " | ".join(parts), f"Fresh {primary[0]} {side_word}"
+    return " | ".join(parts), f"Fresh Mixed {side_word}"
+
+
+def decision_score(rank: str, event_type: str, tfs: str, confidence: str,
+                    adx_active: bool = False, fresh_adx_trigger: bool = False,
+                    sector_tailwind: str = "") -> int:
+    """Ported verbatim from _v32_decision_score."""
+    score = {"A+": 76, "A": 66, "B": 50, "C": 30}.get(rank, 40)
+    if "Wolves" in event_type:
+        score = 90
+        if "Weekly" in event_type or "Monthly" in event_type:
+            score += 6
+        elif "Daily" in event_type:
+            score += 3
+    elif "Compression" in event_type:
+        score += 18
+    elif "ADX Cross" in event_type:
+        score += 16
+    elif "RSI" in event_type:
+        score += 8
+    elif "BB" in event_type:
+        score += 7
+    score += {"High": 8, "Medium": 4, "Low": 0}.get(confidence, 0)
+    score += 5 if "Weekly" in tfs else 0
+    score += 5 if "Monthly" in tfs else 0
+    score += 4 if "Daily" in tfs else 0
+    score += 3 if "Hourly" in tfs else 0
+    if adx_active:
+        score += 6
+    if fresh_adx_trigger:
+        score += 8
+    if sector_tailwind == "Sector Tailwind":
+        score += 5
+    elif sector_tailwind == "Against Sector":
+        score -= 6
+    return int(max(0, min(100, score)))
+
+
+def signal_freshness(times_seen: int, first_seen: str, last_seen: str) -> str:
+    """Ported verbatim from _v32_signal_freshness."""
+    if times_seen is None or times_seen <= 1:
+        return "Fresh Now"
+    if first_seen and last_seen and first_seen != last_seen:
+        return "Still Active"
+    return "Seen Earlier Today"
+
+
+def sector_tailwind_map(rows: list[dict]) -> dict:
+    """Ported from _v32_sector_tailwind, adapted to work over a list of
+    this-tick watchlist rows instead of a DataFrame. Returns
+    {(sector, direction): "Sector Tailwind" | "Against Sector" | "Solo / Mixed Sector"}
+    keyed by each row's own (sector, direction)."""
+    counts: dict[tuple[str, str], int] = {}
+    for r in rows:
+        key = (r["sector"], r["direction"])
+        counts[key] = counts.get(key, 0) + 1
+
+    def bull_bear(sector: str) -> tuple[int, int]:
+        return counts.get((sector, "Bullish"), 0), counts.get((sector, "Bearish"), 0)
+
+    result = {}
+    for r in rows:
+        sector, direction = r["sector"], r["direction"]
+        bull, bear = bull_bear(sector)
+        if direction == "Bullish" and bull >= max(2, bear + 1):
+            label = "Sector Tailwind"
+        elif direction == "Bearish" and bear >= max(2, bull + 1):
+            label = "Sector Tailwind"
+        elif direction == "Bullish" and bear >= bull + 2:
+            label = "Against Sector"
+        elif direction == "Bearish" and bull >= bear + 2:
+            label = "Against Sector"
+        else:
+            label = "Solo / Mixed Sector"
+        result[(r["symbol"], direction)] = label
+    return result
+
+
+def bb_quality_from_eval(e: dict, direction: str) -> str:
+    """Ported from _v32_bb_quality_from_eval."""
+    if direction == "Bullish":
+        if e.get("bb_compression_breakout"):
+            return "Clean Compression Breakout"
+        if e.get("bb_upper_cross"):
+            return "Band Breakout"
+        if e.get("bb_bull"):
+            return "Band Close Only"
+    if direction == "Bearish":
+        if e.get("bb_compression_breakdown"):
+            return "Clean Compression Breakdown"
+        if e.get("bb_lower_cross"):
+            return "Band Breakdown"
+        if e.get("bb_bear"):
+            return "Band Close Only"
+    return "—"
 
 
 def resample_ohlcv(df: pd.DataFrame, rule: str) -> pd.DataFrame:
@@ -247,14 +439,15 @@ def _candles_to_df(candles: list[dict]) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
-# EOD: refresh the Daily/Weekly/Monthly ADX-cross cache (once per day)
+# EOD: refresh the Daily/Weekly/Monthly ADX/BB state cache (once per day)
 # ---------------------------------------------------------------------------
 
 def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
     """Fetches daily candles once per symbol (years of history, native Kite
     'day' interval -- one call), derives Weekly/Monthly via resample, and
-    caches each timeframe's adx_cross_bull/bear + raw values. Live ticks
-    read this instead of re-fetching daily/weekly/monthly every 5 minutes."""
+    caches each timeframe's full evaluate_timeframe state (ADX cross +
+    active state, RSI cross, BB cross/compression/state). Live ticks read
+    this instead of re-fetching daily/weekly/monthly every 5 minutes."""
     from services.kite_auth import get_kite_client
     from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
 
@@ -293,14 +486,22 @@ def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
 
         row = {"symbol": symbol, "computed_date": today_ist.isoformat()}
         for tf_name, tf_df in [("daily", daily_ind), ("weekly", weekly_ind), ("monthly", monthly_ind)]:
-            tf_eval = evaluate_timeframe(tf_df, tf_name.capitalize())
-            row[f"{tf_name}_adx_cross_bull"] = tf_eval["adx_cross_bull"]
-            row[f"{tf_name}_adx_cross_bear"] = tf_eval["adx_cross_bear"]
-            row[f"{tf_name}_close"] = round(tf_eval["close"], 2) if not pd.isna(tf_eval["close"]) else None
-            row[f"{tf_name}_adx"] = round(tf_eval["adx"], 2) if not pd.isna(tf_eval["adx"]) else None
-            row[f"{tf_name}_rsi"] = round(tf_eval["rsi"], 2) if not pd.isna(tf_eval["rsi"]) else None
-            row[f"{tf_name}_rsi_cross_bull"] = tf_eval["rsi_cross_bull"]
-            row[f"{tf_name}_rsi_cross_bear"] = tf_eval["rsi_cross_bear"]
+            e = evaluate_timeframe(tf_df, tf_name.capitalize())
+            row[f"{tf_name}_adx_cross_bull"] = e["adx_cross_bull"]
+            row[f"{tf_name}_adx_cross_bear"] = e["adx_cross_bear"]
+            row[f"{tf_name}_close"] = round(e["close"], 2) if not pd.isna(e["close"]) else None
+            row[f"{tf_name}_adx"] = round(e["adx"], 2) if not pd.isna(e["adx"]) else None
+            row[f"{tf_name}_rsi"] = round(e["rsi"], 2) if not pd.isna(e["rsi"]) else None
+            row[f"{tf_name}_rsi_cross_bull"] = e["rsi_cross_bull"]
+            row[f"{tf_name}_rsi_cross_bear"] = e["rsi_cross_bear"]
+            row[f"{tf_name}_adx_bull"] = e["adx_bull"]
+            row[f"{tf_name}_adx_bear"] = e["adx_bear"]
+            row[f"{tf_name}_bb_bull"] = e["bb_bull"]
+            row[f"{tf_name}_bb_bear"] = e["bb_bear"]
+            row[f"{tf_name}_bb_upper_cross"] = e["bb_upper_cross"]
+            row[f"{tf_name}_bb_lower_cross"] = e["bb_lower_cross"]
+            row[f"{tf_name}_bb_compression_breakout"] = e["bb_compression_breakout"]
+            row[f"{tf_name}_bb_compression_breakdown"] = e["bb_compression_breakdown"]
         rows.append(row)
         cached += 1
 
@@ -332,14 +533,22 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
     token_map = _build_token_map(kite, universe)
 
     today_ist = datetime.now(IST).date()
+    today_iso = today_ist.isoformat()
     hourly_from = (today_ist - timedelta(days=30)).isoformat()
-    to_date = today_ist.isoformat()
+    to_date = today_iso
 
     tf_cache_rows = supabase.from_("wolves_tf_cache").select("*").in_("symbol", universe).execute().data or []
     tf_cache = {r["symbol"]: r for r in tf_cache_rows}
 
+    # Pull today's existing fresh_events once, for the Times-Seen merge below.
+    existing_events_rows = supabase.from_("wolves_fresh_events").select(
+        "event_key, first_seen, times_seen"
+    ).eq("scan_date", today_iso).execute().data or []
+    existing_events = {r["event_key"]: r for r in existing_events_rows}
+
     rows_to_upsert = []
     fresh_events = []
+    watchlist_rows = []
     scanned, skipped, errored, wolves_found = 0, 0, 0, 0
 
     for symbol in universe:
@@ -365,35 +574,72 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
         h = evaluate_timeframe(hourly_ind, "Hourly")
         scanned += 1
         scan_time = datetime.now(IST).strftime("%H:%M:%S")
+        sector = sector_for(symbol)
 
-        tf_data = {
-            "Hourly": {"adx_cross_bull": h["adx_cross_bull"], "adx_cross_bear": h["adx_cross_bear"],
-                       "rsi_cross_bull": h["rsi_cross_bull"], "rsi_cross_bear": h["rsi_cross_bear"],
-                       "adx": h["adx"], "rsi": h["rsi"], "close": h["close"]},
-            "Daily": {"adx_cross_bull": cache_row.get("daily_adx_cross_bull"), "adx_cross_bear": cache_row.get("daily_adx_cross_bear"),
-                      "rsi_cross_bull": cache_row.get("daily_rsi_cross_bull"), "rsi_cross_bear": cache_row.get("daily_rsi_cross_bear"),
-                      "adx": cache_row.get("daily_adx"), "rsi": cache_row.get("daily_rsi"), "close": cache_row.get("daily_close")},
-            "Weekly": {"adx_cross_bull": cache_row.get("weekly_adx_cross_bull"), "adx_cross_bear": cache_row.get("weekly_adx_cross_bear"),
-                       "rsi_cross_bull": cache_row.get("weekly_rsi_cross_bull"), "rsi_cross_bear": cache_row.get("weekly_rsi_cross_bear"),
-                       "adx": cache_row.get("weekly_adx"), "rsi": cache_row.get("weekly_rsi"), "close": cache_row.get("weekly_close")},
-            "Monthly": {"adx_cross_bull": cache_row.get("monthly_adx_cross_bull"), "adx_cross_bear": cache_row.get("monthly_adx_cross_bear"),
-                        "rsi_cross_bull": cache_row.get("monthly_rsi_cross_bull"), "rsi_cross_bear": cache_row.get("monthly_rsi_cross_bear"),
-                        "adx": cache_row.get("monthly_adx"), "rsi": cache_row.get("monthly_rsi"), "close": cache_row.get("monthly_close")},
-        }
+        def _cache_bool(prefix: str, field: str) -> bool:
+            return bool(cache_row.get(f"{prefix}_{field}"))
 
-        def _event(direction, event_type, tf_name, extra_meaning, rsi_val=None, adx_val=None):
-            event_key = "|".join([today_ist.isoformat(), symbol, direction, event_type, tf_name])
+        tf_data = {"Hourly": h}
+        for tf_name, prefix in [("Daily", "daily"), ("Weekly", "weekly"), ("Monthly", "monthly")]:
+            daily_adx = cache_row.get(f"{prefix}_adx")
+            daily_rsi = cache_row.get(f"{prefix}_rsi")
+            adx_bull = _cache_bool(prefix, "adx_bull")
+            adx_bear = _cache_bool(prefix, "adx_bear")
+            rsi_bull_state = bool(daily_rsi is not None and daily_rsi > RSI_BULL)
+            rsi_bear_state = bool(daily_rsi is not None and daily_rsi < RSI_BEAR)
+            bb_bull = _cache_bool(prefix, "bb_bull")
+            bb_bear = _cache_bool(prefix, "bb_bear")
+            adx_cross_bull = _cache_bool(prefix, "adx_cross_bull")
+            adx_cross_bear = _cache_bool(prefix, "adx_cross_bear")
+            rsi_cross_bull = _cache_bool(prefix, "rsi_cross_bull")
+            rsi_cross_bear = _cache_bool(prefix, "rsi_cross_bear")
+            bb_upper_cross = _cache_bool(prefix, "bb_upper_cross")
+            bb_lower_cross = _cache_bool(prefix, "bb_lower_cross")
+            bb_compression_breakout = _cache_bool(prefix, "bb_compression_breakout")
+            bb_compression_breakdown = _cache_bool(prefix, "bb_compression_breakdown")
+            tf_data[tf_name] = {
+                "adx_cross_bull": adx_cross_bull, "adx_cross_bear": adx_cross_bear,
+                "rsi_cross_bull": rsi_cross_bull, "rsi_cross_bear": rsi_cross_bear,
+                "bb_upper_cross": bb_upper_cross, "bb_lower_cross": bb_lower_cross,
+                "bb_compression_breakout": bb_compression_breakout, "bb_compression_breakdown": bb_compression_breakdown,
+                "bb_bull": bb_bull, "bb_bear": bb_bear,
+                "adx_bull": adx_bull, "adx_bear": adx_bear,
+                "adx_fresh": bool(adx_cross_bull or adx_cross_bear),
+                "rsi_bull": rsi_bull_state, "rsi_bear": rsi_bear_state,
+                "rsi_fresh": bool(rsi_cross_bull or rsi_cross_bear),
+                "bb_fresh": bool(bb_upper_cross or bb_lower_cross),
+                "core_bull": bool(adx_bull and rsi_bull_state), "core_bear": bool(adx_bear and rsi_bear_state),
+                "quality_bull": bool(adx_bull and rsi_bull_state and bb_bull),
+                "quality_bear": bool(adx_bear and rsi_bear_state and bb_bear),
+                "adx": daily_adx, "rsi": daily_rsi, "close": cache_row.get(f"{prefix}_close"),
+            }
+
+        def _event(direction, event_type, tf_name, extra_meaning, rsi_val=None, adx_val=None, bb_quality="—"):
+            event_key = "|".join([today_iso, symbol, direction, event_type, tf_name])
+            existing = existing_events.get(event_key)
+            if existing:
+                first_seen = existing.get("first_seen") or scan_time
+                times_seen = int(existing.get("times_seen") or 1) + 1
+            else:
+                first_seen = scan_time
+                times_seen = 1
+            freshness = signal_freshness(times_seen, first_seen, scan_time)
+            confidence = {"Fresh Now": "High", "Still Active": "Medium"}.get(freshness, "Low")
+            score = decision_score(rank="", event_type=event_type, tfs=tf_name, confidence=confidence)
             fresh_events.append({
-                "event_key": event_key, "scan_date": today_ist.isoformat(), "scan_time": scan_time,
+                "event_key": event_key, "scan_date": today_iso, "scan_time": scan_time,
                 "symbol": symbol, "direction": direction, "event_type": event_type, "timeframe": tf_name,
                 "close": round(h["close"], 2) if not pd.isna(h["close"]) else None,
                 "rsi": round(rsi_val, 2) if rsi_val is not None and not pd.isna(rsi_val) else None,
                 "adx": round(adx_val, 2) if adx_val is not None and not pd.isna(adx_val) else None,
                 "meaning": extra_meaning,
+                "first_seen": first_seen, "last_seen": scan_time, "times_seen": times_seen,
+                "signal_freshness": freshness, "decision_score": score,
+                "bb_quality": bb_quality, "sector": sector,
             })
 
-        # Standalone ADX Cross + RSI Cross events, independent of the Wolves gate --
-        # Manish prioritizes these alone to mend/amend positions.
+        # Standalone ADX Cross + RSI Cross + BB events, independent of the
+        # Wolves gate -- Manish prioritizes these alone to mend/amend positions.
         for tf_name, d in tf_data.items():
             if d["adx_cross_bull"]:
                 _event("Bullish", "ADX Cross 25", tf_name, f"{tf_name} ADX freshly crossed above 25 with bullish DI.", adx_val=d["adx"])
@@ -403,6 +649,17 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
                 _event("Bullish", "RSI Cross 60", tf_name, f"{tf_name} RSI freshly crossed above 60.", rsi_val=d["rsi"])
             if d["rsi_cross_bear"]:
                 _event("Bearish", "RSI Cross 40", tf_name, f"{tf_name} RSI freshly crossed below 40.", rsi_val=d["rsi"])
+            # Standalone BB events -- compression breakout/breakdown takes
+            # precedence over a plain band cross, matching
+            # _v32_bb_quality_from_eval's precedence.
+            if d["bb_compression_breakout"]:
+                _event("Bullish", "BB Compression Breakout", tf_name, f"{tf_name} broke the upper band out of a recent low-volatility squeeze.", bb_quality="Clean Compression Breakout")
+            elif d["bb_upper_cross"]:
+                _event("Bullish", "BB Breakout", tf_name, f"{tf_name} closed above the upper Bollinger Band.", bb_quality="Band Breakout")
+            if d["bb_compression_breakdown"]:
+                _event("Bearish", "BB Compression Breakdown", tf_name, f"{tf_name} broke the lower band out of a recent low-volatility squeeze.", bb_quality="Clean Compression Breakdown")
+            elif d["bb_lower_cross"]:
+                _event("Bearish", "BB Breakdown", tf_name, f"{tf_name} closed below the lower Bollinger Band.", bb_quality="Band Breakdown")
 
         # ADX Full Alignment -- all 4 timeframes cross together, same direction.
         if all(tf_data[tf]["adx_cross_bull"] for tf in ("Hourly", "Daily", "Weekly", "Monthly")):
@@ -425,16 +682,18 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
         # Full Wolves confluence (unchanged) -- hourly RSI+BB gate, then per-timeframe ADX cross.
         bull_gate = h["rsi_bull"] and (h["bb_upper_cross"] or h["bb_compression_breakout"] or h["bb_bull"])
         bear_gate = h["rsi_bear"] and (h["bb_lower_cross"] or h["bb_compression_breakdown"] or h["bb_bear"])
+        wolf_hit_tfs = {"Bullish": [], "Bearish": []}
         for direction, gate_ok, key in [("Bullish", bull_gate, "adx_cross_bull"), ("Bearish", bear_gate, "adx_cross_bear")]:
             if not gate_ok:
                 continue
             for tf_name, d in tf_data.items():
                 if not d[key]:
                     continue
-                event_key = "|".join([today_ist.isoformat(), symbol, direction, WOLF_TIER[tf_name], tf_name])
+                wolf_hit_tfs[direction].append(tf_name)
+                event_key = "|".join([today_iso, symbol, direction, WOLF_TIER[tf_name], tf_name])
                 rows_to_upsert.append({
                     "event_key": event_key,
-                    "scan_date": today_ist.isoformat(),
+                    "scan_date": today_iso,
                     "scan_time": scan_time,
                     "symbol": symbol,
                     "direction": direction,
@@ -449,6 +708,120 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
                 })
                 wolves_found += 1
 
+        # --- Decision Watchlist: Rank / Confidence / Decision Score ---
+        # Ported from build_watchlist (source line ~3568) -- aggregates
+        # ADX-active/RSI/BB state and fresh triggers across all 4 timeframes
+        # per symbol+direction.
+        for direction in ("Bullish", "Bearish"):
+            is_bull = direction == "Bullish"
+            quality_tfs, core_tfs, adx_tfs, rsi_tfs, bb_tfs = [], [], [], [], []
+            fresh_adx_tfs, fresh_rsi_tfs, fresh_bb_tfs = [], [], []
+
+            for tf in TF_ORDER:
+                e = tf_data.get(tf, {})
+                if not e or pd.isna(e.get("close", np.nan)):
+                    continue
+                if is_bull:
+                    if e.get("quality_bull"):
+                        quality_tfs.append(tf)
+                    if e.get("core_bull"):
+                        core_tfs.append(tf)
+                    if e.get("adx_bull"):
+                        adx_tfs.append(tf)
+                    if e.get("rsi_bull"):
+                        rsi_tfs.append(tf)
+                    if e.get("bb_bull"):
+                        bb_tfs.append(tf)
+                    if tf in IMPORTANT_TFS and e.get("adx_fresh") and e.get("adx_bull"):
+                        fresh_adx_tfs.append(tf)
+                    if tf in IMPORTANT_TFS and e.get("rsi_fresh") and e.get("rsi_bull"):
+                        fresh_rsi_tfs.append(tf)
+                    if tf in IMPORTANT_TFS and e.get("bb_fresh") and e.get("bb_bull"):
+                        fresh_bb_tfs.append(tf)
+                else:
+                    if e.get("quality_bear"):
+                        quality_tfs.append(tf)
+                    if e.get("core_bear"):
+                        core_tfs.append(tf)
+                    if e.get("adx_bear"):
+                        adx_tfs.append(tf)
+                    if e.get("rsi_bear"):
+                        rsi_tfs.append(tf)
+                    if e.get("bb_bear"):
+                        bb_tfs.append(tf)
+                    if tf in IMPORTANT_TFS and e.get("adx_fresh") and e.get("adx_bear"):
+                        fresh_adx_tfs.append(tf)
+                    if tf in IMPORTANT_TFS and e.get("rsi_fresh") and e.get("rsi_bear"):
+                        fresh_rsi_tfs.append(tf)
+                    if tf in IMPORTANT_TFS and e.get("bb_fresh") and e.get("bb_bear"):
+                        fresh_bb_tfs.append(tf)
+
+            fresh_tfs = sorted(set(fresh_adx_tfs + fresh_rsi_tfs + fresh_bb_tfs), key=lambda x: TF_ORDER.index(x))
+            fresh_signal, primary_trigger = _trigger_text(direction, fresh_adx_tfs, fresh_rsi_tfs, fresh_bb_tfs)
+
+            if len(quality_tfs) >= 1 and len(core_tfs) >= 2:
+                rank, signal_type = "A+", "ADX + RSI + BB confluence"
+            elif len(core_tfs) >= 2:
+                rank, signal_type = "A", "Multi-timeframe ADX + RSI confluence"
+            elif fresh_tfs:
+                rank, signal_type = "B", primary_trigger
+            elif len(core_tfs) >= 1 or (len(adx_tfs) + len(rsi_tfs) + len(bb_tfs)) >= 2:
+                rank, signal_type = "C", "Single-timeframe continuation"
+            else:
+                continue  # not watchlist-worthy this tick
+
+            score_raw = len(quality_tfs) * 3 + len(core_tfs) * 2 + len(fresh_tfs)
+            confidence = "High" if rank == "A+" or score_raw >= 8 else "Medium" if rank in ("A", "B") else "Low"
+            is_wolf_hit = bool(wolf_hit_tfs[direction])
+            event_type_for_score = "Wolves" if is_wolf_hit else signal_type
+            timeframes_text = _join_tfs(core_tfs + quality_tfs + fresh_tfs)
+
+            why_parts = []
+            if adx_tfs:
+                why_parts.append(f"ADX active on {_join_tfs(adx_tfs)}")
+            if fresh_adx_tfs:
+                why_parts.append(f"Fresh ADX trigger on {_join_tfs(fresh_adx_tfs)}")
+            if rsi_tfs:
+                why_parts.append(f"RSI confirms on {_join_tfs(rsi_tfs)}")
+            if bb_tfs:
+                why_parts.append(f"BB confirms on {_join_tfs(bb_tfs)}")
+            if fresh_signal != "—":
+                why_parts.append(f"Fresh trigger: {fresh_signal}")
+            if is_wolf_hit:
+                why_parts.append(f"Wolves confluence hit on {_join_tfs(wolf_hit_tfs[direction])}")
+
+            latest_daily = tf_data.get("Daily", {})
+            watchlist_rows.append({
+                "event_key": "|".join([today_iso, symbol, direction]),
+                "scan_date": today_iso, "scan_time": scan_time,
+                "symbol": symbol, "sector": sector, "direction": direction,
+                "rank": rank, "confidence": confidence,
+                "signal_type": signal_type, "primary_trigger": primary_trigger,
+                "timeframes": timeframes_text,
+                "adx_status": _join_tfs(adx_tfs), "rsi_status": _join_tfs(rsi_tfs), "bb_status": _join_tfs(bb_tfs),
+                "adx_active": bool(adx_tfs), "fresh_adx_trigger": bool(fresh_adx_tfs),
+                "fresh_signal": fresh_signal,
+                "confluence_score": score_raw,
+                "close": round(safe_num(latest_daily.get("close")), 2) if latest_daily and not pd.isna(safe_num(latest_daily.get("close"))) else None,
+                "adx": round(safe_num(latest_daily.get("adx")), 2) if latest_daily and not pd.isna(safe_num(latest_daily.get("adx"))) else None,
+                "rsi": round(safe_num(latest_daily.get("rsi")), 2) if latest_daily and not pd.isna(safe_num(latest_daily.get("rsi"))) else None,
+                "di_gap": None,
+                "why": "; ".join(why_parts),
+                "_event_type_for_score": event_type_for_score,
+            })
+
+    # Second pass: Sector Tailwind needs all of this tick's rows at once
+    # (ported from _v32_sector_tailwind -- counts agreement within a sector).
+    tailwind_lookup = sector_tailwind_map(watchlist_rows)
+    for row in watchlist_rows:
+        tailwind = tailwind_lookup.get((row["symbol"], row["direction"]), "Solo / Mixed Sector")
+        row["sector_tailwind"] = tailwind
+        row["decision_score"] = decision_score(
+            rank=row["rank"], event_type=row.pop("_event_type_for_score"), tfs=row["timeframes"],
+            confidence=row["confidence"], adx_active=row["adx_active"], fresh_adx_trigger=row["fresh_adx_trigger"],
+            sector_tailwind=tailwind,
+        )
+
     if rows_to_upsert:
         try:
             supabase.from_("wolves_signal_log").upsert(rows_to_upsert, on_conflict="event_key").execute()
@@ -461,8 +834,22 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
         except Exception as e:
             print(f"[Wolves] fresh_events upsert failed: {e}")
 
-    print(f"[Wolves] Live tick: {scanned} scanned, {skipped} skipped, {errored} errored, {wolves_found} wolf hits, {len(fresh_events)} fresh events")
-    return {"scanned": scanned, "skipped": skipped, "errored": errored, "wolves_found": wolves_found, "fresh_events": len(fresh_events)}
+    if watchlist_rows:
+        try:
+            # wolves_watchlist is rebuilt fresh every tick (today's rows
+            # replaced), since Rank/Confidence/Decision Score are a snapshot
+            # of current state, not a cumulative event log.
+            supabase.from_("wolves_watchlist").delete().eq("scan_date", today_iso).execute()
+            supabase.from_("wolves_watchlist").upsert(watchlist_rows, on_conflict="event_key").execute()
+        except Exception as e:
+            print(f"[Wolves] watchlist upsert failed: {e}")
+
+    print(f"[Wolves] Live tick: {scanned} scanned, {skipped} skipped, {errored} errored, {wolves_found} wolf hits, {len(fresh_events)} fresh events, {len(watchlist_rows)} watchlist rows")
+    return {
+        "scanned": scanned, "skipped": skipped, "errored": errored,
+        "wolves_found": wolves_found, "fresh_events": len(fresh_events),
+        "watchlist_rows": len(watchlist_rows),
+    }
 
 
 def get_todays_wolves() -> dict:
@@ -479,8 +866,9 @@ def get_todays_wolves() -> dict:
 
 def get_todays_fresh_events() -> dict:
     """Read-only -- today's standalone Fresh Events (ADX Cross, RSI Cross,
-    ADX Full Alignment, Grandfather-Father-Son), separate from the full
-    Wolves confluence log above. Cheap Supabase read, no Kite calls."""
+    BB Breakout/Breakdown/Compression, ADX Full Alignment,
+    Grandfather-Father-Son), separate from the full Wolves confluence log
+    above. Cheap Supabase read, no Kite calls."""
     supabase = get_supabase()
     today_ist = datetime.now(IST).date().isoformat()
     rows = supabase.from_("wolves_fresh_events") \
@@ -489,3 +877,17 @@ def get_todays_fresh_events() -> dict:
         .order("scan_time", desc=True) \
         .execute().data or []
     return {"date": today_ist, "events": rows}
+
+
+def get_todays_watchlist() -> dict:
+    """Read-only -- today's Decision Watchlist (Rank/Confidence/Decision
+    Score/Sector Tailwind per symbol+direction). Cheap Supabase read, no
+    Kite calls."""
+    supabase = get_supabase()
+    today_ist = datetime.now(IST).date().isoformat()
+    rows = supabase.from_("wolves_watchlist") \
+        .select("*") \
+        .eq("scan_date", today_ist) \
+        .order("decision_score", desc=True) \
+        .execute().data or []
+    return {"date": today_ist, "watchlist": rows}
