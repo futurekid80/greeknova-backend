@@ -189,6 +189,22 @@ def _refresh_members_and_trials():
         print(f"[GATE] member/trial list load failed: {e}")
 
 
+def note_kite_login(email: str, login_date_iso: str):
+    """Oct 16 2026: call this immediately after a successful Kite login.
+    Without it, a fresh login writes kite_login_log in Supabase, but this
+    gate's in-memory _kite_logins cache only refreshes every _MEMBER_TTL
+    (60s) -- so the very next gated request right after login could still
+    read the OLD cached date, get flagged kite_session_stale, and bounce
+    the person straight back to /login even though they just logged in
+    correctly. Confirmed live: "going in loop from this screen". Updating
+    the cache in-place here closes that race instead of waiting on the TTL."""
+    email = (email or "").strip().lower()
+    if not email or not login_date_iso:
+        return
+    with _lock:
+        _kite_logins["dates"][email] = login_date_iso
+
+
 def _kite_session_stale(email: str) -> bool:
     """True only for an email that HAS logged in via Zerodha before but not
     today (Asia/Kolkata). An email never seen in kite_login_log returns

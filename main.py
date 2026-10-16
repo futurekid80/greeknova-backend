@@ -2081,12 +2081,25 @@ def auth_kite_login(body: KiteLoginRequest):
     # daily check is a day stale, not that no one can log in.
     try:
         from utils.market_calendar import today_ist
+        login_date = today_ist().isoformat()
         admin.from_("kite_login_log").upsert({
             "email": kite_email,
             "kite_user_id": kite_user_id,
-            "last_login_date": today_ist().isoformat(),
+            "last_login_date": login_date,
             "last_login_at": "now()",
         }, on_conflict="email").execute()
+        # Oct 16 2026: "going in loop from this screen" -- the gate's
+        # kite_login_log cache only refreshes every 60s (_MEMBER_TTL), so
+        # the very first gated request right after this login could still
+        # see yesterday's cached date and bounce the person straight back
+        # to /login?error=kite_session_stale. Update the gate's in-memory
+        # cache immediately so a request one second after login already
+        # sees today's date, not whatever was cached up to a minute ago.
+        try:
+            from services.access_gate import note_kite_login
+            note_kite_login(kite_email, login_date)
+        except Exception as e:
+            print(f"[KiteLogin] gate cache update failed: {e}")
     except Exception as e:
         print(f"[KiteLogin] kite_login_log upsert failed: {e}")
 
