@@ -26,13 +26,28 @@ combine with the cached Daily/Weekly/Monthly flags. This is what makes a
 5-minute live cadence (matching his local tool's "Core Live" refresh)
 actually feasible under Kite's rate limits.
 
-NOT YET PORTED (first cut deliberately scopes this down -- see the
-comparison session's scope decision): standalone single-indicator "Fresh
-Events" (lone ADX Cross / RSI cross / BB Compression without full 3-way
-confluence), the Decision Score / Rank (A+/A/B/C) / Confidence system, and
-Sector Tailwind. Those live only in the full Wolves confluence rule here
-for now -- fast-follow candidates once this core signal is verified
-against the local tool.
+v3 adds the standalone "Fresh Events" layer Manish actually relies on day
+to day -- he prioritizes a lone ADX Cross per timeframe to mend/amend
+positions, confluence or not:
+  - Standalone ADX Cross events, Hourly/Daily/Weekly/Monthly, independent
+    of the RSI/BB gate above (reuses the same adx_cross_bull/bear flags).
+  - "ADX Full Alignment" -- a distinct, stronger event when all 4
+    timeframes cross together in the same direction.
+  - Standalone RSI Cross events (prev RSI crossing 60/40), same 4
+    timeframes.
+  - The Grandfather/Father/Son multi-timeframe RSI setup (a named system,
+    confirmed against its public description since it isn't in Manish's
+    source file): Monthly RSI ("Grandfather") and Weekly RSI ("Father")
+    both > 70, Daily RSI ("Son") pulled back into 40-45 = bullish setup;
+    Daily RSI > 70 = exit. Bearish mirror: Monthly+Weekly RSI < 30, Daily
+    RSI in 55-60 = setup, Daily RSI < 30 = exit. RSI(14) throughout, per
+    Manish's confirmation. These read Daily/Weekly/Monthly RSI off
+    wolves_tf_cache as a state check (not a fresh cross), since a cross
+    needs the prior day's RSI, which isn't stored.
+
+STILL NOT PORTED: the Decision Score / Rank (A+/A/B/C) / Confidence
+system and Sector Tailwind from the local tool -- scoped out as a further
+fast-follow.
 """
 import time
 from datetime import datetime, timedelta
@@ -145,6 +160,7 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
         "timeframe": timeframe,
         "adx_cross_bull": False, "adx_cross_bear": False,
         "rsi_bull": False, "rsi_bear": False,
+        "rsi_cross_bull": False, "rsi_cross_bear": False,
         "bb_upper_cross": False, "bb_lower_cross": False,
         "bb_compression_breakout": False, "bb_compression_breakdown": False,
         "bb_bull": False, "bb_bear": False,
@@ -163,6 +179,7 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
     plus_di = safe_num(latest.get("+DI"))
     minus_di = safe_num(latest.get("-DI"))
     rsi = safe_num(latest.get("RSI"))
+    prev_rsi = safe_num(prev.get("RSI"))
     upper = safe_num(latest.get("BB Upper"))
     lower = safe_num(latest.get("BB Lower"))
     prev_upper = safe_num(prev.get("BB Upper"))
@@ -173,6 +190,9 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
     adx_cross = bool(prev_adx <= ADX_THRESHOLD and adx > ADX_THRESHOLD)
     adx_cross_bull = bool(adx_cross and plus_di > minus_di)
     adx_cross_bear = bool(adx_cross and minus_di > plus_di)
+
+    rsi_cross_bull = bool(prev_rsi <= RSI_BULL and rsi > RSI_BULL)
+    rsi_cross_bear = bool(prev_rsi >= RSI_BEAR and rsi < RSI_BEAR)
 
     bb_upper_cross = bool(prev_close <= prev_upper and close > upper)
     bb_lower_cross = bool(prev_close >= prev_lower and close < lower)
@@ -185,6 +205,7 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
         "timeframe": timeframe,
         "adx_cross_bull": adx_cross_bull, "adx_cross_bear": adx_cross_bear,
         "rsi_bull": bool(rsi > RSI_BULL), "rsi_bear": bool(rsi < RSI_BEAR),
+        "rsi_cross_bull": rsi_cross_bull, "rsi_cross_bear": rsi_cross_bear,
         "bb_upper_cross": bb_upper_cross, "bb_lower_cross": bb_lower_cross,
         "bb_compression_breakout": bb_compression_breakout, "bb_compression_breakdown": bb_compression_breakdown,
         "bb_bull": bb_bull, "bb_bear": bb_bear,
@@ -277,6 +298,9 @@ def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
             row[f"{tf_name}_adx_cross_bear"] = tf_eval["adx_cross_bear"]
             row[f"{tf_name}_close"] = round(tf_eval["close"], 2) if not pd.isna(tf_eval["close"]) else None
             row[f"{tf_name}_adx"] = round(tf_eval["adx"], 2) if not pd.isna(tf_eval["adx"]) else None
+            row[f"{tf_name}_rsi"] = round(tf_eval["rsi"], 2) if not pd.isna(tf_eval["rsi"]) else None
+            row[f"{tf_name}_rsi_cross_bull"] = tf_eval["rsi_cross_bull"]
+            row[f"{tf_name}_rsi_cross_bear"] = tf_eval["rsi_cross_bear"]
         rows.append(row)
         cached += 1
 
@@ -315,6 +339,7 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
     tf_cache = {r["symbol"]: r for r in tf_cache_rows}
 
     rows_to_upsert = []
+    fresh_events = []
     scanned, skipped, errored, wolves_found = 0, 0, 0, 0
 
     for symbol in universe:
@@ -338,37 +363,85 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
 
         hourly_ind = add_indicators(hourly_df)
         h = evaluate_timeframe(hourly_ind, "Hourly")
-
-        bull_gate = h["rsi_bull"] and (h["bb_upper_cross"] or h["bb_compression_breakout"] or h["bb_bull"])
-        bear_gate = h["rsi_bear"] and (h["bb_lower_cross"] or h["bb_compression_breakdown"] or h["bb_bear"])
         scanned += 1
-        if not bull_gate and not bear_gate:
-            continue
+        scan_time = datetime.now(IST).strftime("%H:%M:%S")
 
-        tf_adx_cross = {
-            "Hourly": {"bull": h["adx_cross_bull"], "bear": h["adx_cross_bear"], "adx": h["adx"]},
-            "Daily": {"bull": cache_row.get("daily_adx_cross_bull"), "bear": cache_row.get("daily_adx_cross_bear"), "adx": cache_row.get("daily_adx")},
-            "Weekly": {"bull": cache_row.get("weekly_adx_cross_bull"), "bear": cache_row.get("weekly_adx_cross_bear"), "adx": cache_row.get("weekly_adx")},
-            "Monthly": {"bull": cache_row.get("monthly_adx_cross_bull"), "bear": cache_row.get("monthly_adx_cross_bear"), "adx": cache_row.get("monthly_adx")},
+        tf_data = {
+            "Hourly": {"adx_cross_bull": h["adx_cross_bull"], "adx_cross_bear": h["adx_cross_bear"],
+                       "rsi_cross_bull": h["rsi_cross_bull"], "rsi_cross_bear": h["rsi_cross_bear"],
+                       "adx": h["adx"], "rsi": h["rsi"], "close": h["close"]},
+            "Daily": {"adx_cross_bull": cache_row.get("daily_adx_cross_bull"), "adx_cross_bear": cache_row.get("daily_adx_cross_bear"),
+                      "rsi_cross_bull": cache_row.get("daily_rsi_cross_bull"), "rsi_cross_bear": cache_row.get("daily_rsi_cross_bear"),
+                      "adx": cache_row.get("daily_adx"), "rsi": cache_row.get("daily_rsi"), "close": cache_row.get("daily_close")},
+            "Weekly": {"adx_cross_bull": cache_row.get("weekly_adx_cross_bull"), "adx_cross_bear": cache_row.get("weekly_adx_cross_bear"),
+                       "rsi_cross_bull": cache_row.get("weekly_rsi_cross_bull"), "rsi_cross_bear": cache_row.get("weekly_rsi_cross_bear"),
+                       "adx": cache_row.get("weekly_adx"), "rsi": cache_row.get("weekly_rsi"), "close": cache_row.get("weekly_close")},
+            "Monthly": {"adx_cross_bull": cache_row.get("monthly_adx_cross_bull"), "adx_cross_bear": cache_row.get("monthly_adx_cross_bear"),
+                        "rsi_cross_bull": cache_row.get("monthly_rsi_cross_bull"), "rsi_cross_bear": cache_row.get("monthly_rsi_cross_bear"),
+                        "adx": cache_row.get("monthly_adx"), "rsi": cache_row.get("monthly_rsi"), "close": cache_row.get("monthly_close")},
         }
 
-        for direction, gate_ok, key in [("Bullish", bull_gate, "bull"), ("Bearish", bear_gate, "bear")]:
+        def _event(direction, event_type, tf_name, extra_meaning, rsi_val=None, adx_val=None):
+            event_key = "|".join([today_ist.isoformat(), symbol, direction, event_type, tf_name])
+            fresh_events.append({
+                "event_key": event_key, "scan_date": today_ist.isoformat(), "scan_time": scan_time,
+                "symbol": symbol, "direction": direction, "event_type": event_type, "timeframe": tf_name,
+                "close": round(h["close"], 2) if not pd.isna(h["close"]) else None,
+                "rsi": round(rsi_val, 2) if rsi_val is not None and not pd.isna(rsi_val) else None,
+                "adx": round(adx_val, 2) if adx_val is not None and not pd.isna(adx_val) else None,
+                "meaning": extra_meaning,
+            })
+
+        # Standalone ADX Cross + RSI Cross events, independent of the Wolves gate --
+        # Manish prioritizes these alone to mend/amend positions.
+        for tf_name, d in tf_data.items():
+            if d["adx_cross_bull"]:
+                _event("Bullish", "ADX Cross 25", tf_name, f"{tf_name} ADX freshly crossed above 25 with bullish DI.", adx_val=d["adx"])
+            if d["adx_cross_bear"]:
+                _event("Bearish", "ADX Cross 25", tf_name, f"{tf_name} ADX freshly crossed above 25 with bearish DI.", adx_val=d["adx"])
+            if d["rsi_cross_bull"]:
+                _event("Bullish", "RSI Cross 60", tf_name, f"{tf_name} RSI freshly crossed above 60.", rsi_val=d["rsi"])
+            if d["rsi_cross_bear"]:
+                _event("Bearish", "RSI Cross 40", tf_name, f"{tf_name} RSI freshly crossed below 40.", rsi_val=d["rsi"])
+
+        # ADX Full Alignment -- all 4 timeframes cross together, same direction.
+        if all(tf_data[tf]["adx_cross_bull"] for tf in ("Hourly", "Daily", "Weekly", "Monthly")):
+            _event("Bullish", "ADX Full Alignment", "All", "Hourly, Daily, Weekly and Monthly ADX all freshly crossed above 25 with bullish DI together.")
+        if all(tf_data[tf]["adx_cross_bear"] for tf in ("Hourly", "Daily", "Weekly", "Monthly")):
+            _event("Bearish", "ADX Full Alignment", "All", "Hourly, Daily, Weekly and Monthly ADX all freshly crossed above 25 with bearish DI together.")
+
+        # Grandfather/Father/Son RSI (Monthly=Grandfather, Weekly=Father, Daily=Son), RSI(14), state-based.
+        gf_rsi, father_rsi, son_rsi = cache_row.get("monthly_rsi"), cache_row.get("weekly_rsi"), cache_row.get("daily_rsi")
+        if gf_rsi is not None and father_rsi is not None and son_rsi is not None:
+            if gf_rsi > 70 and father_rsi > 70 and 40 <= son_rsi <= 45:
+                _event("Bullish", "Grandfather-Father-Son Setup", "Daily", f"Monthly RSI {gf_rsi} & Weekly RSI {father_rsi} both >70, Daily RSI {son_rsi} pulled back to 40-45 -- continuation setup.", rsi_val=son_rsi)
+            if gf_rsi > 70 and father_rsi > 70 and son_rsi > 70:
+                _event("Bullish", "Grandfather-Father-Son Exit", "Daily", f"Daily RSI {son_rsi} back above 70 with Monthly/Weekly RSI >70 -- overbought exit.", rsi_val=son_rsi)
+            if gf_rsi < 30 and father_rsi < 30 and 55 <= son_rsi <= 60:
+                _event("Bearish", "Grandfather-Father-Son Setup", "Daily", f"Monthly RSI {gf_rsi} & Weekly RSI {father_rsi} both <30, Daily RSI {son_rsi} pulled back to 55-60 -- continuation setup.", rsi_val=son_rsi)
+            if gf_rsi < 30 and father_rsi < 30 and son_rsi < 30:
+                _event("Bearish", "Grandfather-Father-Son Exit", "Daily", f"Daily RSI {son_rsi} back below 30 with Monthly/Weekly RSI <30 -- oversold exit.", rsi_val=son_rsi)
+
+        # Full Wolves confluence (unchanged) -- hourly RSI+BB gate, then per-timeframe ADX cross.
+        bull_gate = h["rsi_bull"] and (h["bb_upper_cross"] or h["bb_compression_breakout"] or h["bb_bull"])
+        bear_gate = h["rsi_bear"] and (h["bb_lower_cross"] or h["bb_compression_breakdown"] or h["bb_bear"])
+        for direction, gate_ok, key in [("Bullish", bull_gate, "adx_cross_bull"), ("Bearish", bear_gate, "adx_cross_bear")]:
             if not gate_ok:
                 continue
-            for tf_name, flags in tf_adx_cross.items():
-                if not flags[key]:
+            for tf_name, d in tf_data.items():
+                if not d[key]:
                     continue
                 event_key = "|".join([today_ist.isoformat(), symbol, direction, WOLF_TIER[tf_name], tf_name])
                 rows_to_upsert.append({
                     "event_key": event_key,
                     "scan_date": today_ist.isoformat(),
-                    "scan_time": datetime.now(IST).strftime("%H:%M:%S"),
+                    "scan_time": scan_time,
                     "symbol": symbol,
                     "direction": direction,
                     "wolf_tier": WOLF_TIER[tf_name],
                     "trigger_timeframe": tf_name,
                     "close": round(h["close"], 2) if not pd.isna(h["close"]) else None,
-                    "adx": flags["adx"],
+                    "adx": d["adx"],
                     "hourly_rsi": round(h["rsi"], 2) if not pd.isna(h["rsi"]) else None,
                     "di_gap": round(h["di_gap"], 2) if not pd.isna(h["di_gap"]) else None,
                     "bb_width_pct": round(h["bb_width_pct"] * 100, 1) if not pd.isna(h["bb_width_pct"]) else None,
@@ -382,8 +455,14 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
         except Exception as e:
             print(f"[Wolves] signal_log upsert failed: {e}")
 
-    print(f"[Wolves] Live tick: {scanned} scanned, {skipped} skipped, {errored} errored, {wolves_found} wolf hits")
-    return {"scanned": scanned, "skipped": skipped, "errored": errored, "wolves_found": wolves_found}
+    if fresh_events:
+        try:
+            supabase.from_("wolves_fresh_events").upsert(fresh_events, on_conflict="event_key").execute()
+        except Exception as e:
+            print(f"[Wolves] fresh_events upsert failed: {e}")
+
+    print(f"[Wolves] Live tick: {scanned} scanned, {skipped} skipped, {errored} errored, {wolves_found} wolf hits, {len(fresh_events)} fresh events")
+    return {"scanned": scanned, "skipped": skipped, "errored": errored, "wolves_found": wolves_found, "fresh_events": len(fresh_events)}
 
 
 def get_todays_wolves() -> dict:
@@ -396,3 +475,17 @@ def get_todays_wolves() -> dict:
         .order("scan_time", desc=True) \
         .execute().data or []
     return {"date": today_ist, "wolves": rows}
+
+
+def get_todays_fresh_events() -> dict:
+    """Read-only -- today's standalone Fresh Events (ADX Cross, RSI Cross,
+    ADX Full Alignment, Grandfather-Father-Son), separate from the full
+    Wolves confluence log above. Cheap Supabase read, no Kite calls."""
+    supabase = get_supabase()
+    today_ist = datetime.now(IST).date().isoformat()
+    rows = supabase.from_("wolves_fresh_events") \
+        .select("*") \
+        .eq("scan_date", today_ist) \
+        .order("scan_time", desc=True) \
+        .execute().data or []
+    return {"date": today_ist, "events": rows}

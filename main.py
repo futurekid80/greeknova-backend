@@ -1696,6 +1696,16 @@ def wolves_today():
     return get_todays_wolves()
 
 
+@app.get("/wolves/fresh-events")
+def wolves_fresh_events():
+    # Standalone ADX Cross / RSI Cross / ADX Full Alignment / Grandfather-
+    # Father-Son events -- independent of the full Wolves confluence gate
+    # above. Same live tick writes both tables; this just reads the other
+    # one. Cheap Supabase read, no Kite calls.
+    from services.wolves_scanner import get_todays_fresh_events
+    return get_todays_fresh_events()
+
+
 @app.post("/wolves/run-now")
 def wolves_run_now():
     # Manual trigger for the fast live tick (hourly candles only, reads the
