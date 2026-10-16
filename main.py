@@ -515,6 +515,23 @@ async def lifespan(app: FastAPI):
             print(f"[ALERTS] EOD digest job failed: {e}")
     scheduler.add_job(_run_eod_digest_job, "cron", hour=15, minute=45, timezone="Asia/Kolkata", id="eod_digest")
 
+    def _run_wolves_scan_job():
+        """Daily 15:55 IST (after the day's candle closes): the Wolves
+        ADX+RSI+BB confluence scan ported from Manish's local Fyers
+        Streamlit tool, run across the F&O universe. Writes hits to
+        wolves_signal_log; the frontend just reads that table, so this is
+        the only place Kite historical_data gets called for this feature."""
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            if not is_trading_day(today_ist()):
+                return
+            from services.wolves_scanner import scan_wolves
+            res = scan_wolves()
+            print(f"[WOLVES] Scan complete: {res}")
+        except Exception as e:
+            print(f"[WOLVES] Scan job failed: {e}")
+    scheduler.add_job(_run_wolves_scan_job, "cron", hour=15, minute=55, timezone="Asia/Kolkata", id="wolves_scan")
+
     def _run_vix_daily_close_job():
         """Daily 15:40 IST: append today's INDIA VIX close to vix_daily_history.
         (Oct 14 2026) This table was only ever written by the one-off
@@ -1646,6 +1663,24 @@ def gamma_history(symbol: str, days: int = 20):
     from services.gamma_exposure import get_gamma_history
     days = max(5, min(days, 60))
     return get_gamma_history(symbol.upper(), days)
+
+
+@app.get("/wolves")
+def wolves_today():
+    # Reads today's Wolves hits from wolves_signal_log -- written once a
+    # day by the wolves_scan cron job (15:55 IST). Cheap Supabase read, no
+    # Kite calls, safe to poll from the frontend on every page load.
+    from services.wolves_scanner import get_todays_wolves
+    return get_todays_wolves()
+
+
+@app.post("/wolves/run-now")
+def wolves_run_now():
+    # Manual trigger -- lets Manish fire a scan on demand (e.g. to compare
+    # against his local Fyers scanner's output for the same day) instead
+    # of waiting for the 15:55 cron. Same function the cron job calls.
+    from services.wolves_scanner import scan_wolves
+    return scan_wolves()
 
 
 @app.get("/gamma-wall-trend/{symbol}")
