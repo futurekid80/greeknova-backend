@@ -1,28 +1,38 @@
 """
-Wolves Scanner -- Oct 16 2026.
+Wolves Scanner -- Oct 16 2026, v2.
 
-Ported from Manish's personal "FYERS ADX Equity Decision Scanner" (a
-~7000-line Streamlit app he ran locally against the Fyers API, coined
-"3 Wolves" for its core signal), so he can discard the local tool and run
-the same scan inside GreekNova against Kite data instead.
+Ports the "3 Wolves" ADX+RSI+BB confluence signal from Manish's local
+Fyers/Streamlit scanner onto Kite data, so he can compare it against the
+local tool and eventually retire it.
 
 THE WOLVES RULE (ported verbatim from the live logic in his file --
-`build_wolves_events_today` / `evaluate_timeframe` v2, the Oct 2026 version
-after ~25 rounds of iteration superseded the earlier ones in the same
-file):
-  1. A timeframe's ADX freshly crosses above 25 with +DI > -DI (trend
-     just activated) -- "adx_cross_bull".
-  2. Hourly RSI > 60 (momentum confirms).
-  3. Hourly price breaks the upper Bollinger Band, OR is already above it
-     with a recent compression-breakout -- "bb_upper_cross" /
-     "bb_compression_breakout" / "bb_bull".
-All three together on a symbol = a Wolf. Which timeframe triggered the ADX
-cross sets the tier: Hourly -> Scout Wolf, Daily -> Alpha Wolf,
-Weekly/Monthly -> Apex Wolf (matching his own naming).
+build_wolves_events_today / evaluate_timeframe v2):
+  Bullish: Hourly RSI > 60 AND (hourly breaks the upper Bollinger Band, or
+  is already above it with a recent compression breakout) AND a timeframe's
+  ADX freshly crosses above 25 with bullish DI. Each timeframe that has the
+  ADX cross produces one Wolf: Hourly -> Scout Wolf, Daily -> Alpha Wolf,
+  Weekly/Monthly -> Apex Wolf.
+  Bearish: the exact mirror (hourly RSI < 40, lower-band break/breakdown,
+  ADX cross with bearish DI) -- ported from _v32_is_hourly_bear_bb /
+  _v32_wolves_tier in his file, which the first pass of this port missed.
 
-Only the data-fetch layer changed (Kite historical_data instead of Fyers'
-API) -- the indicator math and the Wolves rule itself are unchanged, so
-this should fire on the same setups his local scanner would have flagged.
+ARCHITECTURE (v2 -- rewritten after the v1 "full re-fetch every scan" design
+turned out too slow to run live): Daily/Weekly/Monthly only change once a
+day, so their ADX-cross state is computed ONCE after close
+(refresh_tf_cache) and cached in wolves_tf_cache. Live ticks during market
+hours (run_live_tick) only re-fetch Hourly candles -- one Kite call per
+symbol instead of two, and a ~30-day window instead of years -- then
+combine with the cached Daily/Weekly/Monthly flags. This is what makes a
+5-minute live cadence (matching his local tool's "Core Live" refresh)
+actually feasible under Kite's rate limits.
+
+NOT YET PORTED (first cut deliberately scopes this down -- see the
+comparison session's scope decision): standalone single-indicator "Fresh
+Events" (lone ADX Cross / RSI cross / BB Compression without full 3-way
+confluence), the Decision Score / Rank (A+/A/B/C) / Confidence system, and
+Sector Tailwind. Those live only in the full Wolves confluence rule here
+for now -- fast-follow candidates once this core signal is verified
+against the local tool.
 """
 import time
 from datetime import datetime, timedelta
@@ -35,17 +45,14 @@ from utils.db import get_supabase
 
 IST = pytz.timezone("Asia/Kolkata")
 
-# Indicator lengths -- same defaults as the ported app (ADX 14, RSI 14, BB 20/2).
 ADX_LEN = 14
 RSI_LEN = 14
 BB_LEN = 20
 BB_STD = 2.0
 ADX_THRESHOLD = 25.0
 RSI_BULL = 60.0
+RSI_BEAR = 40.0
 
-# Index spot tokens -- same ones GreekNova's CPR job already uses for
-# kite.historical_data() on indices (they aren't in kite.instruments("NSE")
-# the way stocks are).
 INDEX_TOKENS = {
     "NIFTY": 256265,
     "BANKNIFTY": 260105,
@@ -67,10 +74,8 @@ def rma(series: pd.Series, length: int) -> pd.Series:
 
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """ADX/+DI/-DI/RSI/Bollinger Bands + the BB-width compression layer --
-    ported verbatim from the live version of this function in the source
-    file (the v2/"_v28" one, which added BB Width Percentile/Compressed on
-    top of the original add_indicators)."""
+    """ADX/+DI/-DI/RSI/Bollinger Bands + BB-width compression -- ported
+    verbatim from the live version in the source file."""
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -133,14 +138,16 @@ def safe_num(value, default=np.nan) -> float:
 
 
 def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
-    """Just what the Wolves rule needs from one timeframe's latest bar --
-    adx_cross_bull, plus the raw ADX/RSI/close for display. Ported from
-    the live evaluate_timeframe (the fields `build_wolves_events_today`
-    actually reads: adx_cross_bull, rsi_bull, bb_upper_cross,
-    bb_compression_breakout, bb_bull)."""
+    """adx_cross_bull/bear, rsi_bull/bear, bb_upper_cross/bb_lower_cross,
+    bb_compression_breakout/breakdown, bb_bull/bb_bear -- ported from the
+    live evaluate_timeframe, both bullish and bearish sides."""
     empty = {
-        "timeframe": timeframe, "adx_cross_bull": False, "rsi_bull": False,
-        "bb_upper_cross": False, "bb_compression_breakout": False, "bb_bull": False,
+        "timeframe": timeframe,
+        "adx_cross_bull": False, "adx_cross_bear": False,
+        "rsi_bull": False, "rsi_bear": False,
+        "bb_upper_cross": False, "bb_lower_cross": False,
+        "bb_compression_breakout": False, "bb_compression_breakdown": False,
+        "bb_bull": False, "bb_bear": False,
         "close": np.nan, "adx": np.nan, "rsi": np.nan, "di_gap": np.nan, "bb_width_pct": np.nan,
     }
     if df is None or len(df) < 25:
@@ -159,22 +166,28 @@ def evaluate_timeframe(df: pd.DataFrame, timeframe: str) -> dict:
     upper = safe_num(latest.get("BB Upper"))
     lower = safe_num(latest.get("BB Lower"))
     prev_upper = safe_num(prev.get("BB Upper"))
+    prev_lower = safe_num(prev.get("BB Lower"))
     bb_width_pct = safe_num(latest.get("BB Width Pct"))
     compressed_recent = bool(df["BB Compressed"].tail(12).fillna(False).astype(bool).any()) if "BB Compressed" in df.columns else False
 
     adx_cross = bool(prev_adx <= ADX_THRESHOLD and adx > ADX_THRESHOLD)
     adx_cross_bull = bool(adx_cross and plus_di > minus_di)
+    adx_cross_bear = bool(adx_cross and minus_di > plus_di)
+
     bb_upper_cross = bool(prev_close <= prev_upper and close > upper)
+    bb_lower_cross = bool(prev_close >= prev_lower and close < lower)
     bb_compression_breakout = bool(compressed_recent and bb_upper_cross)
+    bb_compression_breakdown = bool(compressed_recent and bb_lower_cross)
     bb_bull = bool(close > upper)
+    bb_bear = bool(close < lower)
 
     return {
         "timeframe": timeframe,
-        "adx_cross_bull": adx_cross_bull,
-        "rsi_bull": bool(rsi > RSI_BULL),
-        "bb_upper_cross": bb_upper_cross,
-        "bb_compression_breakout": bb_compression_breakout,
-        "bb_bull": bb_bull,
+        "adx_cross_bull": adx_cross_bull, "adx_cross_bear": adx_cross_bear,
+        "rsi_bull": bool(rsi > RSI_BULL), "rsi_bear": bool(rsi < RSI_BEAR),
+        "bb_upper_cross": bb_upper_cross, "bb_lower_cross": bb_lower_cross,
+        "bb_compression_breakout": bb_compression_breakout, "bb_compression_breakdown": bb_compression_breakdown,
+        "bb_bull": bb_bull, "bb_bear": bb_bear,
         "close": close, "adx": adx, "rsi": rsi,
         "di_gap": abs(plus_di - minus_di) if not (pd.isna(plus_di) or pd.isna(minus_di)) else np.nan,
         "bb_width_pct": bb_width_pct,
@@ -212,11 +225,15 @@ def _candles_to_df(candles: list[dict]) -> pd.DataFrame:
     return df[["date", "open", "high", "low", "close", "volume"]]
 
 
-def scan_wolves(symbols: list[str] | None = None) -> dict:
-    """Runs the full Wolves scan and upserts hits into wolves_signal_log.
-    Returns a summary dict. Call this from a scheduled job, not per page
-    load -- it's ~2 Kite historical_data calls per symbol (daily + 60min),
-    which adds up across the F&O universe."""
+# ---------------------------------------------------------------------------
+# EOD: refresh the Daily/Weekly/Monthly ADX-cross cache (once per day)
+# ---------------------------------------------------------------------------
+
+def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
+    """Fetches daily candles once per symbol (years of history, native Kite
+    'day' interval -- one call), derives Weekly/Monthly via resample, and
+    caches each timeframe's adx_cross_bull/bear + raw values. Live ticks
+    read this instead of re-fetching daily/weekly/monthly every 5 minutes."""
     from services.kite_auth import get_kite_client
     from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
 
@@ -226,12 +243,10 @@ def scan_wolves(symbols: list[str] | None = None) -> dict:
     token_map = _build_token_map(kite, universe)
 
     today_ist = datetime.now(IST).date()
-    daily_from = (today_ist - timedelta(days=1100)).isoformat()  # ~3yr, enough for weekly/monthly BB-width percentile
-    hourly_from = (today_ist - timedelta(days=90)).isoformat()
+    daily_from = (today_ist - timedelta(days=2000)).isoformat()  # ~8yr -- gives the monthly resample a real percentile population
     to_date = today_ist.isoformat()
 
-    rows_to_upsert = []
-    scanned, skipped, errored = 0, 0, 0
+    rows, cached, skipped, errored = [], 0, 0, 0
 
     for symbol in universe:
         token = token_map.get(symbol)
@@ -240,65 +255,139 @@ def scan_wolves(symbols: list[str] | None = None) -> dict:
             continue
         try:
             daily_candles = kite.historical_data(instrument_token=token, from_date=daily_from, to_date=to_date, interval="day", continuous=False, oi=False)
-            time.sleep(0.34)  # ~3 req/sec, matching Kite Connect's historical-data rate limit
-            hourly_candles = kite.historical_data(instrument_token=token, from_date=hourly_from, to_date=to_date, interval="60minute", continuous=False, oi=False)
             time.sleep(0.34)
         except Exception as e:
-            print(f"[Wolves] {symbol}: historical_data failed -- {e}")
+            print(f"[Wolves] {symbol}: daily fetch failed -- {e}")
             errored += 1
             continue
 
         daily_df = _candles_to_df(daily_candles)
-        hourly_df = _candles_to_df(hourly_candles)
-        if daily_df.empty or hourly_df.empty:
+        if daily_df.empty:
             skipped += 1
             continue
 
         daily_ind = add_indicators(daily_df)
         weekly_ind = add_indicators(resample_ohlcv(daily_df, "W-FRI"))
         monthly_ind = add_indicators(resample_ohlcv(daily_df, "ME"))
-        hourly_ind = add_indicators(hourly_df)
 
-        hourly_eval = evaluate_timeframe(hourly_ind, "Hourly")
-        hourly_gate_ok = hourly_eval["rsi_bull"] and (hourly_eval["bb_upper_cross"] or hourly_eval["bb_compression_breakout"] or hourly_eval["bb_bull"])
-        if not hourly_gate_ok:
-            scanned += 1
+        row = {"symbol": symbol, "computed_date": today_ist.isoformat()}
+        for tf_name, tf_df in [("daily", daily_ind), ("weekly", weekly_ind), ("monthly", monthly_ind)]:
+            tf_eval = evaluate_timeframe(tf_df, tf_name.capitalize())
+            row[f"{tf_name}_adx_cross_bull"] = tf_eval["adx_cross_bull"]
+            row[f"{tf_name}_adx_cross_bear"] = tf_eval["adx_cross_bear"]
+            row[f"{tf_name}_close"] = round(tf_eval["close"], 2) if not pd.isna(tf_eval["close"]) else None
+            row[f"{tf_name}_adx"] = round(tf_eval["adx"], 2) if not pd.isna(tf_eval["adx"]) else None
+        rows.append(row)
+        cached += 1
+
+    if rows:
+        try:
+            supabase.from_("wolves_tf_cache").upsert(rows, on_conflict="symbol").execute()
+        except Exception as e:
+            print(f"[Wolves] tf_cache upsert failed: {e}")
+
+    print(f"[Wolves] TF cache refresh: {cached} cached, {skipped} skipped, {errored} errored")
+    return {"cached": cached, "skipped": skipped, "errored": errored}
+
+
+# ---------------------------------------------------------------------------
+# Live: hourly-only tick, combined with the cached Daily/Weekly/Monthly state
+# ---------------------------------------------------------------------------
+
+def run_live_tick(symbols: list[str] | None = None) -> dict:
+    """Fetches ONLY hourly candles (one Kite call/symbol, ~30-day window)
+    and combines with the cached Daily/Weekly/Monthly flags from
+    refresh_tf_cache. This is the fast path meant to run every few minutes
+    during market hours."""
+    from services.kite_auth import get_kite_client
+    from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
+
+    universe = symbols or list(_ALL_SYMBOLS)
+    kite = get_kite_client()
+    supabase = get_supabase()
+    token_map = _build_token_map(kite, universe)
+
+    today_ist = datetime.now(IST).date()
+    hourly_from = (today_ist - timedelta(days=30)).isoformat()
+    to_date = today_ist.isoformat()
+
+    tf_cache_rows = supabase.from_("wolves_tf_cache").select("*").in_("symbol", universe).execute().data or []
+    tf_cache = {r["symbol"]: r for r in tf_cache_rows}
+
+    rows_to_upsert = []
+    scanned, skipped, errored, wolves_found = 0, 0, 0, 0
+
+    for symbol in universe:
+        token = token_map.get(symbol)
+        cache_row = tf_cache.get(symbol)
+        if not token or not cache_row:
+            skipped += 1
+            continue
+        try:
+            hourly_candles = kite.historical_data(instrument_token=token, from_date=hourly_from, to_date=to_date, interval="60minute", continuous=False, oi=False)
+            time.sleep(0.34)
+        except Exception as e:
+            print(f"[Wolves] {symbol}: hourly fetch failed -- {e}")
+            errored += 1
             continue
 
-        for tf_name, tf_df in [("Hourly", hourly_ind), ("Daily", daily_ind), ("Weekly", weekly_ind), ("Monthly", monthly_ind)]:
-            tf_eval = hourly_eval if tf_name == "Hourly" else evaluate_timeframe(tf_df, tf_name)
-            if not tf_eval["adx_cross_bull"]:
-                continue
-            event_key = "|".join([today_ist.isoformat(), symbol, "Bullish", WOLF_TIER[tf_name], tf_name])
-            rows_to_upsert.append({
-                "event_key": event_key,
-                "scan_date": today_ist.isoformat(),
-                "scan_time": datetime.now(IST).strftime("%H:%M:%S"),
-                "symbol": symbol,
-                "direction": "Bullish",
-                "wolf_tier": WOLF_TIER[tf_name],
-                "trigger_timeframe": tf_name,
-                "close": round(hourly_eval["close"], 2) if not pd.isna(hourly_eval["close"]) else None,
-                "adx": round(tf_eval["adx"], 2) if not pd.isna(tf_eval["adx"]) else None,
-                "hourly_rsi": round(hourly_eval["rsi"], 2) if not pd.isna(hourly_eval["rsi"]) else None,
-                "di_gap": round(tf_eval["di_gap"], 2) if not pd.isna(tf_eval["di_gap"]) else None,
-                "bb_width_pct": round(hourly_eval["bb_width_pct"] * 100, 1) if not pd.isna(hourly_eval["bb_width_pct"]) else None,
-                "meaning": f"{WOLF_TIER[tf_name]}: {tf_name} ADX fresh cross above 25 with hourly RSI>60 and hourly upper-BB breakout.",
-            })
+        hourly_df = _candles_to_df(hourly_candles)
+        if hourly_df.empty:
+            skipped += 1
+            continue
+
+        hourly_ind = add_indicators(hourly_df)
+        h = evaluate_timeframe(hourly_ind, "Hourly")
+
+        bull_gate = h["rsi_bull"] and (h["bb_upper_cross"] or h["bb_compression_breakout"] or h["bb_bull"])
+        bear_gate = h["rsi_bear"] and (h["bb_lower_cross"] or h["bb_compression_breakdown"] or h["bb_bear"])
         scanned += 1
+        if not bull_gate and not bear_gate:
+            continue
+
+        tf_adx_cross = {
+            "Hourly": {"bull": h["adx_cross_bull"], "bear": h["adx_cross_bear"], "adx": h["adx"]},
+            "Daily": {"bull": cache_row.get("daily_adx_cross_bull"), "bear": cache_row.get("daily_adx_cross_bear"), "adx": cache_row.get("daily_adx")},
+            "Weekly": {"bull": cache_row.get("weekly_adx_cross_bull"), "bear": cache_row.get("weekly_adx_cross_bear"), "adx": cache_row.get("weekly_adx")},
+            "Monthly": {"bull": cache_row.get("monthly_adx_cross_bull"), "bear": cache_row.get("monthly_adx_cross_bear"), "adx": cache_row.get("monthly_adx")},
+        }
+
+        for direction, gate_ok, key in [("Bullish", bull_gate, "bull"), ("Bearish", bear_gate, "bear")]:
+            if not gate_ok:
+                continue
+            for tf_name, flags in tf_adx_cross.items():
+                if not flags[key]:
+                    continue
+                event_key = "|".join([today_ist.isoformat(), symbol, direction, WOLF_TIER[tf_name], tf_name])
+                rows_to_upsert.append({
+                    "event_key": event_key,
+                    "scan_date": today_ist.isoformat(),
+                    "scan_time": datetime.now(IST).strftime("%H:%M:%S"),
+                    "symbol": symbol,
+                    "direction": direction,
+                    "wolf_tier": WOLF_TIER[tf_name],
+                    "trigger_timeframe": tf_name,
+                    "close": round(h["close"], 2) if not pd.isna(h["close"]) else None,
+                    "adx": flags["adx"],
+                    "hourly_rsi": round(h["rsi"], 2) if not pd.isna(h["rsi"]) else None,
+                    "di_gap": round(h["di_gap"], 2) if not pd.isna(h["di_gap"]) else None,
+                    "bb_width_pct": round(h["bb_width_pct"] * 100, 1) if not pd.isna(h["bb_width_pct"]) else None,
+                    "meaning": f"{WOLF_TIER[tf_name]}: {tf_name} ADX fresh cross above 25 ({direction.lower()}) with hourly RSI {'>60' if direction=='Bullish' else '<40'} and hourly {'upper' if direction=='Bullish' else 'lower'}-BB break.",
+                })
+                wolves_found += 1
 
     if rows_to_upsert:
         try:
             supabase.from_("wolves_signal_log").upsert(rows_to_upsert, on_conflict="event_key").execute()
         except Exception as e:
-            print(f"[Wolves] upsert failed: {e}")
+            print(f"[Wolves] signal_log upsert failed: {e}")
 
-    return {"scanned": scanned, "skipped": skipped, "errored": errored, "wolves_found": len(rows_to_upsert)}
+    print(f"[Wolves] Live tick: {scanned} scanned, {skipped} skipped, {errored} errored, {wolves_found} wolf hits")
+    return {"scanned": scanned, "skipped": skipped, "errored": errored, "wolves_found": wolves_found}
 
 
 def get_todays_wolves() -> dict:
-    """Read-only -- today's Wolves log, for the frontend to poll. Cheap
-    Supabase read, no Kite calls, so the page can hit this on every load."""
+    """Read-only -- today's Wolves log. Cheap Supabase read, no Kite calls."""
     supabase = get_supabase()
     today_ist = datetime.now(IST).date().isoformat()
     rows = supabase.from_("wolves_signal_log") \

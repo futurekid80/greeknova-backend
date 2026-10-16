@@ -515,22 +515,44 @@ async def lifespan(app: FastAPI):
             print(f"[ALERTS] EOD digest job failed: {e}")
     scheduler.add_job(_run_eod_digest_job, "cron", hour=15, minute=45, timezone="Asia/Kolkata", id="eod_digest")
 
-    def _run_wolves_scan_job():
-        """Daily 15:55 IST (after the day's candle closes): the Wolves
-        ADX+RSI+BB confluence scan ported from Manish's local Fyers
-        Streamlit tool, run across the F&O universe. Writes hits to
-        wolves_signal_log; the frontend just reads that table, so this is
-        the only place Kite historical_data gets called for this feature."""
+    def _run_wolves_tf_cache_job():
+        """Daily 15:50 IST (after close): refreshes the Daily/Weekly/Monthly
+        ADX-cross cache (wolves_tf_cache) that the live ticks below read all
+        through the next trading day, instead of each live tick re-fetching
+        years of daily history for every symbol (the v1 design, which was
+        too slow to run live -- an 8+ minute single scan)."""
         try:
             from utils.market_calendar import is_trading_day, today_ist
             if not is_trading_day(today_ist()):
                 return
-            from services.wolves_scanner import scan_wolves
-            res = scan_wolves()
-            print(f"[WOLVES] Scan complete: {res}")
+            from services.wolves_scanner import refresh_tf_cache
+            res = refresh_tf_cache()
+            print(f"[WOLVES] TF cache refresh: {res}")
         except Exception as e:
-            print(f"[WOLVES] Scan job failed: {e}")
-    scheduler.add_job(_run_wolves_scan_job, "cron", hour=15, minute=55, timezone="Asia/Kolkata", id="wolves_scan")
+            print(f"[WOLVES] TF cache refresh job failed: {e}")
+    scheduler.add_job(_run_wolves_tf_cache_job, "cron", hour=15, minute=50, timezone="Asia/Kolkata", id="wolves_tf_cache_refresh")
+
+    def _run_wolves_live_tick_job():
+        """Every 5 min, 9:15-15:35 IST: the live Wolves tick -- hourly
+        candles only (fast, one Kite call/symbol), combined with the cached
+        Daily/Weekly/Monthly ADX-cross state. Self-gates to market hours
+        since the cron fires a bit wider than that to keep the schedule
+        simple."""
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            if not is_trading_day(today_ist()):
+                return
+            from datetime import datetime as _dt
+            import pytz as _pytz
+            now = _dt.now(_pytz.timezone("Asia/Kolkata"))
+            if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
+                return
+            from services.wolves_scanner import run_live_tick
+            res = run_live_tick()
+            print(f"[WOLVES] Live tick: {res}")
+        except Exception as e:
+            print(f"[WOLVES] Live tick job failed: {e}")
+    scheduler.add_job(_run_wolves_live_tick_job, "cron", hour="9-15", minute="*/5", timezone="Asia/Kolkata", id="wolves_live_tick")
 
     def _run_vix_daily_close_job():
         """Daily 15:40 IST: append today's INDIA VIX close to vix_daily_history.
@@ -1667,20 +1689,32 @@ def gamma_history(symbol: str, days: int = 20):
 
 @app.get("/wolves")
 def wolves_today():
-    # Reads today's Wolves hits from wolves_signal_log -- written once a
-    # day by the wolves_scan cron job (15:55 IST). Cheap Supabase read, no
-    # Kite calls, safe to poll from the frontend on every page load.
+    # Reads today's Wolves hits from wolves_signal_log -- written by the
+    # live tick (every 5 min, market hours) and the EOD cache refresh.
+    # Cheap Supabase read, no Kite calls, safe to poll on every page load.
     from services.wolves_scanner import get_todays_wolves
     return get_todays_wolves()
 
 
 @app.post("/wolves/run-now")
 def wolves_run_now():
-    # Manual trigger -- lets Manish fire a scan on demand (e.g. to compare
-    # against his local Fyers scanner's output for the same day) instead
-    # of waiting for the 15:55 cron. Same function the cron job calls.
-    from services.wolves_scanner import scan_wolves
-    return scan_wolves()
+    # Manual trigger for the fast live tick (hourly candles only, reads the
+    # cached Daily/Weekly/Monthly state) -- lets Manish fire a scan on
+    # demand to compare against his local Fyers scanner, without waiting
+    # for the next 5-minute cron tick. Requires wolves_tf_cache to already
+    # be populated (the EOD refresh job, or /wolves/refresh-cache below).
+    from services.wolves_scanner import run_live_tick
+    return run_live_tick()
+
+
+@app.post("/wolves/refresh-cache")
+def wolves_refresh_cache():
+    # Manual trigger for the slower Daily/Weekly/Monthly cache refresh --
+    # only needed once a day normally (the 15:50 IST cron does this), but
+    # exposed so the cache can be seeded/rebuilt on demand (e.g. right
+    # after this feature first ships, before the first EOD cron has run).
+    from services.wolves_scanner import refresh_tf_cache
+    return refresh_tf_cache()
 
 
 @app.get("/gamma-wall-trend/{symbol}")
