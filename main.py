@@ -1,7 +1,8 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn, sys, time
@@ -12,7 +13,7 @@ from commoditynova.mcx_oi_map_router import router as mcx_oi_map_router
 from api.daily_oi_summary import compute_daily_summary
 
 
-INDICES = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","SENSEX"]
+INDICES = ["NIFTY","BANKNIFTY","FINNIFTY"]
 # BUG FIX (Aug 27 2026): TOP30 was a hardcoded, independently-maintained
 # copy of the symbol list -- this is the list that actually drives the
 # live options-chain capture loop (INDICES + TOP30), so every time a new
@@ -29,14 +30,8 @@ INDICES = ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","SENSEX"]
 #   positional_radar.py/iv_analysis.py but missed here, capping live
 #   capture at 80 symbols instead of 100"
 from api.iv_analysis import SYMBOLS as _ALL_SYMBOLS
-# BUG FIX (Oct 10 2026): was excluding its own separately-hardcoded
-# ("NIFTY", "BANKNIFTY", "FINNIFTY") tuple instead of the INDICES list
-# defined two lines above -- the exact drift risk the Aug 27 fix above was
-# trying to close. Adding MIDCPNIFTY to INDICES without also catching this
-# tuple would have silently left it tracked as if it were a STOCK (wrong
-# spot symbol, wrong strike interval). Now derives from INDICES directly.
-TOP30 = [s for s in _ALL_SYMBOLS if s not in INDICES]
-INDEX_NSE_MAP = {"NIFTY":"NSE:NIFTY 50","BANKNIFTY":"NSE:NIFTY BANK","FINNIFTY":"NSE:NIFTY FIN SERVICE","MIDCPNIFTY":"NSE:NIFTY MID SELECT","SENSEX":"BSE:SENSEX"}
+TOP30 = [s for s in _ALL_SYMBOLS if s not in ("NIFTY", "BANKNIFTY", "FINNIFTY")]
+INDEX_NSE_MAP = {"NIFTY":"NSE:NIFTY 50","BANKNIFTY":"NSE:NIFTY BANK","FINNIFTY":"NSE:NIFTY FIN SERVICE"}
 STOCK_NSE_MAP = {s: f"NSE:{s}" for s in TOP30}
 # BUG FIX (Sep 12 2026): this was an independently hardcoded dict (same
 # class of bug flagged in the TOP30 comment above -- it happened again:
@@ -104,17 +99,6 @@ def run_full_capture():
         except Exception as e: print(f"  ⚠️ Stock CMP: {e}")
 
         instruments = kite.instruments("NFO")
-        # Oct 2026: SENSEX trades on BSE's F&O segment (BFO), not NFO --
-        # every other tracked symbol does. Pull that segment's instrument
-        # dump too so SENSEX's own options/futures are findable below by
-        # the same `i["name"] == symbol` match used for everything else.
-        # Best-effort: if this fails, SENSEX just gets skipped this cycle
-        # (the `if not found: continue` below already handles that) rather
-        # than failing the whole capture run.
-        try:
-            instruments = instruments + kite.instruments("BFO")
-        except Exception as e:
-            print(f"  ⚠️ BFO instruments fetch failed (SENSEX capture skipped this cycle): {e}")
 
         for symbol in INDICES + TOP30:
             is_index = symbol in INDICES
@@ -179,15 +163,9 @@ def run_full_capture():
                 # Add FUT instruments for nearest expiries
                 for exp in fut_expiries[:num_expiries]:
                     nearest.extend([i for i in fut_instruments if i["expiry"] == exp])
-                # BUG FIX (Oct 2026): was a hardcoded "NFO:" prefix, which
-                # silently produced zero matches for SENSEX (its contracts
-                # quote as "BFO:SENSEX..."). Each instrument dict already
-                # carries its own correct exchange (from whichever of the
-                # NFO/BFO dumps above it came from), so use that instead of
-                # assuming NFO for everything.
-                quotes = kite.quote([f"{i['exchange']}:{i['tradingsymbol']}" for i in nearest])
+                quotes = kite.quote(["NFO:" + i["tradingsymbol"] for i in nearest])
                 for inst in nearest:
-                    key = f"{inst['exchange']}:{inst['tradingsymbol']}"
+                    key = f"NFO:{inst['tradingsymbol']}"
                     if key in quotes:
                         q = quotes[key]
                         records.append({
@@ -276,23 +254,6 @@ def keepalive_ping():
     except Exception as e:
         print(f"⚠️ Keepalive failed: {e}")
 
-def _record_job_status(supabase, job_name, status, detail=None, records_count=None):
-    """Lightweight job-run tracker so a silent/failed background job shows up
-    somewhere other than scrolling Railway logs -- see /admin/job-status.
-    Best-effort: never let a logging failure break the caller."""
-    try:
-        import pytz
-        from datetime import datetime
-        supabase.from_("job_status").upsert({
-            "job_name": job_name,
-            "last_run_at": datetime.now(pytz.utc).isoformat(),
-            "status": status,
-            "detail": (str(detail)[:500] if detail is not None else None),
-            "records_count": records_count,
-        }).execute()
-    except Exception as log_e:
-        print(f"[JobStatus] Failed to record status for {job_name}: {log_e}")
-
 def fetch_delivery_data():
     """Fetch today's delivery data from NSE bhav copy after market close."""
     import pytz, zipfile, io, requests
@@ -333,7 +294,6 @@ def fetch_delivery_data():
         res = requests.get(url, headers=headers, timeout=15)
         if res.status_code != 200:
             print(f"[Delivery] HTTP {res.status_code} for {today}")
-            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", f"HTTP {res.status_code}")
             return
         content = res.text
         lines = content.strip().split('\n')
@@ -345,7 +305,6 @@ def fetch_delivery_data():
         series_idx = next((i for i,h in enumerate(header) if h == 'SERIES'), None)
         if sym_idx is None or trd_idx is None or del_idx is None:
             print(f"[Delivery] Column not found in header: {header}")
-            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", f"Missing expected column in header: {header[:10]}")
             return
         records = []
         for line in lines[1:]:
@@ -364,16 +323,10 @@ def fetch_delivery_data():
             for i in range(0, len(records), 100):
                 supabase.from_("delivery_data").upsert(records[i:i+100]).execute()
             print(f"[Delivery] ✅ {today} — {len(records)} stocks saved")
-            _record_job_status(supabase, "delivery_bhavcopy_fetch", "success", f"{today}", len(records))
         else:
             print(f"[Delivery] ⚠️ {today} — no matching symbols")
-            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", f"{today} — parsed file but no matching symbols", 0)
     except Exception as e:
         print(f"[Delivery] ❌ {e}")
-        try:
-            _record_job_status(supabase, "delivery_bhavcopy_fetch", "error", str(e))
-        except Exception:
-            pass  # supabase itself may be what failed to init
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -493,83 +446,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[earnings] refresh job failed: {e}")
     scheduler.add_job(_run_earnings_refresh_job, "cron", hour=7, minute=50, timezone="Asia/Kolkata", id="earnings_refresh")
-
-    # Candidate Telegram digests (Oct 14 2026) — personal-only, for Manish to
-    # watch live before deciding which alert types become permanent/public.
-    def _run_premarket_digest_job():
-        try:
-            from services.alert_engine import send_premarket_digest
-            send_premarket_digest()
-        except Exception as e:
-            print(f"[ALERTS] Pre-market digest job failed: {e}")
-    scheduler.add_job(_run_premarket_digest_job, "cron", hour=8, minute=40, timezone="Asia/Kolkata", id="premarket_digest")
-
-    def _run_eod_digest_job():
-        try:
-            from utils.market_calendar import is_trading_day, today_ist
-            if not is_trading_day(today_ist()):
-                return
-            from services.alert_engine import send_eod_digest
-            send_eod_digest()
-        except Exception as e:
-            print(f"[ALERTS] EOD digest job failed: {e}")
-    scheduler.add_job(_run_eod_digest_job, "cron", hour=15, minute=45, timezone="Asia/Kolkata", id="eod_digest")
-
-    def _run_wolves_tf_cache_job():
-        """Daily 15:50 IST (after close): refreshes the Daily/Weekly/Monthly
-        ADX-cross cache (wolves_tf_cache) that the live ticks below read all
-        through the next trading day, instead of each live tick re-fetching
-        years of daily history for every symbol (the v1 design, which was
-        too slow to run live -- an 8+ minute single scan)."""
-        try:
-            from utils.market_calendar import is_trading_day, today_ist
-            if not is_trading_day(today_ist()):
-                return
-            from services.wolves_scanner import refresh_tf_cache
-            res = refresh_tf_cache()
-            print(f"[WOLVES] TF cache refresh: {res}")
-        except Exception as e:
-            print(f"[WOLVES] TF cache refresh job failed: {e}")
-    scheduler.add_job(_run_wolves_tf_cache_job, "cron", hour=15, minute=50, timezone="Asia/Kolkata", id="wolves_tf_cache_refresh")
-
-    def _run_wolves_live_tick_job():
-        """Every 5 min, 9:15-15:35 IST: the live Wolves tick -- hourly
-        candles only (fast, one Kite call/symbol), combined with the cached
-        Daily/Weekly/Monthly ADX-cross state. Self-gates to market hours
-        since the cron fires a bit wider than that to keep the schedule
-        simple."""
-        try:
-            from utils.market_calendar import is_trading_day, today_ist
-            if not is_trading_day(today_ist()):
-                return
-            from datetime import datetime as _dt
-            import pytz as _pytz
-            now = _dt.now(_pytz.timezone("Asia/Kolkata"))
-            if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
-                return
-            from services.wolves_scanner import run_live_tick
-            res = run_live_tick()
-            print(f"[WOLVES] Live tick: {res}")
-        except Exception as e:
-            print(f"[WOLVES] Live tick job failed: {e}")
-    scheduler.add_job(_run_wolves_live_tick_job, "cron", hour="9-15", minute="*/5", timezone="Asia/Kolkata", id="wolves_live_tick")
-
-    def _run_vix_daily_close_job():
-        """Daily 15:40 IST: append today's INDIA VIX close to vix_daily_history.
-        (Oct 14 2026) This table was only ever written by the one-off
-        /admin/backfill-vix-history endpoint -- nothing kept it current, so
-        the VIX page's "Daily close" chart had been stuck at Oct 1 for two
-        weeks before Manish noticed. This job is the fix going forward."""
-        try:
-            from utils.market_calendar import is_trading_day, today_ist
-            if not is_trading_day(today_ist()):
-                return
-            from api.vix_backfill import append_vix_daily_close
-            res = append_vix_daily_close(days_back=5)
-            print(f"[VIX] Daily close append: {res}")
-        except Exception as e:
-            print(f"[VIX] Daily close job failed: {e}")
-    scheduler.add_job(_run_vix_daily_close_job, "cron", hour=15, minute=40, timezone="Asia/Kolkata", id="vix_daily_close")
 
     def _run_spot_bars_heal_job():
         """Daily 08:50 IST: F&O stocks that joined recently only get one new bar a day from the EOD
@@ -705,26 +581,6 @@ async def lifespan(app: FastAPI):
     scheduler.add_job(
         save_eod_signal_log,
         "cron", hour=15, minute=35, timezone="Asia/Kolkata", id="eod_signal_save",
-        misfire_grace_time=600
-    )
-
-    def _run_strike_iv_capture_job():
-        # Oct 8 2026: EOD capture feeding the VRP scanner's per-strike IV
-        # percentile (strike_iv_daily table) -- see gamma_exposure.py's
-        # capture_strike_iv_daily docstring. Runs just after eod_signal_save
-        # so the day's final oi_snapshots tick is captured.
-        from services.gamma_exposure import capture_strike_iv_daily
-        from services.fno_universe import INDICES as _idx
-        for sym in _idx:
-            try:
-                n = capture_strike_iv_daily(sym)
-                print(f"[strike_iv_daily] {sym}: captured {n} strikes")
-            except Exception as e:
-                print(f"[strike_iv_daily] {sym} capture failed: {e}")
-
-    scheduler.add_job(
-        _run_strike_iv_capture_job,
-        "cron", hour=15, minute=37, timezone="Asia/Kolkata", id="strike_iv_capture",
         misfire_grace_time=600
     )
 
@@ -1072,7 +928,6 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbo
             "volPct":     r.get("vol_pct"),
             "ltp":        r.get("ltp"),
             "direction":  r.get("direction"),
-            "strikesAway": r.get("strikes_away"),
         } for r in rows]
         return {"alerts": alerts, "count": len(alerts)}
     except Exception as e:
@@ -1195,7 +1050,7 @@ def writer_buyer_score(symbol: str):
     #  writing calls against their FUT longs = writer behavior)
     # Buyers = Options OI spikes without FUT confirmation
     hist_res = supabase.from_("daily_oi_summary")\
-        .select("trade_date, fut_oi_chg_pct, oi_chg_pct, price_chg_pct, fut_price_chg_pct")\
+        .select("trade_date, fut_oi_chg_pct, oi_chg_pct, price_chg_pct")\
         .eq("symbol", sym)\
         .gte("trade_date", (check - _dt.timedelta(days=10)).isoformat())\
         .lte("trade_date", last_trading_day)\
@@ -1226,20 +1081,10 @@ def writer_buyer_score(symbol: str):
     else:                  fut_score = 0
 
     # ── 4. OI consistency (0-25) — TIGHTENED ─────────────────────────────
-    # Oct 15 2026: this classified fut_oi_chg_pct (FUTURES OI) together
-    # with cash price_chg_pct -- same basis mismatch already fixed for
-    # Stealth Buildup (api/daily_oi_summary.py, Oct 6 2026) and Volume
-    # Breakout (api/positional_intelligence.py, same day as this fix).
-    # Use fut_price_chg_pct instead; skip (don't fall back to cash) a day
-    # with no FUT open+close snapshot pair rather than mislabel its
-    # direction off the wrong basis.
     directions = []
     for r in hist_rows:
         fut_chg = float(r.get("fut_oi_chg_pct") or 0)
-        _raw_fut_price_chg = r.get("fut_price_chg_pct")
-        if _raw_fut_price_chg is None:
-            continue
-        price_chg = float(_raw_fut_price_chg)
+        price_chg = float(r.get("price_chg_pct") or 0)
         if abs(fut_chg) > 0.5:
             if fut_chg > 0 and price_chg >= 0.3:    directions.append("LONG")
             elif fut_chg > 0 and price_chg <= -0.3: directions.append("SHORT")
@@ -1504,37 +1349,19 @@ def watchdog_archive():
     ist = pytz.timezone('Asia/Kolkata')
     supabase = get_supabase()
     try:
-        # BUG FIX (Oct 4 2026): this used to order by created_at, which has
-        # NO index on oi_snapshots_archive (64M+ rows) -- Postgres's own
-        # statement timeout was killing this query every single time before
-        # it could even check staleness, so the self-heal never actually
-        # ran despite the endpoint returning {"status":"triggered"} (the
-        # outer try/except here swallows the error and the caller never
-        # sees it). `timestamp` has a DESC index already (same one
-        # archive_old_snapshots' own resume logic uses), so query that
-        # instead -- it's effectively instant.
-        #
-        # Threshold is widened accordingly: `timestamp` is the archived
-        # DATA's own time, not when the archive job ran, and archiving only
-        # ever covers data older than 7 days (archive_old_snapshots'
-        # cutoff_date) -- so under healthy weekly operation the newest
-        # archived `timestamp` is normally ~7-8 days old even right after a
-        # successful run. 15 days (7-day cutoff + the old 8-day run-missed
-        # tolerance) preserves the original intent: flag it only once the
-        # archive job has genuinely gone silent, not every normal week.
         recent = supabase.from_("oi_snapshots_archive") \
-            .select("timestamp") \
-            .order("timestamp", desc=True) \
+            .select("created_at") \
+            .order("created_at", desc=True) \
             .limit(1).execute()
-        last_archived_ts = None
+        last_run = None
         if recent.data:
-            last_archived_ts = datetime.fromisoformat(recent.data[0]["timestamp"].replace("Z", "+00:00"))
-        stale = (not last_archived_ts) or (datetime.now(pytz.utc) - last_archived_ts > timedelta(days=15))
+            last_run = datetime.fromisoformat(recent.data[0]["created_at"].replace("Z", "+00:00"))
+        stale = (not last_run) or (datetime.now(pytz.utc) - last_run > timedelta(days=8))
         if stale:
-            print("[ARCHIVE Watchdog] ⚠️ No archive progress in over 15 days — re-triggering...")
+            print("[ARCHIVE Watchdog] ⚠️ No archive activity in over 8 days — re-triggering...")
             archive_old_snapshots()
         else:
-            print(f"[ARCHIVE Watchdog] ✅ Newest archived data {last_archived_ts.isoformat()} — within expected window")
+            print(f"[ARCHIVE Watchdog] ✅ Last archive run {last_run.isoformat()} — within expected window")
     except Exception as e:
         print(f"[ARCHIVE Watchdog] Error: {e}")
 
@@ -1654,9 +1481,9 @@ def auto_refresh_token():
         print(f"❌ Railway auto-login failed: {e}")
 
 @app.get("/uoa")
-def uoa(date: str = None, strike_zone: str = "all"):
+def uoa(date: str = None):
     from api.uoa import get_uoa
-    return get_uoa(date, strike_zone)
+    return get_uoa(date)
 
 @app.get("/gamma-squeeze")
 def gamma_squeeze(date: str = None):
@@ -1674,157 +1501,10 @@ def gamma_by_strike(symbol: str, date: str = None):
     return get_gex_by_strike(symbol.upper(), date)
 
 
-@app.get("/gamma-history/{symbol}")
-def gamma_history(symbol: str, days: int = 20):
-    # Oct 16 2026: day-by-day gamma regime + wall migration for ANY F&O
-    # symbol (stocks included, not just the 5 indices gamma-wall-trend/
-    # session-replay are scoped to), computed on demand from oi_snapshots
-    # -- see get_gamma_history's docstring in gamma_exposure.py for why this
-    # isn't a new continuous-logging table. Powers Strategy Builder's
-    # gamma-history panel.
-    from services.gamma_exposure import get_gamma_history
-    days = max(5, min(days, 60))
-    return get_gamma_history(symbol.upper(), days)
-
-
-@app.get("/wolves")
-def wolves_today():
-    # Reads today's Wolves hits from wolves_signal_log -- written by the
-    # live tick (every 5 min, market hours) and the EOD cache refresh.
-    # Cheap Supabase read, no Kite calls, safe to poll on every page load.
-    from services.wolves_scanner import get_todays_wolves
-    return get_todays_wolves()
-
-
-@app.get("/wolves/fresh-events")
-def wolves_fresh_events():
-    # Standalone ADX Cross / RSI Cross / ADX Full Alignment / Grandfather-
-    # Father-Son events -- independent of the full Wolves confluence gate
-    # above. Same live tick writes both tables; this just reads the other
-    # one. Cheap Supabase read, no Kite calls.
-    from services.wolves_scanner import get_todays_fresh_events
-    return get_todays_fresh_events()
-
-
-@app.get("/wolves/watchlist")
-def wolves_watchlist():
-    # Decision Watchlist -- Rank (A+/A/B/C), Confidence, Decision Score,
-    # Sector Tailwind per symbol+direction, aggregated across all 4
-    # timeframes. Rebuilt fresh every live tick (a snapshot of current
-    # state, not a cumulative log). Cheap Supabase read, no Kite calls.
-    from services.wolves_scanner import get_todays_watchlist
-    return get_todays_watchlist()
-
-
-@app.post("/wolves/run-now")
-def wolves_run_now():
-    # Manual trigger for the fast live tick (hourly candles only, reads the
-    # cached Daily/Weekly/Monthly state) -- lets Manish fire a scan on
-    # demand to compare against his local Fyers scanner, without waiting
-    # for the next 5-minute cron tick. Requires wolves_tf_cache to already
-    # be populated (the EOD refresh job, or /wolves/refresh-cache below).
-    # Runs in a background thread and returns immediately -- even the fast
-    # hourly-only path takes 2-4 minutes across the full universe, well
-    # past what a browser fetch() will wait on before giving up with a
-    # "Failed to fetch" (confirmed live: the backend kept running fine,
-    # the browser just stopped listening). Poll GET /wolves for results.
-    import threading
-    def _run():
-        from services.wolves_scanner import run_live_tick
-        try:
-            res = run_live_tick()
-            print(f"[WOLVES] Manual live tick: {res}")
-        except Exception as e:
-            print(f"[WOLVES] Manual live tick failed: {e}")
-    threading.Thread(target=_run, daemon=True).start()
-    return {"status": "started", "note": "Running in the background -- poll GET /wolves in a couple of minutes for results."}
-
-
-@app.post("/wolves/refresh-cache")
-def wolves_refresh_cache():
-    # Manual trigger for the slower Daily/Weekly/Monthly cache refresh --
-    # only needed once a day normally (the 15:50 IST cron does this), but
-    # exposed so the cache can be seeded/rebuilt on demand (e.g. right
-    # after this feature first ships, before the first EOD cron has run).
-    # Same background-thread treatment as /wolves/run-now -- this one takes
-    # even longer (5-6 minutes, full daily history per symbol).
-    import threading
-    def _run():
-        from services.wolves_scanner import refresh_tf_cache
-        try:
-            res = refresh_tf_cache()
-            print(f"[WOLVES] Manual cache refresh: {res}")
-        except Exception as e:
-            print(f"[WOLVES] Manual cache refresh failed: {e}")
-    threading.Thread(target=_run, daemon=True).start()
-    return {"status": "started", "note": "Running in the background -- this takes 5-6 minutes for the full universe."}
-
-
-@app.get("/gamma-wall-trend/{symbol}")
-def gamma_wall_trend(symbol: str, date: str = None):
-    # Oct 9 2026: session history of Call Wall / Put Wall / Net GEX for an
-    # index, read back from gex_regime_log (already captured every 3-min
-    # refresh cycle -- see gamma_exposure.py's _compute_gamma_exposure).
-    # Powers the wall-velocity sparkline: tells apart "wall rebuilding at
-    # the same strike" (squeeze absorbed) from "wall genuinely retreating"
-    # (real squeeze) -- the question that prompted this.
-    from services.gamma_exposure import get_wall_trend
-    return get_wall_trend(symbol.upper(), date)
-
-
-@app.get("/session-replay/{symbol}")
-def session_replay(symbol: str, date: str = None):
-    # Oct 13 2026: full-day GEX/DEX/price replay + hourly alert bias counts
-    # for one index, powering the Session Replay page (post-mortem view of
-    # how a session unfolded -- see services/gamma_exposure.py for context).
-    from services.gamma_exposure import get_session_replay
-    return get_session_replay(symbol.upper(), date)
-
-
-@app.get("/vrp-scan/{symbol}")
-def vrp_scan(symbol: str = "NIFTY", expiry: str = None):
-    # Oct 2026: weekly short-strike VRP (Volatility Risk Premium) scanner --
-    # ranks index strikes by IV-minus-realized-vol plus a recent IV spike,
-    # for someone looking to sell weekly premium. See gamma_exposure.py's
-    # get_vrp_scan docstring for the methodology.
-    # Oct 8 2026: optional ?expiry= so later expiries can be scanned too,
-    # not just the nearest weekly -- falls back to nearest if omitted/invalid.
-    from services.gamma_exposure import get_vrp_scan
-    return get_vrp_scan(symbol.upper(), expiry)
-
-
-@app.get("/vol-surface/{symbol}")
-def vol_surface(symbol: str = "NIFTY", expiry: str = None):
-    # Oct 8 2026: IV-by-strike ("smile") for one expiry + ATM IV across
-    # every expiry ("term structure") -- context so a seller can see WHY
-    # the VRP scanner ranked a strike the way it did, rather than taking
-    # its VRP number on faith. See gamma_exposure.py's get_vol_surface
-    # docstring.
-    from services.gamma_exposure import get_vol_surface
-    return get_vol_surface(symbol.upper(), expiry)
-
-
-@app.get("/gap-iv-scan/{symbol}")
-def gap_iv_scan(symbol: str = "NIFTY"):
-    # Oct 8 2026: passive gap-down/gap-up + IV-spike detector, per Manish's
-    # request to explore trading IV spikes/crashes off a gap open. Context
-    # only (gap %, which strike's IV is unusually rich for ITSELF right
-    # now) -- no auto-trade, no push alert yet (alerting comes later once
-    # Manish is satisfied watching this passively). See gamma_exposure.py's
-    # get_gap_iv_scan docstring for exactly what counts as a "spike".
-    from services.gamma_exposure import get_gap_iv_scan
-    return get_gap_iv_scan(symbol.upper())
-
-
 @app.get("/option-chain/{symbol}")
 def option_chain(symbol: str = "NIFTY", expiry: str = None):
     from api.option_chain import get_option_chain
     return get_option_chain(symbol.upper(), expiry)
-
-@app.get("/option-chain-spikes/{symbol}")
-def option_chain_spikes(symbol: str = "NIFTY", expiry: str = None):
-    from api.option_chain import get_option_chain_spikes
-    return get_option_chain_spikes(symbol.upper(), expiry)
 
 @app.get("/historical-chain/dates/{symbol}")
 def historical_chain_dates(symbol: str):
@@ -1861,397 +1541,6 @@ def oi_pulse():
     from api.oi_pulse import get_oi_pulse
     return get_oi_pulse()
 
-@app.get("/vix-pulse")
-def vix_pulse():
-    from api.vix_pulse import get_vix_pulse
-    return get_vix_pulse()
-
-@app.get("/vix-history")
-def vix_history(range: str = "6m"):
-    from api.vix_pulse import get_vix_daily_history
-    return get_vix_daily_history(range)
-
-@app.get("/admin/backfill-vix-history")
-def admin_backfill_vix_history(daily_years: int = 5, intraday_days: int = 60):
-    from api.vix_backfill import backfill_vix_history
-    return backfill_vix_history(daily_years, intraday_days)
-
-@app.get("/admin/append-vix-daily-close")
-def admin_append_vix_daily_close(days_back: int = 20):
-    """Lightweight catch-up for vix_daily_history gaps (see vix_daily_close
-    scheduled job). days_back=20 is enough to cover the 2026-10-02..10-14
-    gap found on Oct 14 2026."""
-    from api.vix_backfill import append_vix_daily_close
-    return append_vix_daily_close(days_back)
-
-@app.get("/admin/run-strike-iv-capture")
-def admin_run_strike_iv_capture():
-    # Oct 8 2026: manual trigger for the 15:37 IST strike_iv_daily cron --
-    # lets a day's capture be seeded on demand instead of waiting for the
-    # next scheduled fire (e.g. the day this job was added, or catching up
-    # after a missed run).
-    from services.gamma_exposure import capture_strike_iv_daily
-    from services.fno_universe import INDICES as _idx
-    results = {}
-    for sym in _idx:
-        try:
-            results[sym] = capture_strike_iv_daily(sym)
-        except Exception as e:
-            results[sym] = f"error: {e}"
-    return {"captured": results}
-
-@app.get("/admin/job-status")
-def admin_job_status():
-    """Glance-able health check for background jobs that fail/skip silently
-    in Railway logs (bhavcopy delivery fetch today; add more jobs here by
-    calling _record_job_status from them). Flags a job as stale if its last
-    successful run is more than 2 trading-relevant days old."""
-    from utils.db import get_supabase
-    import pytz
-    from datetime import datetime, timedelta
-    supabase = get_supabase()
-    res = supabase.from_("job_status").select("*").execute()
-    now = datetime.now(pytz.utc)
-    out = []
-    for row in (res.data or []):
-        last_run = datetime.fromisoformat(row["last_run_at"].replace("Z", "+00:00"))
-        age_hours = round((now - last_run).total_seconds() / 3600, 1)
-        out.append({
-            **row,
-            "age_hours": age_hours,
-            "stale": row["status"] != "success" or age_hours > 48,
-        })
-    return {"jobs": out}
-
-@app.get("/admin/trial-status")
-def admin_trial_status(request: Request):
-    """Oct 9 2026: conversion-campaign list for trial_users (see /auth/kite-login
-    and services/access_gate.py for how a trial starts and expires). Groups
-    into active / expiring_today / expired_not_converted, each with enough
-    contact info (email, name) to paste into an email/Telegram campaign.
-    Protected the same way as the other /admin/ routes -- send the shared
-    admin key as header x-gate-key."""
-    import hmac
-    key = os.getenv("GATE_STATS_KEY", "")
-    sent = request.headers.get("x-gate-key", "")
-    if not key or not hmac.compare_digest(key, sent):
-        raise HTTPException(status_code=404, detail="Not Found")
-
-    from utils.db import get_supabase
-    from utils.market_calendar import today_ist
-    today = today_ist().isoformat()
-    supabase = get_supabase()
-    res = supabase.from_("trial_users").select(
-        "email,name,trial_start_date,trial_expires_date,login_count,converted"
-    ).order("trial_expires_date").execute()
-
-    # Oct 9 2026: a paid member (any plan -- annual/quarterly/monthly/founding,
-    # added to beta_users manually or by a future payment webhook) must drop
-    # off this list regardless of whatever trial_users.converted says, since
-    # nothing currently sets that flag. Checking live beta_users membership
-    # here -- rather than trusting a flag -- is what keeps a paying customer
-    # from confusingly showing up as "still needs chasing".
-    member_emails = {
-        (r.get("email") or "").strip().lower()
-        for r in (supabase.from_("beta_users").select("email").execute().data or [])
-    }
-
-    active, expiring_today, expired = [], [], []
-    for r in (res.data or []):
-        email = (r.get("email") or "").strip().lower()
-        if r.get("converted") or email in member_emails:
-            continue
-        exp = r.get("trial_expires_date")
-        if exp == today:
-            expiring_today.append(r)
-        elif exp and exp > today:
-            active.append(r)
-        else:
-            expired.append(r)
-
-    return {
-        "as_of": today,
-        "active": active,
-        "expiring_today": expiring_today,
-        "expired_not_converted": expired,
-        "counts": {"active": len(active), "expiring_today": len(expiring_today),
-                   "expired_not_converted": len(expired)},
-    }
-
-# Shared demo login (Oct 2026) - lets Manish hand a batch of ~50 preview
-# users one common credential (demo@greeknova.com + a fixed passcode)
-# instead of adding each person to beta_users individually. We never touch
-# the person's own email/OTP flow for this -- the frontend calls this
-# endpoint with just the passcode, we generate a magic-link token server
-# side for the shared demo@greeknova.com account via the Supabase admin
-# API (no email actually sent), and hand back the token_hash for the
-# frontend to redeem with supabase.auth.verifyOtp(). The passcode is a
-# shared-knowledge gate, not a security boundary -- this account should
-# only ever be read-only / non-sensitive.
-from pydantic import BaseModel as _BaseModel
-
-class DemoLoginRequest(_BaseModel):
-    code: str
-
-DEMO_LOGIN_EMAIL = "demo@greeknova.com"
-
-@app.post("/auth/demo-login")
-def auth_demo_login(body: DemoLoginRequest):
-    expected = os.getenv("DEMO_LOGIN_CODE", "123456")
-    if body.code.strip() != expected:
-        raise HTTPException(status_code=401, detail="Invalid code")
-
-    from utils.db import get_supabase_admin
-    try:
-        admin = get_supabase_admin()
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # Make sure the shared demo account is on the beta list (idempotent).
-    try:
-        admin.from_("beta_users").upsert({"email": DEMO_LOGIN_EMAIL, "name": "Demo User"}).execute()
-    except Exception as e:
-        print(f"[DemoLogin] beta_users upsert warning: {e}")
-
-    try:
-        link_res = admin.auth.admin.generate_link({
-            "type": "magiclink",
-            "email": DEMO_LOGIN_EMAIL,
-        })
-    except Exception as e:
-        print(f"[DemoLogin] generate_link failed: {e}")
-        raise HTTPException(status_code=500, detail="Could not create demo session")
-
-    props = getattr(link_res, "properties", None) or link_res.get("properties", {})
-    token_hash = getattr(props, "hashed_token", None) if not isinstance(props, dict) else props.get("hashed_token")
-    if not token_hash:
-        raise HTTPException(status_code=500, detail="Demo session link missing token")
-
-    return {"email": DEMO_LOGIN_EMAIL, "token_hash": token_hash}
-
-
-# ---------------------------------------------------------------------------
-# Zerodha "Continue with Zerodha" login (Oct 2026) -- a Sensibull/Streak-style
-# one-click login: ONE GreekNova-owned Kite Connect app (KITE_API_KEY /
-# KITE_API_SECRET, already set on Railway -- same app used by the personal
-# data-capture auto-login in services/kite_auth.py) handles every user's
-# authentication. The end user never sees or enters an API key/secret --
-# they just approve on Zerodha's own page, we exchange the request_token for
-# an access_token scoped to THEIR account using our app's secret (server-side
-# only, never sent to the browser), and sign them into the same Supabase
-# session every other page expects.
-#
-# Distinct from the separate app/connect-kite BYOT flow (services/kite_byot.py),
-# where each member registers and pays for their OWN Kite Connect app. That
-# flow still exists and is unaffected by this one. This is specifically the
-# flow being demoed to Zerodha (Nagaveni Jalihal / Z-Connect) ahead of their
-# decision on approving GreekNova for genuine multi-user Kite Connect access --
-# until that's approved, Zerodha may reject anyone logging in here who isn't
-# the app's own linked account (ZERODHA_USER_ID), which is expected during
-# review, not a bug.
-#
-# Registered Redirect URL for this app (set in the Kite developer console,
-# fixed, cannot be changed per-request): https://greeknova-frontend.vercel.app/auth/callback
-# -- confirmed live Oct 7 2026 (the legacy vercel.app domain, handled by
-# app/auth/callback/page.tsx in the frontend repo, not the app.greeknova.com
-# custom domain).
-class KiteLoginRequest(_BaseModel):
-    request_token: str
-
-@app.post("/auth/kite-login")
-def auth_kite_login(body: KiteLoginRequest):
-    import hashlib
-    import requests
-
-    api_key = os.getenv("KITE_API_KEY")
-    api_secret = os.getenv("KITE_API_SECRET")
-    if not api_key or not api_secret:
-        raise HTTPException(status_code=500, detail="Zerodha login is not configured (missing KITE_API_KEY/KITE_API_SECRET)")
-
-    request_token = body.request_token.strip()
-    if not request_token:
-        raise HTTPException(status_code=400, detail="Missing request_token")
-
-    # Kite's own checksum scheme: sha256(api_key + request_token + api_secret).
-    checksum = hashlib.sha256(f"{api_key}{request_token}{api_secret}".encode()).hexdigest()
-
-    try:
-        resp = requests.post(
-            "https://api.kite.trade/session/token",
-            data={"api_key": api_key, "request_token": request_token, "checksum": checksum},
-            headers={"X-Kite-Version": "3"},
-            timeout=10,
-        )
-    except Exception as e:
-        print(f"[KiteLogin] token exchange request failed: {e}")
-        raise HTTPException(status_code=502, detail="Could not reach Zerodha")
-
-    if resp.status_code != 200:
-        # Expected failure mode pre-approval: Zerodha rejects any account
-        # that isn't this app's own linked user until multi-user access is
-        # granted. Relay Zerodha's own message rather than a generic one so
-        # it's clear this is Zerodha's decision, not a GreekNova bug.
-        print(f"[KiteLogin] token exchange rejected: {resp.status_code} {resp.text[:300]}")
-        try:
-            zmsg = resp.json().get("message")
-        except Exception:
-            zmsg = None
-        raise HTTPException(status_code=401, detail=zmsg or "Zerodha login could not be verified")
-
-    kite_data = (resp.json() or {}).get("data") or {}
-    kite_email = kite_data.get("email")
-    kite_user_id = kite_data.get("user_id")
-    kite_user_name = kite_data.get("user_name")
-    access_token = kite_data.get("access_token")
-
-    if not kite_email or not kite_user_id:
-        raise HTTPException(status_code=502, detail="Zerodha did not return a usable profile")
-
-    from utils.db import get_supabase_admin
-    try:
-        admin = get_supabase_admin()
-    except RuntimeError as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-    # Oct 9 2026: who gets permanent access vs. a timed trial, on first-ever
-    # Zerodha login. Identity is proven by Zerodha itself here, so there's no
-    # separate "is this email allowed" gate to check first -- the question is
-    # only permanent-member vs. new-trial vs. existing-trial.
-    #   - Already in beta_users (paid/founding/manually-added) -> permanent,
-    #     untouched. This is the ONLY path with standing access.
-    #   - Not in beta_users, never seen before -> brand new trial: 5 trading
-    #     days starting today (today counts as day 1), so even a Friday
-    #     login gets a real trading week, not just one session.
-    #   - Not in beta_users, already in trial_users -> just update their
-    #     last-seen/login_count. Their expiry is set once at trial start and
-    #     never resets on a later login (so a trial can't be "renewed" by
-    #     simply logging out and back in).
-    try:
-        is_member = bool(
-            admin.from_("beta_users").select("email").eq("email", kite_email).execute().data
-        )
-    except Exception as e:
-        print(f"[KiteLogin] beta_users lookup warning: {e}")
-        is_member = False
-
-    if is_member:
-        try:
-            admin.from_("beta_users").upsert({"email": kite_email, "name": kite_user_name or kite_email}).execute()
-        except Exception as e:
-            print(f"[KiteLogin] beta_users upsert warning: {e}")
-    else:
-        try:
-            existing_trial = (
-                admin.from_("trial_users").select("email,login_count").eq("email", kite_email).execute().data
-            )
-        except Exception as e:
-            print(f"[KiteLogin] trial_users lookup warning: {e}")
-            existing_trial = None
-
-        if existing_trial:
-            try:
-                from datetime import datetime, timezone
-                prev_count = (existing_trial[0] or {}).get("login_count") or 1
-                admin.from_("trial_users").update({
-                    "last_login_at": datetime.now(timezone.utc).isoformat(),
-                    "login_count": int(prev_count) + 1,
-                }).eq("email", kite_email).execute()
-            except Exception as e:
-                print(f"[KiteLogin] trial_users touch warning: {e}")
-        else:
-            # Oct 14 2026: changed from a 5-TRADING-day trial to a strict
-            # 7-CALENDAR-day trial per Manish's call -- the clock runs on
-            # real days from first Zerodha login, weekends/holidays included,
-            # no extension for non-trading days. Trial users are Zerodha-
-            # authenticated like everyone else, so they're still bound by
-            # access_gate.py's daily-freshness check on top of this window.
-            from utils.market_calendar import today_ist
-            from datetime import timedelta
-            start = today_ist()
-            expires = start + timedelta(days=7)
-            try:
-                admin.from_("trial_users").insert({
-                    "email": kite_email,
-                    "name": kite_user_name or kite_email,
-                    "kite_user_id": kite_user_id,
-                    "trial_start_date": start.isoformat(),
-                    "trial_expires_date": expires.isoformat(),
-                }).execute()
-                print(f"[KiteLogin] new trial for {kite_email}: {start} -> {expires}")
-            except Exception as e:
-                print(f"[KiteLogin] trial_users insert warning: {e}")
-
-    # Best-effort: remember this access token against the user's email so
-    # their own positions/holdings/quotes can be pulled later via the same
-    # app credentials. Table may not exist in every environment yet --
-    # never block login on this.
-    try:
-        admin.from_("kite_identities").upsert({
-            "email": kite_email,
-            "kite_user_id": kite_user_id,
-            "kite_user_name": kite_user_name,
-            "access_token": access_token,
-            "last_login_at": "now()",
-        }, on_conflict="email").execute()
-    except Exception as e:
-        print(f"[KiteLogin] kite_identities upsert skipped: {e}")
-
-    # Oct 14 2026: Zerodha was explicit that without a Zerodha login a user
-    # shouldn't see data at all, including someone who logged in earlier and
-    # has since logged out of Zerodha. GreekNova's own sign-in (Supabase)
-    # stays valid far longer than that, so access_gate.py enforces a separate
-    # rule on top of plain membership: anyone who has ever logged in via
-    # Zerodha must have done so again TODAY (Asia/Kolkata), checked against
-    # this table. Must not block login if it fails -- worst case someone's
-    # daily check is a day stale, not that no one can log in.
-    try:
-        from utils.market_calendar import today_ist
-        login_date = today_ist().isoformat()
-        admin.from_("kite_login_log").upsert({
-            "email": kite_email,
-            "kite_user_id": kite_user_id,
-            "last_login_date": login_date,
-            "last_login_at": "now()",
-        }, on_conflict="email").execute()
-        # Oct 16 2026: "going in loop from this screen" -- the gate's
-        # kite_login_log cache only refreshes every 60s (_MEMBER_TTL), so
-        # the very first gated request right after this login could still
-        # see yesterday's cached date and bounce the person straight back
-        # to /login?error=kite_session_stale. Update the gate's in-memory
-        # cache immediately so a request one second after login already
-        # sees today's date, not whatever was cached up to a minute ago.
-        try:
-            from services.access_gate import note_kite_login
-            note_kite_login(kite_email, login_date)
-        except Exception as e:
-            print(f"[KiteLogin] gate cache update failed: {e}")
-    except Exception as e:
-        print(f"[KiteLogin] kite_login_log upsert failed: {e}")
-
-    try:
-        link_res = admin.auth.admin.generate_link({"type": "magiclink", "email": kite_email})
-    except Exception as e:
-        print(f"[KiteLogin] generate_link failed: {e}")
-        raise HTTPException(status_code=500, detail="Could not create session")
-
-    props = getattr(link_res, "properties", None) or link_res.get("properties", {})
-    token_hash = getattr(props, "hashed_token", None) if not isinstance(props, dict) else props.get("hashed_token")
-    if not token_hash:
-        raise HTTPException(status_code=500, detail="Kite login session link missing token")
-
-    return {"email": kite_email, "token_hash": token_hash}
-
-
-@app.get("/chart-data/{symbol}")
-def chart_data(symbol: str, interval: str = "day", range: str = "6m"):
-    from api.chart_data import get_chart_data
-    return get_chart_data(symbol.upper(), interval, range)
-
-@app.get("/cpr-levels/{symbol}")
-def cpr_levels(symbol: str):
-    from api.cpr import get_cpr_levels_for_symbol
-    return get_cpr_levels_for_symbol(symbol.upper())
-
 @app.get("/index-data")
 def index_data():
     import time
@@ -2272,54 +1561,26 @@ def index_data():
         # though the underlying oi_snapshots rows were there all along. One
         # retry clears it in practice since the reset doesn't repeat back
         # to back.
-        # BUG FIX (Oct 12 2026): picking the single latest NIFTY FUT
-        # timestamp and trusting it to be a complete snapshot for every
-        # index broke in practice -- some capture cycles write TWO distinct
-        # NIFTY FUT timestamps a few hundred ms to a couple seconds apart
-        # (one complete batch with all 5 indices, one partial batch missing
-        # SENSEX, most likely from SENSEX's separate BFO instrument/quote
-        # fetch occasionally lagging or failing independently of NFO's).
-        # When the partial, SENSEX-less write happens to land LATER than
-        # the complete one, this picked it as "latest" and the exact-
-        # timestamp join below returned zero SENSEX rows -- silently
-        # dropping SENSEX's card from the Market Pulse homepage for up to
-        # one 5-min cycle, reported live by Manish on a Monday open.
-        # Fix: scan back through the last few distinct NIFTY FUT
-        # timestamps (newest first) and use the first one that SENSEX also
-        # has a FUT row at, instead of blindly trusting the newest.
-        def _fetch_recent_nifty_fut_timestamps():
-            return supabase.from_("oi_snapshots")\
+        try:
+            ts_res = supabase.from_("oi_snapshots")\
                 .select("timestamp")\
                 .eq("symbol", "NIFTY")\
                 .eq("option_type", "FUT")\
                 .order("timestamp", desc=True)\
-                .limit(10)\
+                .limit(1)\
                 .execute()
-        try:
-            ts_res = _fetch_recent_nifty_fut_timestamps()
         except Exception as e:
             print(f"[INDEX-DATA] timestamp query failed, retrying once: {e}")
-            ts_res = _fetch_recent_nifty_fut_timestamps()
+            ts_res = supabase.from_("oi_snapshots")\
+                .select("timestamp")\
+                .eq("symbol", "NIFTY")\
+                .eq("option_type", "FUT")\
+                .order("timestamp", desc=True)\
+                .limit(1)\
+                .execute()
         if not ts_res.data:
             return {"timestamp": None, "rows": [], "cmps": []}
-        candidate_timestamps = [r["timestamp"] for r in ts_res.data]
-        ts = candidate_timestamps[0]
-        try:
-            sensex_ts_res = supabase.from_("oi_snapshots")\
-                .select("timestamp")\
-                .eq("symbol", "SENSEX")\
-                .eq("option_type", "FUT")\
-                .in_("timestamp", candidate_timestamps)\
-                .execute()
-            sensex_timestamps = {r["timestamp"] for r in (sensex_ts_res.data or [])}
-            for cand in candidate_timestamps:
-                if cand in sensex_timestamps:
-                    ts = cand
-                    break
-            else:
-                print(f"[INDEX-DATA] none of the last {len(candidate_timestamps)} NIFTY FUT timestamps have a matching SENSEX row -- falling back to the latest NIFTY-only one")
-        except Exception as e:
-            print(f"[INDEX-DATA] SENSEX-completeness check failed, using latest NIFTY FUT timestamp: {e}")
+        ts = ts_res.data[0]["timestamp"]
 
         # Fetch index OI data + CMP in parallel
         from concurrent.futures import ThreadPoolExecutor
@@ -2332,7 +1593,7 @@ def index_data():
                 return supabase.from_("oi_snapshots")\
                     .select("symbol,strike,option_type,oi,volume,last_price,expiry")\
                     .eq("timestamp", ts)\
-                    .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY","MIDCPNIFTY","SENSEX"])\
+                    .in_("symbol", ["NIFTY","BANKNIFTY","FINNIFTY"])\
                     .range(rng[0], rng[1])\
                     .execute()
             try:
@@ -2369,9 +1630,9 @@ def index_data():
         return {"timestamp": None, "rows": [], "cmps": []}
 
 @app.get("/options-jungle")
-def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None, strike_zone: str = "all"):
+def options_jungle(oi_threshold: float = 10.0, vol_threshold: float = 50.0, date: str = None):
     from api.options_jungle import get_options_jungle
-    return get_options_jungle(oi_threshold, vol_threshold, date, strike_zone)
+    return get_options_jungle(oi_threshold, vol_threshold, date)
 
 @app.get("/relative-strength")
 def relative_strength(benchmark: str = "NIFTY"):
@@ -2882,32 +2143,9 @@ def stock_signal_history(symbol: str, days: int = 20):
         return {"symbol": symbol.upper(), "history": [], "total": 0, "error": str(e)}
 
 @app.get("/oi-profile/{symbol}")
-def oi_profile(symbol: str, date: str = None, expiry: str = None, strike_zone: str = "all", at_time: str = None):
+def oi_profile(symbol: str, date: str = None, expiry: str = None):
     from api.oi_profile import get_oi_profile
-    return get_oi_profile(symbol=symbol, date=date, expiry=expiry, strike_zone=strike_zone, at_time=at_time)
-
-# Open Interest Timeline slider (Task #38, Oct 12 2026) -- lightweight list
-# of today's capture timestamps, used to populate the slider; the actual
-# per-timestamp OI profile comes from /oi-profile's at_time param above.
-@app.get("/oi-timeline-times/{symbol}")
-def oi_timeline_times(symbol: str, date: str = None):
-    from api.oi_profile import get_oi_timeline_times
-    return get_oi_timeline_times(symbol=symbol, date=date)
-
-@app.post("/custom-scanner")
-async def custom_scanner(request: Request):
-    from services.custom_scanner import run_custom_scan
-    body = await request.json()
-    conditions = body.get("conditions")
-    date = body.get("date")
-    if not conditions or not isinstance(conditions, list):
-        return {"error": "conditions (a non-empty list) is required", "matches": [], "total": 0}
-    return run_custom_scan(conditions, date)
-
-@app.get("/straddle-chart/{symbol}")
-def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):
-    from api.straddle_chart import get_straddle_chart
-    return get_straddle_chart(symbol=symbol, strike=strike, expiry=expiry, date=date)
+    return get_oi_profile(symbol=symbol, date=date, expiry=expiry)
 
 @app.get("/vacuum-scanner")
 def vacuum_scanner(max_distance_pct: float = 10.0):
@@ -3051,7 +2289,7 @@ def stealth_buildup():
             seen.add(r["symbol"])
 
     # ── Fetch ATM±5 strikes CE/PE OI for last trading day ────────────────
-    STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50, "MIDCPNIFTY": 25, "SENSEX": 100}
+    STRIKE_INTERVALS = {"NIFTY": 50, "BANKNIFTY": 100, "FINNIFTY": 50}
 
     oi_res = supabase.from_("oi_snapshots")\
         .select("symbol, strike, option_type, oi, expiry, timestamp")\
@@ -3742,6 +2980,30 @@ def adx_map():
     from api.iv_analysis import SYMBOLS
     return {"data": get_combined_adx_map(get_supabase(), symbols=SYMBOLS)}
 
+# Oct 16 2026: manual payment-logging stopgap (see services/admin_members.py
+# docstring) -- no Razorpay webhook exists yet, so this is how a payment Manish
+# sees in his Razorpay dashboard gets turned into a plan + expiry record
+# instead of a bare email with no tracking. Auth is a real identity check
+# (the signed-in Supabase account must be Manish's own), independent of
+# GATE_MODE/ADMIN_GATE, because this endpoint grants paid access.
+@app.post("/admin/log-payment")
+async def admin_log_payment(request: Request):
+    from services.admin_members import verify_admin, log_payment
+    if not verify_admin(request.headers.get("authorization", "")):
+        return JSONResponse({"error": "Not authorized"}, status_code=403)
+    body = await request.json()
+    result = log_payment(get_supabase(), body.get("email"), body.get("name"), body.get("plan"))
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    return result
+
+@app.get("/admin/members-overview")
+def admin_members_overview(request: Request):
+    from services.admin_members import verify_admin, members_overview
+    if not verify_admin(request.headers.get("authorization", "")):
+        return JSONResponse({"error": "Not authorized"}, status_code=403)
+    return members_overview(get_supabase())
+
 @app.post("/waitlist-join")
 async def waitlist_join(request: Request):
     body = await request.json()
@@ -3772,10 +3034,9 @@ async def push_preferences_post(request: Request):
     enabled_signals = body.get("enabled_signals", [])
     spike_threshold = body.get("spike_threshold")
     vol_threshold = body.get("vol_threshold")
-    strike_zone = body.get("strike_zone")
     if not endpoint:
         return {"error": "endpoint required"}
-    return save_preferences(get_supabase(), endpoint, enabled_signals, spike_threshold, vol_threshold, strike_zone)
+    return save_preferences(get_supabase(), endpoint, enabled_signals, spike_threshold, vol_threshold)
 
 @app.get("/premarket-brief")
 def premarket_brief():
@@ -3797,23 +3058,10 @@ async def push_subscribe(request: Request):
     body = await request.json()
     subscription = body.get("subscription")
     threshold = body.get("spikeThreshold", 10)
-    # Oct 7 2026: volThreshold/enabledSignals are optional -- a brand new
-    # subscription (first-ever enable) won't have them yet, which is fine,
-    # the column defaults (20 / null-means-all) cover that case. But this
-    # endpoint also fires on every RE-subscribe (disable->enable cycle,
-    # or the browser invalidating a dead subscription and recreating it),
-    # which gets a new push endpoint and therefore a new DB row -- without
-    # passing these along too, that new row silently reset vol_threshold
-    # and enabled_signals back to defaults, discarding whatever the person
-    # had customized, even though spike_threshold (passed every time)
-    # correctly carried over. See AlertsContext.enableAlerts().
-    vol_threshold = body.get("volThreshold")
-    enabled_signals = body.get("enabledSignals")
-    strike_zone = body.get("strikeZone")
     if not subscription:
         return {"error": "Missing subscription"}
     supabase = get_supabase()
-    return save_subscription(supabase, subscription, threshold, vol_threshold, enabled_signals, strike_zone)
+    return save_subscription(supabase, subscription, threshold)
 
 @app.post("/push-unsubscribe")
 async def push_unsubscribe(request: Request):
