@@ -82,8 +82,14 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
     # this query filtered by `expiry` up front, so once the frontend echoed back
     # a specific expiry on its second call, the response's own `expiries` list
     # collapsed to just that one, making the expiry tabs disappear after refresh.
+    # Oct 16 2026 (Zerodha Publisher basket-order button): added tradingsymbol
+    # to the select -- it's already captured and stored on every oi_snapshots
+    # row (main.py's full_capture job), just never surfaced here before. This
+    # is the exact Kite tradingsymbol (handles weekly/monthly expiry encoding
+    # correctly), so the frontend can hand it straight to Kite's basket-order
+    # endpoint instead of trying to reconstruct it client-side.
     all_rows = supabase.from_("oi_snapshots")\
-        .select("strike, option_type, oi, volume, last_price, expiry")\
+        .select("strike, option_type, oi, volume, last_price, expiry, tradingsymbol")\
         .eq("symbol", symbol)\
         .eq("timestamp", latest_ts)\
         .order("strike", desc=False).execute().data
@@ -154,6 +160,7 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
                 "iv":     ce_iv,
                 "oi":     ce.get("oi", 0),
                 "volume": ce.get("volume", 0),
+                "tradingsymbol": ce.get("tradingsymbol"),
                 **calculate_greeks(F, strike, T, r_f, ce_sig, True),
             },
             "pe": {
@@ -161,6 +168,7 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
                 "iv":     pe_iv,
                 "oi":     pe.get("oi", 0),
                 "volume": pe.get("volume", 0),
+                "tradingsymbol": pe.get("tradingsymbol"),
                 **calculate_greeks(F, strike, T, r_f, pe_sig, False),
             },
         })
