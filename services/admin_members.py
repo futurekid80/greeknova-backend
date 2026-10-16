@@ -27,7 +27,7 @@ PLANS = {
 
 
 def _admin_email() -> str:
-    return os.getenv("ADMIN_EMAIL", "hardhittrader@gmail.com").strip().lower()
+    return os.getenv("ADMIN_EMAIL", "megha.jethmalani@gmail.com").strip().lower()
 
 
 def verify_admin(authorization_header: str) -> bool:
