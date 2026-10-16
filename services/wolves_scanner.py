@@ -87,41 +87,111 @@ WOLF_TIER = {
 TF_ORDER = ["Hourly", "Daily", "Weekly", "Monthly"]
 IMPORTANT_TFS = ["Daily", "Weekly", "Monthly"]
 
-# Ported verbatim from builtin_sector_map() in Manish's source file -- his
-# "trading-dashboard sector map for the current 100-stock universe". Any
-# GreekNova symbol not in here falls back to "Unclassified", same as his.
+# Replaces the first-pass sector map (ported from the old builtin_sector_map
+# in his uploaded source file). Manish sent a live CSV export of his local
+# tool's Fresh Events on Oct 16 -- its Sector column uses NSE's standard
+# sectoral/industry taxonomy (e.g. "Financial Services" as one umbrella for
+# banks/NBFCs/insurance, "Fast Moving Consumer Goods" spelled out, "Realty"
+# not "Real Estate", "Oil Gas & Consumable Fuels", "Automobile and Auto
+# Components"), which is NOT the same taxonomy as the old ad-hoc dict --
+# e.g. his CSV has FEDERALBNK/SBIN/INDUSINDBK under "Financial Services",
+# not a separate "Banks" bucket, and ADANIENT under "Metals & Mining", not
+# "Infrastructure". ~70 symbols below are ground-truthed directly against
+# that CSV; the rest of the F&O universe (_FALLBACK_SYMBOLS in
+# api/iv_analysis.py) is classified the same way from general knowledge of
+# NSE's sectoral classification, so treat those as best-effort, not
+# confirmed. Any symbol still missing falls back to "Unclassified", same as
+# his tool (his own CSV left a few gaps too -- NBCC, KAYNES, ICICIPRULI,
+# UNOMINDA all showed "Unclassified" in his export despite being
+# classifiable, so a handful of mismatches on those specific names is
+# expected and not a bug in this port).
 SECTOR_MAP = {
-    "RELIANCE": "Oil, Gas & Energy",
-    "HDFCBANK": "Banks", "ICICIBANK": "Banks", "SBIN": "Banks", "AXISBANK": "Banks",
-    "KOTAKBANK": "Banks", "BANKBARODA": "Banks", "PNB": "Banks", "CANBK": "Banks",
-    "INDUSINDBK": "Banks", "FEDERALBNK": "Banks", "IDFCFIRSTB": "Banks", "AUBANK": "Banks", "BANDHANBNK": "Banks",
-    "TCS": "Information Technology", "INFY": "Information Technology", "HCLTECH": "Information Technology",
-    "WIPRO": "Information Technology", "TECHM": "Information Technology", "LTM": "Information Technology",
-    "COFORGE": "Information Technology", "PERSISTENT": "Information Technology", "MPHASIS": "Information Technology", "LTTS": "Information Technology",
-    "TATASTEEL": "Metals & Mining", "JSWSTEEL": "Metals & Mining", "HINDALCO": "Metals & Mining", "VEDL": "Metals & Mining",
-    "SAIL": "Metals & Mining", "JINDALSTEL": "Metals & Mining", "NMDC": "Metals & Mining", "NATIONALUM": "Metals & Mining",
-    "COALINDIA": "Metals & Mining",
-    "ADANIENT": "Infrastructure", "ADANIPORTS": "Infrastructure", "LT": "Infrastructure",
-    "BHEL": "Capital Goods", "BEL": "Capital Goods", "HAL": "Capital Goods", "ABB": "Capital Goods", "SIEMENS": "Capital Goods", "CUMMINSIND": "Capital Goods",
-    "POWERGRID": "Power & Utilities", "NTPC": "Power & Utilities", "TATAPOWER": "Power & Utilities", "JSWENERGY": "Power & Utilities", "NHPC": "Power & Utilities",
-    "ONGC": "Oil, Gas & Energy", "BPCL": "Oil, Gas & Energy", "IOC": "Oil, Gas & Energy", "GAIL": "Oil, Gas & Energy",
-    "OIL": "Oil, Gas & Energy", "PETRONET": "Oil, Gas & Energy", "IGL": "Oil, Gas & Energy",
-    "MARUTI": "Automobiles", "M&M": "Automobiles", "BAJAJ-AUTO": "Automobiles", "EICHERMOT": "Automobiles",
-    "HEROMOTOCO": "Automobiles", "TVSMOTOR": "Automobiles", "ASHOKLEY": "Automobiles",
-    "BHARATFORG": "Auto Ancillaries", "BOSCHLTD": "Auto Ancillaries", "MOTHERSON": "Auto Ancillaries",
-    "TITAN": "Retail & Consumer Discretionary", "TRENT": "Retail & Consumer Discretionary", "DMART": "Retail & Consumer Discretionary",
-    "VBL": "Retail & Consumer Discretionary", "JUBLFOOD": "Retail & Consumer Discretionary", "INDHOTEL": "Retail & Consumer Discretionary",
-    "ITC": "FMCG & Consumption", "HINDUNILVR": "FMCG & Consumption", "NESTLEIND": "FMCG & Consumption",
-    "BRITANNIA": "FMCG & Consumption", "DABUR": "FMCG & Consumption", "MARICO": "FMCG & Consumption", "COLPAL": "FMCG & Consumption",
-    "ASIANPAINT": "Paints & Chemicals", "PIDILITIND": "Paints & Chemicals",
-    "SUNPHARMA": "Pharmaceuticals & Healthcare", "CIPLA": "Pharmaceuticals & Healthcare", "DRREDDY": "Pharmaceuticals & Healthcare",
-    "DIVISLAB": "Pharmaceuticals & Healthcare", "LUPIN": "Pharmaceuticals & Healthcare", "AUROPHARMA": "Pharmaceuticals & Healthcare",
-    "BIOCON": "Pharmaceuticals & Healthcare", "TORNTPHARM": "Pharmaceuticals & Healthcare", "ZYDUSLIFE": "Pharmaceuticals & Healthcare",
-    "APOLLOHOSP": "Pharmaceuticals & Healthcare", "MAXHEALTH": "Pharmaceuticals & Healthcare",
-    "BAJFINANCE": "Financial Services", "BAJAJFINSV": "Financial Services", "CHOLAFIN": "Financial Services",
-    "MUTHOOTFIN": "Financial Services", "PFC": "Financial Services", "RECLTD": "Financial Services",
-    "SBILIFE": "Insurance", "HDFCLIFE": "Insurance", "ICICIGI": "Insurance",
-    "LODHA": "Real Estate",
+    "360ONE": "Financial Services", "ABB": "Capital Goods", "ABCAPITAL": "Financial Services",
+    "ADANIENSOL": "Power & Utilities", "ADANIENT": "Metals & Mining", "ADANIGREEN": "Power & Utilities",
+    "ADANIPORTS": "Services", "ADANIPOWER": "Power & Utilities", "ALKEM": "Pharmaceuticals & Healthcare",
+    "AMBER": "Consumer Durables", "AMBUJACEM": "Construction Materials", "ANANDRATHI": "Financial Services",
+    "ANGELONE": "Financial Services", "APLAPOLLO": "Capital Goods", "APOLLOHOSP": "Pharmaceuticals & Healthcare",
+    "ASHOKLEY": "Automobile and Auto Components", "ASIANPAINT": "Consumer Durables", "ASTRAL": "Capital Goods",
+    "ATHERENERG": "Automobile and Auto Components", "AUBANK": "Financial Services", "AUROPHARMA": "Pharmaceuticals & Healthcare",
+    "AXISBANK": "Financial Services", "BAJAJ-AUTO": "Automobile and Auto Components", "BAJAJFINSV": "Financial Services",
+    "BAJAJHLDNG": "Financial Services", "BAJFINANCE": "Financial Services", "BANDHANBNK": "Financial Services",
+    "BANKBARODA": "Financial Services", "BANKINDIA": "Financial Services", "BDL": "Capital Goods",
+    "BEL": "Capital Goods", "BHARATFORG": "Automobile and Auto Components", "BHARTIARTL": "Telecommunication",
+    "BHEL": "Capital Goods", "BIOCON": "Pharmaceuticals & Healthcare", "BLUESTARCO": "Consumer Durables",
+    "BOSCHLTD": "Automobile and Auto Components", "BPCL": "Oil Gas & Consumable Fuels", "BRITANNIA": "Fast Moving Consumer Goods",
+    "BSE": "Financial Services", "CAMS": "Financial Services", "CANBK": "Financial Services",
+    "CDSL": "Financial Services", "CGPOWER": "Capital Goods", "CHOLAFIN": "Financial Services",
+    "CIPLA": "Pharmaceuticals & Healthcare", "COALINDIA": "Metals & Mining", "COCHINSHIP": "Capital Goods",
+    "COFORGE": "Information Technology", "COLPAL": "Fast Moving Consumer Goods", "CONCOR": "Services",
+    "CROMPTON": "Consumer Durables", "CUMMINSIND": "Capital Goods", "DABUR": "Fast Moving Consumer Goods",
+    "DELHIVERY": "Services", "DIVISLAB": "Pharmaceuticals & Healthcare", "DIXON": "Consumer Durables",
+    "DLF": "Realty", "DMART": "Consumer Services", "DRREDDY": "Pharmaceuticals & Healthcare",
+    "EICHERMOT": "Automobile and Auto Components", "ETERNAL": "Consumer Services", "FEDERALBNK": "Financial Services",
+    "FORCEMOT": "Automobile and Auto Components", "FORTIS": "Pharmaceuticals & Healthcare", "GAIL": "Oil Gas & Consumable Fuels",
+    "GLENMARK": "Pharmaceuticals & Healthcare", "GMRAIRPORT": "Services", "GODFRYPHLP": "Fast Moving Consumer Goods",
+    "GODREJCP": "Fast Moving Consumer Goods", "GODREJPROP": "Realty", "GRASIM": "Diversified",
+    "GVT&D": "Capital Goods", "HAL": "Capital Goods", "HAVELLS": "Consumer Durables",
+    "HCLTECH": "Information Technology", "HDFCAMC": "Financial Services", "HDFCBANK": "Financial Services",
+    "HDFCLIFE": "Financial Services", "HEROMOTOCO": "Automobile and Auto Components", "HINDALCO": "Metals & Mining",
+    "HINDPETRO": "Oil Gas & Consumable Fuels", "HINDUNILVR": "Fast Moving Consumer Goods", "HINDZINC": "Metals & Mining",
+    "HYUNDAI": "Automobile and Auto Components", "ICICIBANK": "Financial Services", "ICICIGI": "Financial Services",
+    "ICICIPRULI": "Financial Services", "IDEA": "Telecommunication", "IDFCFIRSTB": "Financial Services",
+    "IEX": "Financial Services", "INDHOTEL": "Consumer Services", "INDIANB": "Financial Services",
+    "INDIGO": "Services", "INDUSINDBK": "Financial Services", "INDUSTOWER": "Telecommunication",
+    "INFY": "Information Technology", "INOXWIND": "Capital Goods", "IOC": "Oil Gas & Consumable Fuels",
+    "IREDA": "Financial Services", "IRFC": "Financial Services", "ITC": "Fast Moving Consumer Goods",
+    "JINDALSTEL": "Metals & Mining", "JIOFIN": "Financial Services", "JSWENERGY": "Power & Utilities",
+    "JSWSTEEL": "Metals & Mining", "JUBLFOOD": "Consumer Services", "KALYANKJIL": "Consumer Services",
+    "KEI": "Capital Goods", "KFINTECH": "Financial Services", "KOTAKBANK": "Financial Services",
+    "KPITTECH": "Information Technology", "LAURUSLABS": "Pharmaceuticals & Healthcare", "LICHSGFIN": "Financial Services",
+    "LICI": "Financial Services", "LODHA": "Realty", "LT": "Construction",
+    "LTF": "Financial Services", "LTM": "Information Technology", "LUPIN": "Pharmaceuticals & Healthcare",
+    "M&M": "Automobile and Auto Components", "MAHABANK": "Financial Services", "MANAPPURAM": "Financial Services",
+    "MANKIND": "Pharmaceuticals & Healthcare", "MARICO": "Fast Moving Consumer Goods", "MARUTI": "Automobile and Auto Components",
+    "MAXHEALTH": "Pharmaceuticals & Healthcare", "MAZDOCK": "Capital Goods", "MCX": "Financial Services",
+    "MFSL": "Financial Services", "MOTHERSON": "Automobile and Auto Components", "MOTILALOFS": "Financial Services",
+    "MPHASIS": "Information Technology", "MUTHOOTFIN": "Financial Services", "NAM-INDIA": "Financial Services",
+    "NATIONALUM": "Metals & Mining", "NAUKRI": "Consumer Services", "NESTLEIND": "Fast Moving Consumer Goods",
+    "NHPC": "Power & Utilities", "NMDC": "Metals & Mining", "NTPC": "Power & Utilities",
+    "NYKAA": "Consumer Services", "OBEROIRLTY": "Realty", "OFSS": "Information Technology",
+    "OIL": "Oil Gas & Consumable Fuels", "ONGC": "Oil Gas & Consumable Fuels", "PAGEIND": "Textiles",
+    "PATANJALI": "Fast Moving Consumer Goods", "PAYTM": "Financial Services", "PERSISTENT": "Information Technology",
+    "PETRONET": "Oil Gas & Consumable Fuels", "PFC": "Financial Services", "PGEL": "Consumer Durables",
+    "PHOENIXLTD": "Realty", "PIDILITIND": "Chemicals", "PIIND": "Chemicals",
+    "PNB": "Financial Services", "PNBHOUSING": "Financial Services", "POLICYBZR": "Financial Services",
+    "POLYCAB": "Capital Goods", "POWERGRID": "Power & Utilities", "POWERINDIA": "Capital Goods",
+    "PREMIERENE": "Power & Utilities", "PRESTIGE": "Realty", "RADICO": "Fast Moving Consumer Goods",
+    "RBLBANK": "Financial Services", "RECLTD": "Financial Services", "RELIANCE": "Oil Gas & Consumable Fuels",
+    "RVNL": "Construction", "SAGILITY": "Services", "SAIL": "Metals & Mining",
+    "SBICARD": "Financial Services", "SBILIFE": "Financial Services", "SBIN": "Financial Services",
+    "SHREECEM": "Construction Materials", "SHRIRAMFIN": "Financial Services", "SIEMENS": "Capital Goods",
+    "SOLARINDS": "Chemicals", "SONACOMS": "Automobile and Auto Components", "SRF": "Chemicals",
+    "SUNPHARMA": "Pharmaceuticals & Healthcare", "SUPREMEIND": "Capital Goods", "SUZLON": "Capital Goods",
+    "SWIGGY": "Consumer Services", "TATACONSUM": "Fast Moving Consumer Goods", "TATAELXSI": "Information Technology",
+    "TATAPOWER": "Power & Utilities", "TATASTEEL": "Metals & Mining", "TCS": "Information Technology",
+    "TECHM": "Information Technology", "TIINDIA": "Automobile and Auto Components", "TITAN": "Consumer Durables",
+    "TMPV": "Automobile and Auto Components", "TORNTPHARM": "Pharmaceuticals & Healthcare", "TRENT": "Consumer Services",
+    "TVSMOTOR": "Automobile and Auto Components", "UJJIVANSFB": "Financial Services", "ULTRACEMCO": "Construction Materials",
+    "UNIONBANK": "Financial Services", "UNITDSPR": "Fast Moving Consumer Goods", "UNOMINDA": "Automobile and Auto Components",
+    "UPL": "Chemicals", "VBL": "Fast Moving Consumer Goods", "VEDL": "Metals & Mining",
+    "VOLTAS": "Consumer Durables", "WAAREEENER": "Capital Goods", "WIPRO": "Information Technology",
+    "YESBANK": "Financial Services", "ZYDUSLIFE": "Pharmaceuticals & Healthcare",
+    "IGL": "Oil Gas & Consumable Fuels",
+}
+
+# Ported from the Mode/Priority columns visible in his Fresh Events CSV
+# export. Mode buckets by timeframe (how far out the signal looks); Priority
+# is his tool's own ranking -- confirmed from the CSV: ADX Cross and BB
+# Compression events share priority 1 with Wolves, RSI sits at 3, and a
+# plain (non-compression) BB band touch is the lowest-priority 4. This
+# matches what Manish said he actually prioritizes (ADX breakout first).
+MODE_BY_TF = {"Hourly": "Intraday Event", "Daily": "Swing Event", "Weekly": "Swing Event", "Monthly": "Context Event", "All": "Swing Event"}
+PRIORITY_MAP = {
+    "ADX Cross 25": 1, "ADX Full Alignment": 1,
+    "BB Compression Breakout": 1, "BB Compression Breakdown": 1,
+    "Grandfather-Father-Son Setup": 2, "Grandfather-Father-Son Exit": 2,
+    "RSI 60 Breakout": 3, "RSI 40 Breakdown": 3,
+    "BB Upper Breakout": 4, "BB Lower Breakdown": 4,
 }
 
 
@@ -636,6 +706,8 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
                 "first_seen": first_seen, "last_seen": scan_time, "times_seen": times_seen,
                 "signal_freshness": freshness, "decision_score": score,
                 "bb_quality": bb_quality, "sector": sector,
+                "mode": MODE_BY_TF.get(tf_name, "Swing Event"),
+                "priority": PRIORITY_MAP.get(event_type, 9),
             })
 
         # Standalone ADX Cross + RSI Cross + BB events, independent of the
@@ -646,20 +718,20 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
             if d["adx_cross_bear"]:
                 _event("Bearish", "ADX Cross 25", tf_name, f"{tf_name} ADX freshly crossed above 25 with bearish DI.", adx_val=d["adx"])
             if d["rsi_cross_bull"]:
-                _event("Bullish", "RSI Cross 60", tf_name, f"{tf_name} RSI freshly crossed above 60.", rsi_val=d["rsi"])
+                _event("Bullish", "RSI 60 Breakout", tf_name, f"{tf_name} RSI freshly crossed above 60.", rsi_val=d["rsi"])
             if d["rsi_cross_bear"]:
-                _event("Bearish", "RSI Cross 40", tf_name, f"{tf_name} RSI freshly crossed below 40.", rsi_val=d["rsi"])
+                _event("Bearish", "RSI 40 Breakdown", tf_name, f"{tf_name} RSI freshly crossed below 40.", rsi_val=d["rsi"])
             # Standalone BB events -- compression breakout/breakdown takes
             # precedence over a plain band cross, matching
             # _v32_bb_quality_from_eval's precedence.
             if d["bb_compression_breakout"]:
                 _event("Bullish", "BB Compression Breakout", tf_name, f"{tf_name} broke the upper band out of a recent low-volatility squeeze.", bb_quality="Clean Compression Breakout")
             elif d["bb_upper_cross"]:
-                _event("Bullish", "BB Breakout", tf_name, f"{tf_name} closed above the upper Bollinger Band.", bb_quality="Band Breakout")
+                _event("Bullish", "BB Upper Breakout", tf_name, f"{tf_name} closed above the upper Bollinger Band.", bb_quality="Band Breakout")
             if d["bb_compression_breakdown"]:
                 _event("Bearish", "BB Compression Breakdown", tf_name, f"{tf_name} broke the lower band out of a recent low-volatility squeeze.", bb_quality="Clean Compression Breakdown")
             elif d["bb_lower_cross"]:
-                _event("Bearish", "BB Breakdown", tf_name, f"{tf_name} closed below the lower Bollinger Band.", bb_quality="Band Breakdown")
+                _event("Bearish", "BB Lower Breakdown", tf_name, f"{tf_name} closed below the lower Bollinger Band.", bb_quality="Band Breakdown")
 
         # ADX Full Alignment -- all 4 timeframes cross together, same direction.
         if all(tf_data[tf]["adx_cross_bull"] for tf in ("Hourly", "Daily", "Weekly", "Monthly")):
