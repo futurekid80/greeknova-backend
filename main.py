@@ -1993,7 +1993,7 @@ def stock_intel(symbol: str):
     # ── 2. Signal History (last 20 days) ──────────────────────────────
     try:
         hist_res = supabase.from_("daily_oi_summary")\
-            .select("trade_date, fut_signal, fut_oi_chg_pct, price_chg_pct, close_price, fut_vol")\
+            .select("trade_date, fut_signal, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price, fut_vol")\
             .eq("symbol", sym)\
             .order("trade_date", desc=True)\
             .limit(20).execute()
@@ -2002,11 +2002,25 @@ def stock_intel(symbol: str):
         history = []
         for r in (hist_res.data or []):
             vol = int(r.get("fut_vol") or 0)
+            # Oct 16 2026: show the FUT contract's own price move
+            # (fut_price_chg_pct), not cash price_chg_pct -- this is the
+            # same basis-mismatch class fixed Oct 6/15 2026 in
+            # api/positional_intelligence.py's Stealth Buildup / Volume
+            # Breakout cards. Those cards already switched to
+            # fut_price_chg_pct because they're paired with FUT OI change;
+            # this history feed (the "FUT Signal History" popup) was still
+            # reading cash price_chg_pct, so the popup and the card could
+            # show different, even opposite-signed, "Price Chg" for the
+            # exact same symbol/day (confirmed live: LTF -0.04% card vs
+            # -3.42% popup on Oct 16). Fall back to cash price_chg_pct only
+            # for older rows predating the fut_price_chg_pct column.
+            _fut_pc = r.get("fut_price_chg_pct")
+            _price_chg = float(_fut_pc) if _fut_pc is not None else float(r.get("price_chg_pct") or 0)
             history.append({
                 "date": r["trade_date"],
                 "signal": r.get("fut_signal") or "NEUTRAL",
                 "fut_oi_chg": round(float(r.get("fut_oi_chg_pct") or 0), 2),
-                "price_chg": round(float(r.get("price_chg_pct") or 0), 2),
+                "price_chg": round(_price_chg, 2),
                 "close_price": round(float(r.get("close_price") or 0), 2),
                 "volume": vol,
                 "vol_ratio": round(vol / avg_vol, 2) if avg_vol > 0 else None,
@@ -2103,7 +2117,7 @@ def stock_signal_history(symbol: str, days: int = 20):
         start = (datetime.now(ist).date() - timedelta(days=60)).isoformat()
 
         result = supabase.from_("daily_oi_summary") \
-            .select("trade_date, fut_oi_chg_pct, price_chg_pct, fut_signal, close_price, fut_vol") \
+            .select("trade_date, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, fut_signal, close_price, fut_vol") \
             .eq("symbol", symbol.upper()) \
             .gte("trade_date", start) \
             .lte("trade_date", today) \
@@ -2121,11 +2135,22 @@ def stock_signal_history(symbol: str, days: int = 20):
         for r in rows:
             vol = int(r.get("fut_vol") or 0)
             vol_ratio = round(vol / avg_vol, 2) if avg_vol > 0 else None
+            # Oct 16 2026: use the FUT contract's own price move
+            # (fut_price_chg_pct), not cash price_chg_pct. Matches the fix
+            # already applied in api/positional_intelligence.py's Stealth
+            # Buildup/Volume Breakout cards (Oct 6/15 2026) for the same
+            # reason -- fut_oi_chg above is a FUTURES metric, so pairing it
+            # with the cash price move let this popup disagree with (and
+            # sometimes show the opposite sign from) the card for the same
+            # symbol/day. Fall back to cash price_chg_pct only for older
+            # rows that predate the fut_price_chg_pct column.
+            _fut_pc = r.get("fut_price_chg_pct")
+            _price_chg = float(_fut_pc) if _fut_pc is not None else float(r.get("price_chg_pct") or 0)
             history.append({
                 "date":         r["trade_date"],
                 "signal":       r.get("fut_signal") or "NEUTRAL",
                 "fut_oi_chg":   round(float(r.get("fut_oi_chg_pct") or 0), 2),
-                "price_chg":    round(float(r.get("price_chg_pct") or 0), 2),
+                "price_chg":    round(_price_chg, 2),
                 "close_price":  round(float(r.get("close_price") or 0), 2),
                 "volume":       vol,
                 "vol_ratio":    vol_ratio,
