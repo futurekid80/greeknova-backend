@@ -1653,10 +1653,18 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         return {"symbol": symbol, "strikes": [], "spot": None, "error": "no active expiry"}
     expiry = expiries[0]
 
+    # Oct 16 2026 FIX: this used to have no upper bound on the timestamp
+    # filter, so for a HISTORICAL `date` it silently returned the latest
+    # cmp_prices row overall (i.e. today's current spot) instead of that
+    # day's own spot -- harmless for the live "today" caller this was
+    # originally written for, but it quietly broke get_gamma_history's
+    # day-by-day reconstruction (every day's regime got computed against
+    # today's spot, not its own). Bounding to the same day fixes both.
     cmp_q = supabase.from_("cmp_prices")\
         .select("cmp")\
         .eq("symbol", symbol)\
         .gte("timestamp", f"{today}T00:00:00+00:00")\
+        .lt("timestamp",  f"{today}T23:59:59+00:00")\
         .order("timestamp", desc=True)\
         .limit(1).execute()
     spot = float(cmp_q.data[0]["cmp"]) if cmp_q.data else None
