@@ -8,7 +8,7 @@ import os
 import json
 import time
 from pywebpush import webpush, WebPushException
-from services.strike_zones import build_strike_index_map, strikes_away as _strikes_away
+from services.strike_zones import build_strike_index_map, strikes_away as _strikes_away, in_zone as _in_zone
 
 VAPID_PRIVATE_KEY = os.environ.get("VAPID_PRIVATE_KEY", "")
 VAPID_CONTACT_EMAIL = os.environ.get("VAPID_CONTACT_EMAIL") or "mailto:support@greeknova.app"
@@ -60,7 +60,8 @@ def _get_strikes_away(supabase, symbol: str, strike) -> int | None:
 
 
 def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10,
-                       vol_threshold: float = None, enabled_signals: list = None):
+                       vol_threshold: float = None, enabled_signals: list = None,
+                       strike_zone: str = None):
     """Save or update a device's push subscription.
 
     vol_threshold/enabled_signals are optional -- a true first-ever
@@ -93,6 +94,8 @@ def save_subscription(supabase, sub_data: dict, spike_threshold: float = 10,
         row["vol_threshold"] = vol_threshold
     if enabled_signals is not None:
         row["enabled_signals"] = [s for s in enabled_signals if s in VALID_SIGNAL_TYPES]
+    if strike_zone is not None:
+        row["strike_zone"] = strike_zone if strike_zone in STRIKE_ZONE_VALUES else "all"
 
     try:
         supabase.from_("push_subscriptions").upsert(row, on_conflict="endpoint").execute()
@@ -138,6 +141,14 @@ OPT_IN_SIGNAL_TYPES = [
 # "default enabled" set; this combined list is only for "is this name real".)
 VALID_SIGNAL_TYPES = ALL_SIGNAL_TYPES + OPT_IN_SIGNAL_TYPES
 
+# (Oct 16 2026, Manish's ask: "even 1 rupee option alert i get" -- a far
+# OTM/ITM strike's premium is tiny, so OI%/Vol% thresholds alone don't cut
+# that noise out; a strike-zone filter does.) Same ATM/±1/±2/±5/±10/All
+# vocabulary as services/strike_zones.py ZONE_OPTIONS, just lowercased
+# "all" to match the column default -- validated here the same way
+# enabled_signals is above.
+STRIKE_ZONE_VALUES = ["ATM", "1", "2", "5", "10", "all"]
+
 
 def get_preferences(supabase, endpoint: str) -> dict:
     """
@@ -147,7 +158,7 @@ def get_preferences(supabase, endpoint: str) -> dict:
     has never customized — everything is on by default.
     """
     try:
-        res = supabase.from_("push_subscriptions").select("enabled_signals, spike_threshold, vol_threshold").eq("endpoint", endpoint).limit(1).execute()
+        res = supabase.from_("push_subscriptions").select("enabled_signals, spike_threshold, vol_threshold, strike_zone").eq("endpoint", endpoint).limit(1).execute()
         if not res.data:
             return {"error": "Subscription not found"}
         row = res.data[0]
@@ -156,6 +167,7 @@ def get_preferences(supabase, endpoint: str) -> dict:
             "enabled_signals": enabled if enabled is not None else ALL_SIGNAL_TYPES,
             "spike_threshold": row.get("spike_threshold"),
             "vol_threshold": row.get("vol_threshold"),
+            "strike_zone": row.get("strike_zone") or "all",
             "customized": enabled is not None,
         }
     except Exception as e:
@@ -163,14 +175,16 @@ def get_preferences(supabase, endpoint: str) -> dict:
         return {"error": str(e)}
 
 
-def save_preferences(supabase, endpoint: str, enabled_signals: list, spike_threshold: float = None, vol_threshold: float = None) -> dict:
-    """Save which alert types this specific device wants to receive, and at what OI%/Vol% thresholds."""
+def save_preferences(supabase, endpoint: str, enabled_signals: list, spike_threshold: float = None, vol_threshold: float = None, strike_zone: str = None) -> dict:
+    """Save which alert types this specific device wants to receive, and at what OI%/Vol%/strike-zone thresholds."""
     valid = [s for s in enabled_signals if s in VALID_SIGNAL_TYPES]
     update = {"enabled_signals": valid}
     if spike_threshold is not None:
         update["spike_threshold"] = spike_threshold
     if vol_threshold is not None:
         update["vol_threshold"] = vol_threshold
+    if strike_zone is not None:
+        update["strike_zone"] = strike_zone if strike_zone in STRIKE_ZONE_VALUES else "all"
     try:
         supabase.from_("push_subscriptions").update(update).eq("endpoint", endpoint).execute()
         return {"status": "saved", "enabled_signals": valid}
@@ -258,6 +272,18 @@ def broadcast_alert(supabase, alert: dict):
     """
     Send an alert to every subscribed device whose threshold the alert clears.
     """
+    # (Oct 16 2026) Computed once per alert, up front, and reused both for
+    # alert_log (as before) and for the new per-subscriber strike-zone
+    # filter below -- no reason to look it up twice. None for symbol-level
+    # alerts with no strike (EMA/PDH/PDL/PWH/PWL crosses) -- those aren't
+    # about any one option contract, so the strike-zone filter never
+    # applies to them (see the "if alert.get(strike) is not None" check
+    # this preserves from the original single call site).
+    alert_strikes_away = (
+        _get_strikes_away(supabase, alert.get("symbol"), alert.get("strike"))
+        if alert.get("strike") is not None else None
+    )
+
     # (Aug 26 2026): persist every alert to alert_log regardless of whether
     # push delivery succeeds -- the alert itself is real even if VAPID isn't
     # configured or every subscription happens to be dead. This is what
@@ -279,7 +305,7 @@ def broadcast_alert(supabase, alert: dict):
             "score":        alert.get("score"),
             "bias":         alert.get("bias"),
             "direction":    alert.get("direction"),
-            "strikes_away": _get_strikes_away(supabase, alert.get("symbol"), alert.get("strike")),
+            "strikes_away": alert_strikes_away,
         }).execute()
     except Exception as e:
         print(f"[Push] alert_log persist failed: {e}")
@@ -328,6 +354,18 @@ def broadcast_alert(supabase, alert: dict):
             if not enabled_signals or signal not in enabled_signals:
                 continue
         elif enabled_signals is not None and signal not in enabled_signals:
+            continue
+
+        # (Oct 16 2026, "even 1 rupee option alert i get"): a far OTM/ITM
+        # strike's tiny premium isn't caught by the OI%/Vol% thresholds
+        # above at all -- those are about the SIZE of the move, not where
+        # the strike sits. Only applies to alerts that are actually about
+        # one option contract -- a symbol-level alert (EMA/PDH/PDL/PWH/PWL
+        # cross, alert.get("strike") is None) always passes regardless of
+        # zone, since in_zone()'s own None handling is for a DIFFERENT case
+        # (a real strike whose distance-from-ATM just couldn't be computed
+        # that cycle), not "there is no strike to judge".
+        if alert.get("strike") is not None and not _in_zone(alert_strikes_away, sub.get("strike_zone") or "all"):
             continue
 
         # Front-load the strike/OI%/Vol% into the title itself — the OS

@@ -3647,9 +3647,10 @@ async def push_preferences_post(request: Request):
     enabled_signals = body.get("enabled_signals", [])
     spike_threshold = body.get("spike_threshold")
     vol_threshold = body.get("vol_threshold")
+    strike_zone = body.get("strike_zone")
     if not endpoint:
         return {"error": "endpoint required"}
-    return save_preferences(get_supabase(), endpoint, enabled_signals, spike_threshold, vol_threshold)
+    return save_preferences(get_supabase(), endpoint, enabled_signals, spike_threshold, vol_threshold, strike_zone)
 
 @app.get("/premarket-brief")
 def premarket_brief():
@@ -3683,10 +3684,11 @@ async def push_subscribe(request: Request):
     # correctly carried over. See AlertsContext.enableAlerts().
     vol_threshold = body.get("volThreshold")
     enabled_signals = body.get("enabledSignals")
+    strike_zone = body.get("strikeZone")
     if not subscription:
         return {"error": "Missing subscription"}
     supabase = get_supabase()
-    return save_subscription(supabase, subscription, threshold, vol_threshold, enabled_signals)
+    return save_subscription(supabase, subscription, threshold, vol_threshold, enabled_signals, strike_zone)
 
 @app.post("/push-unsubscribe")
 async def push_unsubscribe(request: Request):
