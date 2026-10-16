@@ -1635,6 +1635,19 @@ def gamma_by_strike(symbol: str, date: str = None):
     return get_gex_by_strike(symbol.upper(), date)
 
 
+@app.get("/gamma-history/{symbol}")
+def gamma_history(symbol: str, days: int = 20):
+    # Oct 16 2026: day-by-day gamma regime + wall migration for ANY F&O
+    # symbol (stocks included, not just the 5 indices gamma-wall-trend/
+    # session-replay are scoped to), computed on demand from oi_snapshots
+    # -- see get_gamma_history's docstring in gamma_exposure.py for why this
+    # isn't a new continuous-logging table. Powers Strategy Builder's
+    # gamma-history panel.
+    from services.gamma_exposure import get_gamma_history
+    days = max(5, min(days, 60))
+    return get_gamma_history(symbol.upper(), days)
+
+
 @app.get("/gamma-wall-trend/{symbol}")
 def gamma_wall_trend(symbol: str, date: str = None):
     # Oct 9 2026: session history of Call Wall / Put Wall / Net GEX for an

@@ -1779,6 +1779,9 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         "days_to_expiry": dte,
         "spot": spot,
         "regime": regime,
+        "local_net_gex": round(local_net_gex, 2),  # Oct 16 2026: exposed for
+        # get_gamma_history below -- was already computed here to pick the
+        # regime, just never returned to callers before.
         "call_wall_strike": call_wall[0] if call_wall else None,
         "put_wall_strike": put_wall[0] if put_wall else None,
         "flip_point": flip_point,
@@ -1788,6 +1791,59 @@ def get_gex_by_strike(symbol: str = "NIFTY", date: str = None):
         "strikes": strikes_out,
         "as_of": ts_new,
     }
+
+
+def get_gamma_history(symbol: str = "NIFTY", days: int = 20):
+    """Day-by-day gamma-regime + wall-migration history for ANY F&O symbol --
+    stocks included, not just the 5 WALL_TREND_SYMBOLS indices that
+    gex_regime_log/get_wall_trend/get_session_replay are scoped to.
+
+    Oct 16 2026: built for the Strategy Builder's gamma-history panel, after
+    a TCS case-study reconstruction (spot 2100->2467, stayed LONG_GAMMA the
+    whole move) showed this was useful beyond the 5 indices. Deliberately
+    computed ON DEMAND per call -- re-running get_gex_by_strike's exact
+    same, already-tested per-symbol logic for each trading day -- rather
+    than extending the continuous gex_regime_log capture job to the full
+    130+ symbol F&O universe. That would multiply the regime-computation
+    job's load ~25x+ and add meaningfully to Supabase storage that's
+    already over the Pro-plan allowance (see greeknova.md). No new table,
+    no new capture job -- just reads oi_snapshots, which already captures
+    every symbol every ~5 min.
+    """
+    symbol = symbol.upper()
+
+    import datetime as _dt
+    from utils.market_calendar import is_trading_day, today_ist
+
+    cand = today_ist()
+    days_found = []
+    tries = 0
+    while len(days_found) < days and tries < days * 4:
+        tries += 1
+        if is_trading_day(cand):
+            days_found.append(cand.isoformat())
+        cand = cand - _dt.timedelta(days=1)
+    days_found.reverse()  # chronological order for the chart
+
+    points = []
+    for d in days_found:
+        try:
+            r = get_gex_by_strike(symbol, d)
+        except Exception:
+            continue
+        if r.get("error") or not r.get("spot"):
+            continue
+        points.append({
+            "date": d,
+            "spot": r["spot"],
+            "regime": r["regime"],
+            "local_net_gex": r.get("local_net_gex"),
+            "call_wall_strike": r.get("call_wall_strike"),
+            "put_wall_strike": r.get("put_wall_strike"),
+            "expiry": r.get("expiry"),
+        })
+
+    return {"symbol": symbol, "points": points}
 
 
 VRP_LOOKBACK_MINUTES = 60   # "sudden spike" window -- how far back we look
