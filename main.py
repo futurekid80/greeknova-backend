@@ -1703,8 +1703,21 @@ def wolves_run_now():
     # demand to compare against his local Fyers scanner, without waiting
     # for the next 5-minute cron tick. Requires wolves_tf_cache to already
     # be populated (the EOD refresh job, or /wolves/refresh-cache below).
-    from services.wolves_scanner import run_live_tick
-    return run_live_tick()
+    # Runs in a background thread and returns immediately -- even the fast
+    # hourly-only path takes 2-4 minutes across the full universe, well
+    # past what a browser fetch() will wait on before giving up with a
+    # "Failed to fetch" (confirmed live: the backend kept running fine,
+    # the browser just stopped listening). Poll GET /wolves for results.
+    import threading
+    def _run():
+        from services.wolves_scanner import run_live_tick
+        try:
+            res = run_live_tick()
+            print(f"[WOLVES] Manual live tick: {res}")
+        except Exception as e:
+            print(f"[WOLVES] Manual live tick failed: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "note": "Running in the background -- poll GET /wolves in a couple of minutes for results."}
 
 
 @app.post("/wolves/refresh-cache")
@@ -1713,8 +1726,18 @@ def wolves_refresh_cache():
     # only needed once a day normally (the 15:50 IST cron does this), but
     # exposed so the cache can be seeded/rebuilt on demand (e.g. right
     # after this feature first ships, before the first EOD cron has run).
-    from services.wolves_scanner import refresh_tf_cache
-    return refresh_tf_cache()
+    # Same background-thread treatment as /wolves/run-now -- this one takes
+    # even longer (5-6 minutes, full daily history per symbol).
+    import threading
+    def _run():
+        from services.wolves_scanner import refresh_tf_cache
+        try:
+            res = refresh_tf_cache()
+            print(f"[WOLVES] Manual cache refresh: {res}")
+        except Exception as e:
+            print(f"[WOLVES] Manual cache refresh failed: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started", "note": "Running in the background -- this takes 5-6 minutes for the full universe."}
 
 
 @app.get("/gamma-wall-trend/{symbol}")
