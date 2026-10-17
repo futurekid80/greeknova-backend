@@ -63,10 +63,19 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
         print(f"Spot fetch failed: {e}")
 
     # ── Latest timestamp ───────────────────────────────────────────────────────
+    # Oct 17 2026: was restricted to today's snapshots only, so Strategy
+    # Builder (and anyone else calling this) showed "no option chain data"
+    # whenever the market was closed -- weekends, holidays, or simply before
+    # today's first 9:15 AM capture. Manish wants this usable any time,
+    # including market-off for testing the Zerodha Publisher basket-order
+    # flow, so this now falls back to the most recent snapshot available,
+    # whatever day it's from, instead of returning empty. `is_stale` tells
+    # the frontend whether what it got is today's live data or a carried-
+    # forward prior session, so it can label it rather than present old
+    # prices as current.
     ts_q = supabase.from_("oi_snapshots")\
         .select("timestamp")\
         .eq("symbol", symbol)\
-        .gte("timestamp", f"{today}T00:00:00+00:00")\
         .order("timestamp", desc=True)\
         .limit(1)\
         .execute()
@@ -75,6 +84,7 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
         return {"symbol": symbol, "chain": [], "spot": spot, "expiry": expiry}
 
     latest_ts = ts_q.data[0]["timestamp"]
+    is_stale = not latest_ts.startswith(today)
 
     # ── Snapshot data ──────────────────────────────────────────────────────────
     # Fetch ALL expiries for this symbol/timestamp first (not just the requested
@@ -180,6 +190,7 @@ def get_option_chain(symbol: str = "NIFTY", expiry: str = None):
         "days_left": days_left,
         "expiries":  available_expiries,
         "timestamp": latest_ts,
+        "is_stale":  is_stale,
         "chain":     chain,
     }
 
