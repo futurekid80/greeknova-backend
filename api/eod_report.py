@@ -226,6 +226,63 @@ def get_eod_report(supabase, date: str = None):
         except Exception as e:
             print(f"[EOD] Cash load failed: {e}")
 
+        # BUG FIX (Oct 18 2026): Pre-Market Brief on a weekend/holiday asks
+        # for `date` = the last TRADING day (e.g. Friday), which is always
+        # != _today -- so this always hit the Supabase-only branch above
+        # with no live fallback. If nothing had ever called this with
+        # date==_today for that Friday itself (no EOD report view happened
+        # that evening), fii_dii_cash simply has no row for it, and this
+        # silently returned zero FII/DII forever, not just until Monday.
+        # NSE's fiidiiTradeReact endpoint isn't date-parameterized -- it
+        # just returns whatever NSE most recently published, which IS
+        # Friday's figures when queried over the weekend. So fall back to
+        # the same live fetch, but only when `date` is recent (within 5
+        # calendar days of today, covering any weekend/holiday gap) --
+        # never for a genuinely old historical date with no saved row,
+        # where NSE's "latest" would be the wrong day's data entirely.
+        if not cash_data.get("FII") and not cash_data.get("DII"):
+            try:
+                _date_dt = datetime.strptime(date, "%Y-%m-%d").date()
+                _is_recent = (datetime.now(_ist).date() - _date_dt).days <= 5
+            except Exception:
+                _is_recent = False
+            if _is_recent:
+                try:
+                    import requests
+                    res = requests.get(
+                        "https://www.nseindia.com/api/fiidiiTradeReact",
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                            "Accept": "application/json",
+                            "Referer": "https://www.nseindia.com/",
+                        },
+                        timeout=4
+                    )
+                    if res.status_code == 200:
+                        for row in res.json():
+                            cat = str(row.get("category") or "").strip()
+                            if "FII" in cat or "FPI" in cat:
+                                cash_data["FII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
+                            elif "DII" in cat:
+                                cash_data["DII"] = {"buy": float(row.get("buyValue", 0)), "sell": float(row.get("sellValue", 0)), "net": float(row.get("netValue", 0))}
+                        print(f"[EOD] Cash (weekend/holiday fallback) FII={cash_data.get('FII',{}).get('net')} DII={cash_data.get('DII',{}).get('net')} for {date}")
+                        if cash_data.get('FII') or cash_data.get('DII'):
+                            try:
+                                supabase.from_("fii_dii_cash").upsert({
+                                    "trade_date": date,
+                                    "fii_buy":  cash_data.get('FII', {}).get('buy'),
+                                    "fii_sell": cash_data.get('FII', {}).get('sell'),
+                                    "fii_net":  cash_data.get('FII', {}).get('net'),
+                                    "dii_buy":  cash_data.get('DII', {}).get('buy'),
+                                    "dii_sell": cash_data.get('DII', {}).get('sell'),
+                                    "dii_net":  cash_data.get('DII', {}).get('net'),
+                                }).execute()
+                                print(f"[EOD] Cash (weekend/holiday fallback) saved to Supabase for {date}")
+                            except Exception as se:
+                                print(f"[EOD] Cash (weekend/holiday fallback) save failed: {se}")
+                except Exception as e:
+                    print(f"[EOD] Cash (weekend/holiday fallback) fetch failed: {e}")
+
     # ── 7. Delivery data ─────────────────────────────────────────────────────
     try:
         del_res = supabase.from_("delivery_data")\
