@@ -394,17 +394,19 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             # local variable, and leave row["price_chg_pct"] as the correct
             # cash close-to-close value computed above.
             #
-            # Oct 6 2026: fut_price_chg_pct IS now also persisted (its own
-            # column -- see migration add_fut_price_chg_pct_to_daily_oi_summary)
-            # so api/positional_intelligence.py's post-market Stealth Buildup
-            # check can use the same FUT-vs-prior-close price basis its live
-            # check already uses, instead of cash price_chg_pct. Left as
-            # None (not defaulted to cash) when no FUT open+close snapshot
-            # pair exists for the symbol that day -- positional_intelligence.py
-            # treats a missing value as "skip this stock for stealth today"
-            # rather than silently falling back to the cash basis, which is
-            # exactly the mismatch this column exists to avoid.
-            price = fut_price_chg_map.get(sym, row.get("price_chg_pct") or 0)
+            # BUG FIX (Oct 18 2026): reverting the Oct 6 2026 change above.
+            # fut_price_chg_map is the FUT contract's own TODAY-ONLY
+            # open->close move -- it hides overnight gaps entirely (LTF on
+            # Oct 16 2026: cash close-to-close -3.42%, FUT open->close only
+            # -0.04%), which was misclassifying fut_signal for any stock
+            # that gapped hard and then traded flat. The Oct 6 premise (that
+            # this should match a FUT-vs-prior-close basis the live/intraday
+            # branch uses) was also wrong: that branch is cash LTP vs cash
+            # prev_close, not FUT. fut_price_chg_pct is still computed and
+            # persisted above for reference, just no longer used to classify
+            # fut_signal -- see api/positional_intelligence.py's Oct 18 2026
+            # fix for the full writeup; this is the same fix at the source.
+            price = row.get("price_chg_pct") or 0
             row["fut_price_chg_pct"] = fut_price_chg_map.get(sym)
             row["fut_vol"]        = fut_vol_map.get(sym, 0)
             row["fut_oi_chg_pct"] = fut_oi

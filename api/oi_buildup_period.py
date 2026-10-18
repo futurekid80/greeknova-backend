@@ -203,32 +203,25 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         if len(window) < min_days:
             continue
 
-        # Oct 15 2026: compounding fut_oi_chg_pct (FUTURES OI) against cash
-        # price_chg_pct over the window had the same basis mismatch already
-        # fixed elsewhere (api/daily_oi_summary.py Oct 6 2026,
-        # api/positional_intelligence.py and main.py's writer-buyer-score,
-        # same day as this fix) -- use fut_price_chg_pct instead. Since this
-        # compounds across the whole window, a single day missing a FUT
-        # open+close snapshot pair would corrupt the product silently if
-        # defaulted to 0; skip the symbol for this period instead (same
-        # "skip, don't fall back to cash" rule as those other fixes).
+        # BUG FIX (Oct 18 2026): reverting the Oct 15 2026 change above.
+        # fut_price_chg_pct is each day's FUT open->close move only, so
+        # compounding it across the window silently drops every overnight
+        # gap in that window -- worse than the single-day version of this
+        # bug fixed the same day in api/positional_intelligence.py (see
+        # that fix for the full writeup: a FUT contract that gaps down hard
+        # and then sits flat intraday shows ~0% here even though the stock
+        # really moved several %). Cash price_chg_pct is close-to-close, so
+        # compounding it across consecutive days correctly reconstructs the
+        # window's real cumulative move.
         oi_factor = 1.0
         price_factor = 1.0
         vol_total = 0
-        window_missing_fut_price = False
         for r in window:
             oi_pct = float(r.get("fut_oi_chg_pct") or 0)
-            _raw_fut_price_chg = r.get("fut_price_chg_pct")
-            if _raw_fut_price_chg is None:
-                window_missing_fut_price = True
-                break
-            price_pct = float(_raw_fut_price_chg)
+            price_pct = float(r.get("price_chg_pct") or 0)
             oi_factor *= (1 + oi_pct / 100)
             price_factor *= (1 + price_pct / 100)
             vol_total += int(r.get("fut_vol") or 0)
-
-        if window_missing_fut_price:
-            continue
 
         cumulative_oi_pct = round((oi_factor - 1) * 100, 2)
         cumulative_price_pct = round((price_factor - 1) * 100, 2)

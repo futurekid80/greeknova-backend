@@ -195,22 +195,13 @@ def _get_eod_from_summary(supabase, now_ist):
         oi_chg = round(fut_oi_chg if using_fut_oi else float(r.get("oi_chg_pct") or 0), 2)
         if abs(oi_chg) < 2.0:
             continue
-        # EOD uses prev_close → close price change (already correct in daily_oi_summary)
-        # Oct 15 2026: that close-to-close cash figure is the right basis
-        # when oi_chg above came from options OI (oi_chg_pct), but when it
-        # came from FUTURES OI (fut_oi_chg_pct) instead, pairing it with
-        # cash price is the same basis mismatch already fixed elsewhere
-        # (api/daily_oi_summary.py, api/positional_intelligence.py,
-        # api/oi_buildup_period.py, api/positional_radar.py, main.py's
-        # writer-buyer-score) -- use fut_price_chg_pct for that case, and
-        # skip the row (don't fall back to cash) when it's missing.
-        if using_fut_oi:
-            _raw_fut_price_chg = r.get("fut_price_chg_pct")
-            if _raw_fut_price_chg is None:
-                continue
-            price_chg = round(float(_raw_fut_price_chg), 2)
-        else:
-            price_chg = round(float(r.get("price_chg_pct") or 0), 2)
+        # BUG FIX (Oct 18 2026): reverting the Oct 15 2026 change above.
+        # fut_price_chg_pct is the FUT contract's own TODAY-ONLY open->close
+        # move and hides overnight gaps -- see api/positional_intelligence.py's
+        # Oct 18 2026 fix for the full writeup. EOD uses prev_close -> close
+        # (cash price_chg_pct) for both the options-OI and futures-OI cases;
+        # that's the correct "did the price actually move today" basis.
+        price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         cmp = float(r.get("close_price") or 0)
 
         sig_type, sig_label = classify_signal(oi_chg, price_chg)

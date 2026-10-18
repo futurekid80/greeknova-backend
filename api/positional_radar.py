@@ -352,19 +352,16 @@ def get_positional_radar(min_consec: int = 0):
     # Build per-symbol FUT signal history
     from collections import defaultdict
     fut_signals_by_sym = defaultdict(list)
-    # Oct 15 2026: this classified fut_oi_chg_pct (FUTURES OI) together
-    # with cash price_chg_pct -- same basis mismatch already fixed
-    # elsewhere (api/daily_oi_summary.py, api/positional_intelligence.py,
-    # api/oi_buildup_period.py, main.py's writer-buyer-score). Use
-    # fut_price_chg_pct instead; skip a day with no FUT open+close
-    # snapshot pair rather than mislabel it off the wrong basis.
+    # BUG FIX (Oct 18 2026): reverting the Oct 15 2026 change above.
+    # fut_price_chg_pct is the FUT contract's own TODAY-ONLY open->close
+    # move and hides overnight gaps -- see api/positional_intelligence.py's
+    # Oct 18 2026 fix for the full writeup. Cash price_chg_pct (close-to-
+    # close) is the correct "did the price actually move" basis and is
+    # what the dashboard card and fut_signal classification now use again.
     for r in (fut_hist_res.data or []):
         sym = r["symbol"]
         fc = float(r.get("fut_oi_chg_pct") or 0)
-        _raw_fut_price_chg = r.get("fut_price_chg_pct")
-        if _raw_fut_price_chg is None:
-            continue
-        pc = float(_raw_fut_price_chg)
+        pc = float(r.get("price_chg_pct") or 0)
         if fc > 0 and pc >= 0.3:    sig = "LONG_BUILDUP"
         elif fc > 0 and pc <= -0.3: sig = "SHORT_BUILDUP"
         elif fc < 0 and pc >= 0.3:  sig = "SHORT_COVERING"

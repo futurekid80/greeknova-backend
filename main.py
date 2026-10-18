@@ -2875,17 +2875,17 @@ def stock_signal_history(symbol: str, days: int = 20):
         for r in rows:
             vol = int(r.get("fut_vol") or 0)
             vol_ratio = round(vol / avg_vol, 2) if avg_vol > 0 else None
-            # Oct 16 2026: use the FUT contract's own price move
-            # (fut_price_chg_pct), not cash price_chg_pct. Matches the fix
-            # already applied in api/positional_intelligence.py's Stealth
-            # Buildup/Volume Breakout cards (Oct 6/15 2026) for the same
-            # reason -- fut_oi_chg above is a FUTURES metric, so pairing it
-            # with the cash price move let this popup disagree with (and
-            # sometimes show the opposite sign from) the card for the same
-            # symbol/day. Fall back to cash price_chg_pct only for older
-            # rows that predate the fut_price_chg_pct column.
-            _fut_pc = r.get("fut_price_chg_pct")
-            _price_chg = float(_fut_pc) if _fut_pc is not None else float(r.get("price_chg_pct") or 0)
+            # BUG FIX (Oct 18 2026): reverting the Oct 16 2026 change above.
+            # fut_price_chg_pct is the FUT contract's TODAY-ONLY open->close
+            # move and hides overnight gaps (see api/positional_intelligence.py's
+            # Oct 18 2026 fix for the full writeup -- 360ONE on Oct 16 2026
+            # showed +0.37% cash close-to-close but -3.51% FUT open->close,
+            # which made this popup show "Short Buildup -3.51%" for a stock
+            # that had actually barely moved and was being quietly
+            # accumulated). Back to the cash close-to-close basis, which is
+            # also what the dashboard card and fut_signal classification
+            # now use again.
+            _price_chg = float(r.get("price_chg_pct") or 0)
             history.append({
                 "date":         r["trade_date"],
                 "signal":       r.get("fut_signal") or "NEUTRAL",
