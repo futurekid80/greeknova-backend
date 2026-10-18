@@ -199,15 +199,47 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
         # "today's close" (close enough to the real closing price, as
         # established earlier today: at most a ~1% gap) -- the same source
         # that already worked correctly for this before today's change.
-        # The PREVIOUS close side is unaffected and stays Kite-official via
-        # cpr_levels.prev_close (a day old, so no publish-lag issue there).
+
+        # BUG FIX (Oct 18 2026): the PREVIOUS close side was NOT unaffected
+        # like the comment above claims -- cpr_levels.prev_close comes from
+        # a different job (the EOD CPR computation) and was found to drift
+        # from this table's own close_price history by 1-2.5 rupees on
+        # ordinary back-to-back trading days (360ONE: cpr_levels.prev_close
+        # for Oct 16 2026 was 1071.0, but this table's own close_price for
+        # Oct 15 2026 -- the real previous trading day -- was 1073.00,
+        # which matches what Kite itself was showing as the prior close).
+        # That ~0.19% drift was compounding into a visible mismatch between
+        # GreekNova's displayed day-change% and Kite's for the same stock
+        # (e.g. 360ONE showed 0.37% here vs Kite's 0.16% on Oct 16 2026).
+        # Use THIS table's own close_price for the previous trading day as
+        # the primary prev-close source instead -- it's the one GreekNova
+        # itself will compare today's close against tomorrow, so using it
+        # both days keeps the chain self-consistent, and it already lines
+        # up with Kite in practice. cpr_levels.prev_close and the cmp_prices
+        # fallback remain as fallbacks for a symbol with no stored prior row
+        # (e.g. a new listing).
+        own_prev_close_map = {}
+        try:
+            from utils.market_calendar import get_prev_trading_day
+            _prev_trade_date = get_prev_trading_day(
+                datetime.strptime(trade_date, '%Y-%m-%d').date()
+            ).isoformat()
+            _own_prev_res = supabase.from_("daily_oi_summary")                .select("symbol, close_price")                .eq("trade_date", _prev_trade_date)                .execute()
+            own_prev_close_map = {
+                r["symbol"]: float(r["close_price"])
+                for r in (_own_prev_res.data or [])
+                if r.get("close_price") is not None
+            }
+        except Exception as e:
+            print(f"[DAILY_OI_SUMMARY] own-prev-close fetch failed: {e}")
+
         cmp_map = {}
         seen = set()
         for row in (cmp_res.data or []):
             sym = row["symbol"]
             if sym not in seen:
                 curr = float(row.get("cmp") or 0)
-                prev = cpr_prev_close_map.get(sym) or prev_cmp_map.get(sym, 0)
+                prev = own_prev_close_map.get(sym) or cpr_prev_close_map.get(sym) or prev_cmp_map.get(sym, 0)
                 price_chg = round((curr - prev) / prev * 100, 2) if prev > 0 and curr > 0 else None
                 cmp_map[sym] = {
                     "cmp": row.get("cmp"),
