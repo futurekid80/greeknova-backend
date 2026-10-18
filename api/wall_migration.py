@@ -13,6 +13,8 @@ Fix log:
 """
 
 from datetime import datetime, timedelta
+import threading
+import time as time_module
 import pytz
 
 IST = pytz.timezone("Asia/Kolkata")
@@ -22,8 +24,50 @@ STRIKE_INTERVALS = {
 }
 DEFAULT_INTERVAL = 5
 
+# BUG FIX (Oct 18 2026): this endpoint had NO caching at all, unlike every
+# other scanner (oi_pulse.py, uoa.py) -- every single request recomputed
+# from scratch: up to 15,000 oi_snapshots rows across two timestamps, plus
+# a call into iv_analysis.get_iv_analysis() for every symbol. Measured live
+# at 32-49s on a cold request. Manish's "Wall Migration scanner is slow
+# too" report, plus the frontend firing two near-simultaneous requests on
+# page mount (the same double-fetch pattern flagged separately as #112),
+# meant two of these ~40s computations were often running concurrently,
+# each slowing the other down further. Adding the same short-TTL
+# module-level cache + lock pattern already used in api/oi_pulse.py and
+# api/uoa.py so a second request within the window gets the already-
+# computed result instantly instead of recomputing. Underlying OI
+# snapshots only refresh every few minutes, so a short cache doesn't lose
+# meaningful freshness.
+_wm_cache: dict | None = None
+_wm_cache_time: float = 0
+_wm_lock = threading.Lock()
+WM_CACHE_TTL_LIVE = 45   # market hours -- snapshots refresh every few min anyway
+WM_CACHE_TTL_EOD   = 300  # post-market -- data is static until next session
+
+
+def is_market_hours() -> bool:
+    now = datetime.now(IST)
+    if now.weekday() >= 5:
+        return False
+    total = now.hour * 60 + now.minute
+    return (9 * 60 + 15) <= total <= (15 * 60 + 30)
+
 
 def get_wall_migration(supabase) -> dict:
+    global _wm_cache, _wm_cache_time
+    ttl = WM_CACHE_TTL_LIVE if is_market_hours() else WM_CACHE_TTL_EOD
+    if _wm_cache and (time_module.time() - _wm_cache_time) < ttl:
+        return _wm_cache
+    with _wm_lock:
+        if _wm_cache and (time_module.time() - _wm_cache_time) < ttl:
+            return _wm_cache
+        result = _compute_wall_migration(supabase)
+        _wm_cache = result
+        _wm_cache_time = time_module.time()
+        return result
+
+
+def _compute_wall_migration(supabase) -> dict:
     try:
         ist_now = datetime.now(IST)
 
