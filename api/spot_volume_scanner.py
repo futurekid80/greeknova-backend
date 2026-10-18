@@ -371,9 +371,26 @@ def get_volume_breakout_scan(supabase, symbols):
     the market is currently open and today's bar isn't final yet)."""
     all_symbols = list(symbols) + list(INDEX_TOKENS.keys())
 
+    # BUG FIX (Oct 18 2026): this used to be `.limit(50000)` with no date
+    # floor. spot_daily_bars has been accumulating since Aug 2025 and
+    # passed 50,000 total rows in Oct 2026 -- past that point, Postgres
+    # has no stable tiebreak for rows sharing the same trade_date, so
+    # `order(trade_date).limit(50000)` was silently and *non-deterministically*
+    # dropping a random slice of recent rows per request. Symptom: the
+    # scanner kept showing an old "Breakout" as the live/confirmed state
+    # days after it happened (e.g. TITAN still "confirmed breakout" on Oct 16
+    # from an Oct 8 signal, with cmp frozen at the Oct 8 close) because that
+    # symbol's newer bars silently never made it into bars_sorted for that
+    # request. _find_active_pattern only needs LOOKBACK_DAYS_FOR_SCAN (40)
+    # trading days plus a 20-day baseline warmup; 90 calendar days is a
+    # generous buffer over that (covers weekends/holidays) without ever
+    # approaching the row limit again (246 symbols x ~65 trading days is
+    # well under 50,000 rows).
+    cutoff_date = (_now_ist().date() - timedelta(days=90)).isoformat()
     bars_res = supabase.from_("spot_daily_bars")\
         .select("symbol, trade_date, open, high, low, close, volume")\
         .in_("symbol", all_symbols)\
+        .gte("trade_date", cutoff_date)\
         .order("trade_date", desc=False)\
         .limit(50000).execute()
 
