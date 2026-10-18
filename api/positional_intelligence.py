@@ -488,23 +488,30 @@ def get_positional_intelligence(min_consec: int = 0):
                 today_oi_next = float(_next_raw) if _next_raw is not None else None
                 today_oi_abs = (today_data or {}).get("fut_oi_close")
                 today_oi_abs_next = (today_data or {}).get("fut_oi_close_next")
-                # Oct 6 2026: use the FUT contract's own open->close price
-                # move here (fut_price_chg_pct), not cash price_chg_pct. The
-                # live/intraday branch above already compares FUT LTP vs
-                # prior close -- reusing a different (cash close-to-close)
-                # basis post-market let a stock's price legitimately drift
-                # past the 1% "quiet" threshold by day's end even when it
-                # looked stealthy on a FUT basis all day live. This is what
-                # hid RADICO from Stealth Buildup post-market on Oct 5: OI
-                # kept building quietly, but the full day's cash move ended
-                # up >1% even though the FUT contract itself barely moved.
-                # Skip (don't fall back to cash) when no FUT open+close
-                # snapshot pair was captured that day -- falling back would
-                # silently reintroduce the same basis mismatch this fixes.
-                _raw_fut_price_chg = (today_data or {}).get("fut_price_chg_pct")
-                if _raw_fut_price_chg is None:
-                    continue
-                today_price = float(_raw_fut_price_chg)
+                # BUG FIX (Oct 18 2026): reverting the Oct 6 2026 change above.
+                # fut_price_chg_pct is the FUT contract's own TODAY-ONLY
+                # open->close move -- it says nothing about an overnight gap.
+                # On a day the stock gaps down/up hard at the open and then
+                # trades flat (LTF on Oct 16: cash close-to-close -3.42%,
+                # but FUT open->close only -0.04%), this basis hid the real
+                # move entirely and showed "Stealth Buildup" on a stock that
+                # had already been heavily repriced -- not a quiet
+                # accumulation day at all. The Oct 6 fix's premise was that
+                # the live/intraday branch above compares a FUT price to
+                # prior close, so this should match it on a FUT basis too --
+                # but that's not what the live branch does: live_oi_map's
+                # price_chg_pct (set a few dozen lines above) is cash LTP
+                # (cmp_prices) vs cash prev_close (Kite's daily candle), not
+                # FUT at all. So this restores the ORIGINAL cash
+                # close-to-close basis (price_chg_pct, already computed and
+                # stored on every row), which is what "price barely moved"
+                # should mean and what actually matches the live branch's
+                # basis. This reopens the narrow RADICO-style basis mismatch
+                # the Oct 6 fix targeted (FUT and cash diverging right before
+                # expiry) -- but that is far rarer than an ordinary overnight
+                # gap, which this bug broke on nearly any gap day.
+                _raw_price_chg = (today_data or {}).get("price_chg_pct")
+                today_price = float(_raw_price_chg) if _raw_price_chg is not None else 0.0
             # Combined = near + next month OI change. Genuine rollover shows
             # up as OI leaving near-month and arriving in next-month in
             # roughly equal size, so it largely cancels out here -- what's
