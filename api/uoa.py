@@ -8,8 +8,18 @@ from services.strike_zones import build_strike_index_map, strikes_away, in_zone
 _signal_history: dict = {}
 
 # ── Result cache — UOA is expensive, cache for 4 mins during market ──────────
-_uoa_cache: dict = {}
-_uoa_cache_time: float = 0
+# BUG FIX (Oct 18 2026): this used to be a single global (_uoa_cache,
+# _uoa_cache_time) shared across every `date`/`strike_zone` combination --
+# so the first request of the day (e.g. one with no `date` param, defaulting
+# to "today", on a weekend/holiday with zero rows -- which then fell through
+# to the no-date-filter global fallback and anchored on a timestamp from
+# MONTHS ago) got cached and silently served to every subsequent request for
+# up to 10 minutes, including ones explicitly asking for a real trading
+# day's date that genuinely has data. Confirmed live: date=2026-10-16
+# (a real trading day with 40k+ NIFTY rows) was returning 0 signals anchored
+# on a June 8 2026 timestamp, purely because an earlier dateless request had
+# poisoned the shared cache first. Now keyed per resolved date.
+_uoa_cache_by_date: dict = {}
 UOA_CACHE_TTL = 240  # 4 minutes
 
 # BUG FIX (Aug 26 2026): was a hardcoded, independently-maintained copy
@@ -47,7 +57,9 @@ def is_post_market() -> bool:
     return total > MARKET_CLOSE_UTC
 
 def get_uoa(date: str = None, strike_zone: str = "all"):
-    global _uoa_cache, _uoa_cache_time
+    global _uoa_cache_by_date
+
+    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
 
     # ── Cache check — skip expensive recompute if fresh ──────────────────────
     # NOTE (Oct 11 2026): the cache stores the FULL, unsliced signal list
@@ -56,12 +68,12 @@ def get_uoa(date: str = None, strike_zone: str = "all"):
     # not, so switching the strike-zone selector never forces a recompute of
     # the expensive DB scan, just a cheap in-memory filter of what's cached.
     cache_ttl = UOA_CACHE_TTL if is_market_hours() else 600
-    if _uoa_cache and (time_module.time() - _uoa_cache_time) < cache_ttl:
-        print(f"[UOA] Returning cached base ({int(time_module.time() - _uoa_cache_time)}s old)")
-        return _finalize_uoa_result(_uoa_cache, strike_zone)
+    cached_entry = _uoa_cache_by_date.get(today)
+    if cached_entry and (time_module.time() - cached_entry["time"]) < cache_ttl:
+        print(f"[UOA] Returning cached base for {today} ({int(time_module.time() - cached_entry['time'])}s old)")
+        return _finalize_uoa_result(cached_entry["result"], strike_zone)
 
     supabase = get_supabase()
-    today = date or datetime.now(timezone.utc).strftime('%Y-%m-%d')
     live = is_market_hours()
     post_market = is_post_market()
 
@@ -501,8 +513,12 @@ def get_uoa(date: str = None, strike_zone: str = "all"):
     }
 
     # Cache the unfiltered base — strike_zone filtering never invalidates this
-    _uoa_cache = base_result
-    _uoa_cache_time = time_module.time()
+    _uoa_cache_by_date[today] = {"result": base_result, "time": time_module.time()}
+    # Keep the cache from growing unbounded across every date ever queried --
+    # a handful of recent entries is plenty.
+    if len(_uoa_cache_by_date) > 10:
+        oldest_key = min(_uoa_cache_by_date, key=lambda k: _uoa_cache_by_date[k]["time"])
+        del _uoa_cache_by_date[oldest_key]
     print(f"[UOA] Computed fresh — {len(uoa_signals)} signals, cached for {cache_ttl}s")
     return _finalize_uoa_result(base_result, strike_zone)
 
