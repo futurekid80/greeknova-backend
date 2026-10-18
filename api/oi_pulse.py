@@ -553,9 +553,23 @@ def get_oi_pulse():
     global _pulse_cache, _pulse_cache_time
     supabase = get_supabase()
 
-    # Post-market: serve clean EOD numbers from daily_oi_summary
+    # BUG FIX (Oct 18 2026): the post-market branch used to call
+    # _get_eod_pulse() unconditionally, skipping the cache check below
+    # entirely -- so outside market hours (i.e. most of the day, every
+    # evening and all weekend) EVERY request redid the full EOD computation
+    # (4 sequential Supabase round-trips) from scratch, measured at ~3.5s on
+    # the live site, the single biggest contributor to the homepage feeling
+    # slow. EOD numbers don't change at all until the next session opens,
+    # so they deserve an even longer cache than the 15s intraday one, not a
+    # bypass of caching altogether.
+    EOD_CACHE_TTL = 300
     if not is_market_hours():
-        return _get_eod_pulse(supabase)
+        if _pulse_cache and _pulse_cache.get("is_eod") and (time_module.time() - _pulse_cache_time) < EOD_CACHE_TTL:
+            return _pulse_cache
+        with _pulse_lock:
+            if _pulse_cache and _pulse_cache.get("is_eod") and (time_module.time() - _pulse_cache_time) < EOD_CACHE_TTL:
+                return _pulse_cache
+            return _get_eod_pulse(supabase)
 
     # During market: use in-memory cache (15s TTL)
     if _pulse_cache and (time_module.time() - _pulse_cache_time) < 15:
