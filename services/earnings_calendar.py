@@ -123,27 +123,37 @@ def save_records(records, source: str):
         return 0
     sb = get_supabase()
     now = datetime.utcnow().isoformat() + "Z"
-    # Oct 19 2026 fix: NSE's board-meetings feed can list the same
-    # (symbol, result_date) pair more than once in one pull -- e.g. an
-    # original results notice plus a later correction/revision, both
-    # containing "result" in their purpose text. A single upsert
-    # statement can't apply ON CONFLICT DO UPDATE to the same row twice,
-    # so Postgres rejected the whole 500-row batch with "ON CONFLICT DO
-    # UPDATE command cannot affect row a second time" -- which silently
-    # failed the nightly refresh job every run since Oct 17 (confirmed in
-    # logs), leaving stocks added/revised since then (confirmed missing:
-    # SBICARD, SWIGGY) with no results row at all, and the whole table
-    # stuck on Oct 6 data. Dedupe by (symbol, result_date) first, keeping
-    # the last occurrence so a correction/revision wins over the original.
+    # Oct 19 2026 fix (round 2): the in-batch python dedupe below still
+    # isn't enough on its own -- confirmed live that a batched upsert of
+    # (symbol, result_date)-deduped rows can still hit Postgres's "ON
+    # CONFLICT DO UPDATE command cannot affect row a second time" (code
+    # 21000), most likely from a symbol variant that is byte-distinct in
+    # python (e.g. a stray space NSE sometimes includes) but collides
+    # with another row under the DB's actual comparison, which a python
+    # dict keyed on the raw string can't catch. A batched upsert has no
+    # way to skip just the offending pair -- postgres rejects the WHOLE
+    # chunk, which is exactly what silently failed the nightly refresh
+    # every run since Oct 17 (confirmed in logs; table stuck on Oct 6
+    # data, SBICARD/SWIGGY missing entirely). Upsert one row at a time
+    # instead: slower, but one bad row can now only drop that one row
+    # instead of taking out the whole run, and we log exactly which
+    # symbol/date it was instead of guessing from a generic 500.
     dedup = {}
     for s, d, p in records:
         dedup[(s, d.isoformat())] = p
-    rows = [{"symbol": s, "result_date": d, "purpose": p, "source": source, "updated_at": now}
-            for (s, d), p in dedup.items()]
-    for i in range(0, len(rows), 500):
-        sb.from_("earnings_calendar").upsert(rows[i:i + 500], on_conflict="symbol,result_date").execute()
+    saved = 0
+    failed = []
+    for (s, d), p in dedup.items():
+        row = {"symbol": s, "result_date": d, "purpose": p, "source": source, "updated_at": now}
+        try:
+            sb.from_("earnings_calendar").upsert(row, on_conflict="symbol,result_date").execute()
+            saved += 1
+        except Exception as e:
+            failed.append((s, d, f"{type(e).__name__}: {e}"))
+    if failed:
+        print(f"[earnings] save_records: {len(failed)} row(s) failed: {failed[:20]}")
     _cache["at"] = 0.0
-    return len(rows)
+    return saved
 
 
 def refresh_from_nse():
