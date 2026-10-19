@@ -123,8 +123,23 @@ def save_records(records, source: str):
         return 0
     sb = get_supabase()
     now = datetime.utcnow().isoformat() + "Z"
-    rows = [{"symbol": s, "result_date": d.isoformat(), "purpose": p, "source": source, "updated_at": now}
-            for s, d, p in records]
+    # Oct 19 2026 fix: NSE's board-meetings feed can list the same
+    # (symbol, result_date) pair more than once in one pull -- e.g. an
+    # original results notice plus a later correction/revision, both
+    # containing "result" in their purpose text. A single upsert
+    # statement can't apply ON CONFLICT DO UPDATE to the same row twice,
+    # so Postgres rejected the whole 500-row batch with "ON CONFLICT DO
+    # UPDATE command cannot affect row a second time" -- which silently
+    # failed the nightly refresh job every run since Oct 17 (confirmed in
+    # logs), leaving stocks added/revised since then (confirmed missing:
+    # SBICARD, SWIGGY) with no results row at all, and the whole table
+    # stuck on Oct 6 data. Dedupe by (symbol, result_date) first, keeping
+    # the last occurrence so a correction/revision wins over the original.
+    dedup = {}
+    for s, d, p in records:
+        dedup[(s, d.isoformat())] = p
+    rows = [{"symbol": s, "result_date": d, "purpose": p, "source": source, "updated_at": now}
+            for (s, d), p in dedup.items()]
     for i in range(0, len(rows), 500):
         sb.from_("earnings_calendar").upsert(rows[i:i + 500], on_conflict="symbol,result_date").execute()
     _cache["at"] = 0.0
