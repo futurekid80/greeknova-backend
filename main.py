@@ -2174,13 +2174,26 @@ def auth_kite_login(body: KiteLoginRequest):
         # etc.) rather than finding out only when they complain.
         try:
             from services.alert_engine import send_telegram
+            # Oct 19 2026 fix: Telegram's "Markdown" parse_mode treats _ * ` [
+            # as formatting characters -- a kite_user_name or kite_email with
+            # an underscore (very common in real emails, e.g. john_doe@...)
+            # left an odd/invalid entity and Telegram silently rejected the
+            # whole message (400, "can't parse entities"), so this ping never
+            # actually arrived even though the code ran with no exception
+            # until the send() call itself. Escape the few Markdown special
+            # characters in every dynamic value before building the message.
+            def _escape_md(s):
+                s = str(s or '-')
+                for ch in ('_', '*', '`', '['):
+                    s = s.replace(ch, '\\' + ch)
+                return s
             send_telegram(
                 f"\U0001F514 GreekNova: unrecognized Zerodha login\n"
-                f"Name: {kite_user_name or '-'}\n"
-                f"Kite email: {kite_email}\n"
-                f"Client ID: {kite_user_id}\n"
+                f"Name: {_escape_md(kite_user_name)}\n"
+                f"Kite email: {_escape_md(kite_email)}\n"
+                f"Client ID: {_escape_md(kite_user_id)}\n"
                 f"Started on a 7-day trial. If this is a paid customer, "
-                f"add their Client ID to beta_users.kite_client_id to upgrade them."
+                f"add their Client ID to their beta_users row to upgrade them."
             )
         except Exception as e:
             print(f"[KiteLogin] telegram notify skipped: {e}")
