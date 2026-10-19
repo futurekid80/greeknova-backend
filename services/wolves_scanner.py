@@ -772,7 +772,14 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
                     "wolf_tier": WOLF_TIER[tf_name],
                     "trigger_timeframe": tf_name,
                     "close": round(h["close"], 2) if not pd.isna(h["close"]) else None,
-                    "adx": d["adx"],
+                    # Oct 19 2026 fix: every sibling field here is rounded
+                    # before storage (close, hourly_rsi, di_gap,
+                    # bb_width_pct) but this one wasn't -- the Wolves table
+                    # was showing full-precision floats like
+                    # 26.174705102824085 for Scout Wolf (Hourly) rows while
+                    # Apex/Alpha rows happened to look clean. Match the
+                    # others.
+                    "adx": round(d["adx"], 2) if d.get("adx") is not None and not pd.isna(d["adx"]) else None,
                     "hourly_rsi": round(h["rsi"], 2) if not pd.isna(h["rsi"]) else None,
                     "di_gap": round(h["di_gap"], 2) if not pd.isna(h["di_gap"]) else None,
                     "bb_width_pct": round(h["bb_width_pct"] * 100, 1) if not pd.isna(h["bb_width_pct"]) else None,
