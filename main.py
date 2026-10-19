@@ -2127,20 +2127,63 @@ def auth_kite_login(body: KiteLoginRequest):
     #     last-seen/login_count. Their expiry is set once at trial start and
     #     never resets on a later login (so a trial can't be "renewed" by
     #     simply logging out and back in).
+    # Oct 19 2026 fix: a paid member's Zerodha-registered email very often
+    # does not match the email they actually paid with (KYC email vs. the
+    # one on their payment/WhatsApp) -- matching on email alone silently
+    # dropped real paying customers into a 7-day trial instead of their
+    # paid access. kite_user_id (the Zerodha Client ID, e.g. "WLY524") is
+    # immutable and exact, so beta_users now also carries an optional
+    # kite_client_id column Manish fills in by hand as he collects IDs from
+    # customers. A client-ID match counts as "permanent member" just like
+    # an email match -- the only extra step is recording which live Kite
+    # email resolved to that row (linked_kite_email, NOT the primary-key
+    # email column, which stays the original payment identity) so every
+    # later page load's access_gate.py membership check -- which only has
+    # the Kite email to go on, not the client ID -- also recognizes them.
+    beta_row = None
     try:
-        is_member = bool(
-            admin.from_("beta_users").select("email").eq("email", kite_email).execute().data
-        )
+        by_email = admin.from_("beta_users").select("email,kite_client_id").eq("email", kite_email).execute().data
+        if by_email:
+            beta_row = by_email[0]
+        else:
+            by_client_id = admin.from_("beta_users").select("email,kite_client_id") \
+                .ilike("kite_client_id", kite_user_id).limit(1).execute().data
+            if by_client_id:
+                beta_row = by_client_id[0]
     except Exception as e:
         print(f"[KiteLogin] beta_users lookup warning: {e}")
-        is_member = False
+    is_member = bool(beta_row)
 
     if is_member:
         try:
-            admin.from_("beta_users").upsert({"email": kite_email, "name": kite_user_name or kite_email}).execute()
+            if beta_row["email"] == kite_email:
+                admin.from_("beta_users").upsert({"email": kite_email, "name": kite_user_name or kite_email}).execute()
+            else:
+                # Matched by client ID on a row whose primary-key email is
+                # still their original payment email -- link this Kite
+                # email to that row instead of touching the primary key.
+                admin.from_("beta_users").update({"linked_kite_email": kite_email}).eq("email", beta_row["email"]).execute()
+                print(f"[KiteLogin] linked {kite_email} (client {kite_user_id}) to paid row {beta_row['email']}")
         except Exception as e:
-            print(f"[KiteLogin] beta_users upsert warning: {e}")
+            print(f"[KiteLogin] beta_users upsert/link warning: {e}")
     else:
+        # Oct 19 2026: nobody's ever blocked here -- the trial below still
+        # starts normally -- but ping Manish so he can check whether this
+        # is actually a paid customer logging in with an email/Client ID he
+        # doesn't recognize yet (a spreadsheet typo, an unregistered ID,
+        # etc.) rather than finding out only when they complain.
+        try:
+            from services.alert_engine import send_telegram
+            send_telegram(
+                f"\U0001F514 GreekNova: unrecognized Zerodha login\n"
+                f"Name: {kite_user_name or '-'}\n"
+                f"Kite email: {kite_email}\n"
+                f"Client ID: {kite_user_id}\n"
+                f"Started on a 7-day trial. If this is a paid customer, "
+                f"add their Client ID to beta_users.kite_client_id to upgrade them."
+            )
+        except Exception as e:
+            print(f"[KiteLogin] telegram notify skipped: {e}")
         try:
             existing_trial = (
                 admin.from_("trial_users").select("email,login_count").eq("email", kite_email).execute().data

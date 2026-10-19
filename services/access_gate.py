@@ -118,8 +118,24 @@ def _classify(path: str) -> str:
 
 def _load_members():
     from utils.db import get_supabase
-    res = get_supabase().from_("beta_users").select("email").execute()
-    return {(r.get("email") or "").strip().lower() for r in (res.data or [])}
+    # Oct 19 2026: a member matched at login by Kite Client ID (not email --
+    # see /auth/kite-login in main.py) gets their live Kite email recorded
+    # in linked_kite_email, leaving the primary-key email column as their
+    # original payment identity. Every gated request after login only has
+    # the Kite email to check (that's what the Supabase session carries),
+    # so the member set here must include linked_kite_email values too, or
+    # someone correctly granted permanent access at login would still get
+    # bounced as "not a member" on their very next page load.
+    res = get_supabase().from_("beta_users").select("email,linked_kite_email").execute()
+    emails = set()
+    for r in (res.data or []):
+        e = (r.get("email") or "").strip().lower()
+        if e:
+            emails.add(e)
+        le = (r.get("linked_kite_email") or "").strip().lower()
+        if le:
+            emails.add(le)
+    return emails
 
 
 def _load_trials():
