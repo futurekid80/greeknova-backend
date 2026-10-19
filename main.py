@@ -2147,7 +2147,7 @@ def auth_kite_login(body: KiteLoginRequest):
             beta_row = by_email[0]
         else:
             by_client_id = admin.from_("beta_users").select("email,kite_client_id") \
-                .ilike("kite_client_id", kite_user_id).limit(1).execute().data
+                .ilike("kite_client_id", (kite_user_id or "").strip()).limit(1).execute().data
             if by_client_id:
                 beta_row = by_client_id[0]
     except Exception as e:
