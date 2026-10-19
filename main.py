@@ -3825,8 +3825,17 @@ async def push_preferences_post(request: Request):
     vol_threshold = body.get("vol_threshold")
     strike_zone = body.get("strike_zone")
     if not endpoint:
-        return {"error": "endpoint required"}
-    return save_preferences(get_supabase(), endpoint, enabled_signals, spike_threshold, vol_threshold, strike_zone)
+        return JSONResponse({"error": "endpoint required"}, status_code=400)
+    result = save_preferences(get_supabase(), endpoint, enabled_signals, spike_threshold, vol_threshold, strike_zone)
+    # Oct 19 2026 fix: this used to return {"error": ...} with a plain 200
+    # on a Supabase failure, which looks like success to fetch() (it only
+    # throws on a network error, never on a 200 with an error body) --
+    # the frontend's toggle would show "muted" while the DB row never
+    # actually changed and kept sending real pushes. A real error status
+    # lets the caller (usePushPreferences.toggleSignal) tell the two apart.
+    if "error" in result:
+        return JSONResponse(result, status_code=500)
+    return result
 
 @app.get("/premarket-brief")
 def premarket_brief():
