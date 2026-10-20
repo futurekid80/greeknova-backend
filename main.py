@@ -1998,6 +1998,18 @@ DEMO_LOGIN_EMAIL = "demo@greeknova.com"
 
 @app.post("/auth/demo-login")
 def auth_demo_login(body: DemoLoginRequest):
+    # Oct 20 2026: retired per Manish's explicit call -- Zerodha's multi-user
+    # access is live now (approved Oct 19), so the whole reason this shared
+    # email+code backdoor existed (letting preview users in before everyone
+    # could do a real Zerodha OAuth login) is gone. Zerodha's own stated
+    # requirement is "no Zerodha login, no data, any domain" -- this was the
+    # one path left that got a real Supabase session (and therefore real
+    # market data) without ever touching Zerodha, since an email with no
+    # kite_login_log row skips the daily-freshness check entirely (see
+    # access_gate.py's _kite_session_stale). Left the route + body model in
+    # place (unreachable past this line) rather than deleting the block, so
+    # it's trivial to see what this used to do or revert if ever needed.
+    raise HTTPException(status_code=410, detail="Demo login has been retired. Please log in with Zerodha.")
     expected = os.getenv("DEMO_LOGIN_CODE", "123456")
     if body.code.strip() != expected:
         raise HTTPException(status_code=401, detail="Invalid code")
