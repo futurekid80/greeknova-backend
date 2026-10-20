@@ -931,42 +931,89 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
     }
 
 
+def _latest_scan_date(supabase, table: str) -> str | None:
+    """Oct 20 2026: shared helper so every Wolves read falls back to the
+    last trading day with data instead of showing an empty scanner whenever
+    today has no rows yet (pre-market, post-market, weekend/holiday) --
+    same pattern already used by CPR (api/cpr.py)."""
+    res = supabase.from_(table) \
+        .select("scan_date") \
+        .order("scan_date", desc=True) \
+        .limit(1) \
+        .execute()
+    return res.data[0]["scan_date"] if res.data else None
+
+
 def get_todays_wolves() -> dict:
-    """Read-only -- today's Wolves log. Cheap Supabase read, no Kite calls."""
+    """Read-only -- today's Wolves log, falling back to the last trading
+    day with data if today has none yet. Cheap Supabase read, no Kite
+    calls."""
     supabase = get_supabase()
     today_ist = datetime.now(IST).date().isoformat()
+    query_date = today_ist
     rows = supabase.from_("wolves_signal_log") \
         .select("*") \
-        .eq("scan_date", today_ist) \
+        .eq("scan_date", query_date) \
         .order("scan_time", desc=True) \
         .execute().data or []
-    return {"date": today_ist, "wolves": rows}
+    if not rows:
+        fallback_date = _latest_scan_date(supabase, "wolves_signal_log")
+        if fallback_date and fallback_date != query_date:
+            query_date = fallback_date
+            rows = supabase.from_("wolves_signal_log") \
+                .select("*") \
+                .eq("scan_date", query_date) \
+                .order("scan_time", desc=True) \
+                .execute().data or []
+    return {"date": query_date, "is_fallback": query_date != today_ist, "wolves": rows}
 
 
 def get_todays_fresh_events() -> dict:
     """Read-only -- today's standalone Fresh Events (ADX Cross, RSI Cross,
     BB Breakout/Breakdown/Compression, ADX Full Alignment,
     Grandfather-Father-Son), separate from the full Wolves confluence log
-    above. Cheap Supabase read, no Kite calls."""
+    above, falling back to the last trading day with data if today has
+    none yet. Cheap Supabase read, no Kite calls."""
     supabase = get_supabase()
     today_ist = datetime.now(IST).date().isoformat()
+    query_date = today_ist
     rows = supabase.from_("wolves_fresh_events") \
         .select("*") \
-        .eq("scan_date", today_ist) \
+        .eq("scan_date", query_date) \
         .order("scan_time", desc=True) \
         .execute().data or []
-    return {"date": today_ist, "events": rows}
+    if not rows:
+        fallback_date = _latest_scan_date(supabase, "wolves_fresh_events")
+        if fallback_date and fallback_date != query_date:
+            query_date = fallback_date
+            rows = supabase.from_("wolves_fresh_events") \
+                .select("*") \
+                .eq("scan_date", query_date) \
+                .order("scan_time", desc=True) \
+                .execute().data or []
+    return {"date": query_date, "is_fallback": query_date != today_ist, "events": rows}
 
 
 def get_todays_watchlist() -> dict:
     """Read-only -- today's Decision Watchlist (Rank/Confidence/Decision
-    Score/Sector Tailwind per symbol+direction). Cheap Supabase read, no
+    Score/Sector Tailwind per symbol+direction), falling back to the last
+    trading day with data if today has none yet. Cheap Supabase read, no
     Kite calls."""
     supabase = get_supabase()
     today_ist = datetime.now(IST).date().isoformat()
+    query_date = today_ist
     rows = supabase.from_("wolves_watchlist") \
         .select("*") \
-        .eq("scan_date", today_ist) \
+        .eq("scan_date", query_date) \
         .order("decision_score", desc=True) \
         .execute().data or []
-    return {"date": today_ist, "watchlist": rows}
+    if not rows:
+        fallback_date = _latest_scan_date(supabase, "wolves_watchlist")
+        if fallback_date and fallback_date != query_date:
+            query_date = fallback_date
+            rows = supabase.from_("wolves_watchlist") \
+                .select("*") \
+                .eq("scan_date", query_date) \
+                .order("decision_score", desc=True) \
+                .execute().data or []
+    return {"date": query_date, "is_fallback": query_date != today_ist, "watchlist": rows}
