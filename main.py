@@ -2250,20 +2250,16 @@ def auth_kite_login(body: KiteLoginRequest):
             except Exception as e:
                 print(f"[KiteLogin] trial_users insert warning: {e}")
 
-    # Best-effort: remember this access token against the user's email so
-    # their own positions/holdings/quotes can be pulled later via the same
-    # app credentials. Table may not exist in every environment yet --
-    # never block login on this.
-    try:
-        admin.from_("kite_identities").upsert({
-            "email": kite_email,
-            "kite_user_id": kite_user_id,
-            "kite_user_name": kite_user_name,
-            "access_token": access_token,
-            "last_login_at": "now()",
-        }, on_conflict="email").execute()
-    except Exception as e:
-        print(f"[KiteLogin] kite_identities upsert skipped: {e}")
+    # Oct 20 2026: the kite_identities access_token storage below was
+    # removed per Manish's explicit call -- it was written on every login
+    # for a "pull the user's own positions/holdings later" feature that was
+    # never built, and grep across the whole backend confirmed nothing
+    # reads it. Keeping an unused per-user access token around is a real
+    # liability with no offsetting benefit (an access_token is a live
+    # credential for that person's own Zerodha account), so it's cut
+    # rather than left as a loose end for any future audit. If a feature
+    # like this is ever actually built, add the storage back deliberately
+    # at that point, scoped to only what it needs.
 
     # Oct 14 2026: Zerodha was explicit that without a Zerodha login a user
     # shouldn't see data at all, including someone who logged in earlier and
