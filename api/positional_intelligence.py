@@ -9,12 +9,22 @@ Unified scanner combining:
 Single source of truth: daily_oi_summary.fut_signal (FUT open→close classification)
 """
 import time as time_module
+import threading
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 
 _cache: dict = {}
 _cache_time: float = 0.0
 _CACHE_TTL = 300  # 5 min during market, 3600 post-market
+_compute_lock = threading.Lock()
+
+
+def _current_ttl():
+    import pytz
+    ist = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.now(ist)
+    is_market = now_ist.weekday() < 5 and (9 * 60 + 15) <= (now_ist.hour * 60 + now_ist.minute) <= (15 * 60 + 40)
+    return 300 if is_market else 3600
 
 
 def _get_expiry_and_series(today):
@@ -51,6 +61,29 @@ def clear_positional_intelligence_cache():
 
 
 def get_positional_intelligence(min_consec: int = 0):
+    """Oct 21 2026 PERF FIX (launch-day incident): the real computation
+    below (_get_positional_intelligence_uncached) is expensive and was
+    being called with no lock, so once real concurrent launch traffic
+    showed up, several requests landing right as the 5-min cache
+    expired would all trigger a full recompute in parallel ("thundering
+    herd"), fighting each other for DB connections -- traced via
+    repeated 15-30s p90/p95/p99 latency spikes on launch day. Now only
+    the first caller past an expired cache actually recomputes; anyone
+    else queued behind the lock gets served the result that call just
+    cached, instead of starting its own redundant recompute."""
+    cache_key = str(min_consec)
+    ttl = _current_ttl()
+    cached = _cache.get(cache_key)
+    if cached and (time_module.time() - _cache_time) < ttl:
+        return cached
+    with _compute_lock:
+        cached = _cache.get(cache_key)
+        if cached and (time_module.time() - _cache_time) < ttl:
+            return cached
+        return _get_positional_intelligence_uncached(min_consec)
+
+
+def _get_positional_intelligence_uncached(min_consec: int = 0):
     global _cache, _cache_time
 
     import pytz
