@@ -3646,7 +3646,24 @@ def public_landing_highlights(response: Response):
       production traffic) is completely untouched
     - Framed with plain-language, SEBI-safe wording baked into the
       response itself, not left to whoever consumes it to get right
+
+    PERF FIX (Oct 21 2026, launch-day incident): this ran 4 full
+    whole-universe scans (volume breakout, first-hour breakout, weekly
+    OI buildup, fresh-build winners) from scratch on every single call,
+    completely uncached and unauthenticated -- once get.greeknova.com
+    started getting real traffic from the trial/launch push, concurrent
+    visitors hammering this one public route stacked up DB connections
+    and dragged down latency platform-wide (traced via Railway's HTTP
+    metrics: one call measured 80+ seconds). Added the same
+    function-attribute TTL cache already used by /index-data -- 2 min is
+    safe since underlying data only refreshes every 5 min anyway.
     """
+    import time
+    cache = getattr(public_landing_highlights, '_cache', None)
+    cache_time = getattr(public_landing_highlights, '_cache_time', 0)
+    if cache and (time.time() - cache_time) < 120:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return cache
     response.headers["Access-Control-Allow-Origin"] = "*"
     try:
         from datetime import datetime
@@ -3750,6 +3767,9 @@ def public_landing_highlights(response: Response):
             "generated_at": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
             "disclaimer": "For informational and educational purposes only. Not SEBI registered. Not investment advice. This is a curated selection of positive outcomes for illustration, not an exhaustive or representative sample of all signals, and does not reflect overall win rate. Past signals do not guarantee future results.",
         }
+        public_landing_highlights._cache = result
+        public_landing_highlights._cache_time = time.time()
+        return result
     except Exception as e:
         return {"highlights": [], "count": 0, "error": str(e)}
 
@@ -3760,7 +3780,18 @@ def public_live_signals(response: Response):
     Blends the real signal categories from Positional Intelligence
     (STEALTH, LONG_BUILDUP, SHORT_BUILDUP, SHORT_COVERING,
     LONG_UNWINDING) into one ranked list. Uses the genuine vocabulary
-    already used throughout the app, not placeholder tag names."""
+    already used throughout the app, not placeholder tag names.
+
+    PERF FIX (Oct 21 2026): same launch-day incident as
+    /public/landing-highlights -- added the same 2-min TTL cache so
+    concurrent landing-page visitors don't each trigger a fresh
+    get_positional_intelligence() scan."""
+    import time
+    cache = getattr(public_live_signals, '_cache', None)
+    cache_time = getattr(public_live_signals, '_cache_time', 0)
+    if cache and (time.time() - cache_time) < 120:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return cache
     response.headers["Access-Control-Allow-Origin"] = "*"
     try:
         from api.positional_intelligence import get_positional_intelligence
@@ -3790,7 +3821,10 @@ def public_live_signals(response: Response):
                 seen.add(r["symbol"])
                 deduped.append(r)
 
-        return {"signals": deduped[:8], "count": len(deduped[:8])}
+        result = {"signals": deduped[:8], "count": len(deduped[:8])}
+        public_live_signals._cache = result
+        public_live_signals._cache_time = time.time()
+        return result
     except Exception as e:
         return {"signals": [], "count": 0, "error": str(e)}
 
@@ -3799,7 +3833,16 @@ def public_stealth_featured(response: Response):
     """Public, single best current Stealth Buildup detection for the
     landing page's flagship-feature visual -- Aug 10 2026. Returns the
     highest-tier, most-established one (ELITE beats STRONG beats WATCH,
-    more sessions beats fewer) with its real oi_history for the curve."""
+    more sessions beats fewer) with its real oi_history for the curve.
+
+    PERF FIX (Oct 21 2026): same launch-day incident -- added the same
+    2-min TTL cache."""
+    import time
+    cache = getattr(public_stealth_featured, '_cache', None)
+    cache_time = getattr(public_stealth_featured, '_cache_time', 0)
+    if cache and (time.time() - cache_time) < 120:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        return cache
     response.headers["Access-Control-Allow-Origin"] = "*"
     try:
         from api.positional_intelligence import get_positional_intelligence
@@ -3811,7 +3854,7 @@ def public_stealth_featured(response: Response):
         _tier_rank = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
         best = min(stealth, key=lambda s: (_tier_rank.get(s.get("tier"), 3), -len(s.get("oi_history") or [])))
 
-        return {
+        result = {
             "featured": {
                 "symbol": best["symbol"],
                 "cmp": best["cmp"],
@@ -3823,6 +3866,9 @@ def public_stealth_featured(response: Response):
                 "sessions": len(best.get("oi_history") or []),
             }
         }
+        public_stealth_featured._cache = result
+        public_stealth_featured._cache_time = time.time()
+        return result
     except Exception as e:
         return {"featured": None, "error": str(e)}
 
