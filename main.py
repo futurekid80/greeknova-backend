@@ -2307,6 +2307,41 @@ def auth_kite_login(body: KiteLoginRequest):
     return {"email": kite_email, "token_hash": token_hash}
 
 
+@app.get("/me/trial-status")
+def me_trial_status(request: Request):
+    """Oct 22 2026: lets the frontend show a trial member their own
+    countdown ("Trial: N days left, expires Oct 29") instead of them finding
+    out only when the gate (access_gate.py) starts 403ing every request on
+    expiry day. Reuses the gate's own token verification and access-status
+    classification so this never disagrees with what actually gates access.
+    Members and signed-out visitors just get a bare status back -- nothing
+    to show them, the frontend only renders a badge for trial_active."""
+    from services.access_gate import _verify_token, _access_status
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Sign in required")
+    email, err = _verify_token(token)
+    if err or not email:
+        raise HTTPException(status_code=401, detail="Sign in required")
+
+    status = _access_status(email)
+    result = {"status": status, "trial_expires_date": None, "days_left": None}
+    if status in ("trial_active", "trial_expired"):
+        from utils.db import get_supabase
+        row = get_supabase().from_("trial_users")\
+            .select("trial_expires_date")\
+            .eq("email", email).limit(1).execute()
+        if row.data:
+            exp = row.data[0]["trial_expires_date"]
+            result["trial_expires_date"] = exp
+            if status == "trial_active":
+                from utils.market_calendar import today_ist
+                from datetime import date
+                result["days_left"] = (date.fromisoformat(exp) - today_ist()).days
+    return result
+
+
 @app.get("/chart-data/{symbol}")
 def chart_data(symbol: str, interval: str = "day", range: str = "6m"):
     from api.chart_data import get_chart_data
