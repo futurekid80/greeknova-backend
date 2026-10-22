@@ -3761,7 +3761,13 @@ def public_landing_highlights(response: Response):
         highlights = [h for h in highlights if h["move_since_signal_pct"] > 0]
         highlights.sort(key=lambda h: -h["move_since_signal_pct"])
 
-        return {
+        # Oct 22 2026 fix: the cache-store lines below used to sit AFTER
+        # this return, making them unreachable dead code -- the cache was
+        # never actually being populated, so every single call recomputed
+        # all 4 full-universe scans from scratch regardless of the 120s
+        # TTL check at the top. Confirmed live: every call was taking
+        # ~48s. Now builds the dict first, caches it, then returns it.
+        result = {
             "highlights": highlights[:6],
             "count": len(highlights[:6]),
             "generated_at": datetime.now(pytz.timezone("Asia/Kolkata")).isoformat(),
