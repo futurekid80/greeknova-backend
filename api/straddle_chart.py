@@ -18,6 +18,94 @@ can override it via the `strike` param once they see the available list.
 from datetime import datetime, timezone, timedelta, date as date_type
 
 
+def _build_points(strike_rows):
+    """Same CE/PE-pairing logic used for the primary strike, factored out
+    so the ATM+-1 comparison strikes (Oct 22 2026) can reuse it without a
+    second DB round-trip -- they're sliced from the same exp_rows fetch."""
+    by_ts: dict = {}
+    for r in strike_rows:
+        ts = r["timestamp"]
+        if ts not in by_ts:
+            by_ts[ts] = {}
+        by_ts[ts][r["option_type"]] = float(r.get("last_price") or 0)
+
+    points = []
+    for ts in sorted(by_ts.keys()):
+        row = by_ts[ts]
+        ce = row.get("CE")
+        pe = row.get("PE")
+        if ce is None or pe is None:
+            continue
+        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
+        points.append({
+            "time":     int(dt.timestamp()),
+            "ce":       round(ce, 2),
+            "pe":       round(pe, 2),
+            "combined": round(ce + pe, 2),
+        })
+    return points
+
+
+def _compute_fut_vwap(supabase, symbol: str, date: str):
+    """Oct 22 2026: intraday NIFTY/BANKNIFTY/etc FUTURES VWAP, built purely
+    from the FUT rows the live capture job already writes into oi_snapshots
+    every ~15s poll (kite.quote(), same mechanism as every other live
+    feature) -- never kite.historical_data(), so this doesn't touch the
+    Historical Data permission the production app lacks, and it isn't the
+    raw index either (an index carries no real traded volume to weight by;
+    futures volume is the standard stand-in).
+
+    Kite's quote() "volume" is the day's CUMULATIVE traded volume as of
+    that poll, not a per-interval figure, so each step's volume contribution
+    is the delta from the previous poll. The first poll's whole volume is
+    used as its own delta (we don't know what traded before our first
+    capture) -- a minor first-bucket approximation, not a correctness bug.
+    """
+    try:
+        r = supabase.from_("oi_snapshots")\
+            .select("timestamp, last_price, volume")\
+            .eq("symbol", symbol)\
+            .eq("option_type", "FUT")\
+            .gte("timestamp", f"{date}T00:00:00+00:00")\
+            .lt("timestamp",  f"{date}T23:59:59+00:00")\
+            .order("timestamp", desc=False)\
+            .execute()
+    except Exception:
+        return None
+
+    rows = r.data or []
+    if not rows:
+        return None
+
+    vwap_points = []
+    cum_pv = 0.0
+    cum_vol = 0.0
+    prev_vol = None
+    for row in rows:
+        price = float(row.get("last_price") or 0)
+        vol = float(row.get("volume") or 0)
+        if price <= 0:
+            continue
+        delta = vol if prev_vol is None else max(0.0, vol - prev_vol)
+        prev_vol = vol
+        cum_pv += price * delta
+        cum_vol += delta
+        vwap = (cum_pv / cum_vol) if cum_vol > 0 else price
+        dt = datetime.fromisoformat(row["timestamp"].replace('Z', '+00:00'))
+        vwap_points.append({"time": int(dt.timestamp()), "price": round(price, 2), "vwap": round(vwap, 2)})
+
+    if not vwap_points:
+        return None
+
+    latest = vwap_points[-1]
+    return {
+        "points":       vwap_points,
+        "latest_price": latest["price"],
+        "latest_vwap":  latest["vwap"],
+        "above_vwap":   latest["price"] >= latest["vwap"],
+    }
+
+
 def get_straddle_chart(symbol: str = "NIFTY", strike: float = None, expiry: str = None, date: str = None):
     from utils.db import get_supabase
     supabase = get_supabase()
@@ -103,28 +191,38 @@ def get_straddle_chart(symbol: str = "NIFTY", strike: float = None, expiry: str 
         active_strike = min(available_strikes, key=lambda s: abs(s - float(active_strike)))
 
     strike_rows = [r for r in exp_rows if float(r["strike"]) == active_strike]
+    points = _build_points(strike_rows)
 
-    by_ts: dict = {}
-    for r in strike_rows:
-        ts = r["timestamp"]
-        if ts not in by_ts:
-            by_ts[ts] = {}
-        by_ts[ts][r["option_type"]] = float(r.get("last_price") or 0)
-
-    points = []
-    for ts in sorted(by_ts.keys()):
-        row = by_ts[ts]
-        ce = row.get("CE")
-        pe = row.get("PE")
-        if ce is None or pe is None:
-            continue
-        dt = datetime.fromisoformat(ts.replace('Z', '+00:00'))
-        points.append({
-            "time":     int(dt.timestamp()),
-            "ce":       round(ce, 2),
-            "pe":       round(pe, 2),
-            "combined": round(ce + pe, 2),
-        })
+    # Oct 22 2026: ATM +-1 strike comparison ("3 straddle comparison" --
+    # Manish's own framing) reuses exp_rows (the whole day's data for this
+    # expiry, already fetched above) -- no extra Supabase round-trip, just
+    # sliced 3 ways in memory. Step size is derived from the real gap
+    # between available strikes rather than hardcoded per symbol (NIFTY=50,
+    # BANKNIFTY=100, etc differ).
+    compare_strikes = []
+    if len(available_strikes) > 1:
+        diffs = sorted(set(round(b - a, 2) for a, b in zip(available_strikes, available_strikes[1:]) if b > a))
+        step = diffs[0] if diffs else 0
+        wanted = sorted(set([active_strike - step, active_strike, active_strike + step])) if step else [active_strike]
+        for target in wanted:
+            snapped = min(available_strikes, key=lambda s: abs(s - target))
+            if any(cs["strike"] == snapped for cs in compare_strikes):
+                continue
+            s_rows = [r for r in exp_rows if float(r["strike"]) == snapped]
+            s_points = _build_points(s_rows)
+            compare_strikes.append({
+                "strike":            snapped,
+                "role":              "atm" if snapped == active_strike else ("minus1" if snapped < active_strike else "plus1"),
+                "points":            s_points,
+                "day_open_combined": s_points[0]["combined"] if s_points else None,
+                "latest_combined":   s_points[-1]["combined"] if s_points else None,
+            })
+        compare_strikes.sort(key=lambda cs: cs["strike"])
+        for cs in compare_strikes:
+            if cs["day_open_combined"] and cs["latest_combined"] is not None:
+                cs["change_pct"] = round((cs["latest_combined"] - cs["day_open_combined"]) / cs["day_open_combined"] * 100, 1)
+            else:
+                cs["change_pct"] = None
 
     # Current CMP for reference (how far spot has moved from entry strike)
     cmp = None
@@ -141,6 +239,8 @@ def get_straddle_chart(symbol: str = "NIFTY", strike: float = None, expiry: str 
     except Exception:
         pass
 
+    fut_vwap = _compute_fut_vwap(supabase, symbol, date)
+
     return {
         "symbol":             symbol,
         "date":               date,
@@ -152,4 +252,6 @@ def get_straddle_chart(symbol: str = "NIFTY", strike: float = None, expiry: str 
         "points":             points,
         "day_open_combined":  points[0]["combined"] if points else None,
         "latest_combined":    points[-1]["combined"] if points else None,
+        "compare_strikes":    compare_strikes,
+        "fut_vwap":           fut_vwap,
     }
