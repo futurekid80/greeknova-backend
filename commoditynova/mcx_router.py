@@ -120,7 +120,12 @@ def trigger_scan_now():
         if not instruments:
             return {"status": "error", "message": "No instruments cached — run /mcx/seed-now first"}
 
-        candles_cache            = fetch_all_candles(instruments, kite)
+        try:
+            from services.kite_auth import get_historical_kite_client
+            hist_kite = get_historical_kite_client()
+        except Exception:
+            hist_kite = kite
+        candles_cache            = fetch_all_candles(instruments, hist_kite)
         prev_oi:                 dict = {}
         session_open_price_dict: dict = {}
 

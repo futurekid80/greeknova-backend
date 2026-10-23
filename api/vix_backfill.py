@@ -105,7 +105,13 @@ def append_vix_daily_close(days_back: int = 20) -> dict:
     as the full backfill.
     """
     from services.kite_auth import get_kite_client
-    kite = get_kite_client()
+    try:
+        from services.kite_auth import get_historical_kite_client
+        kite = get_historical_kite_client()
+        print("[VIX] Using Trading Bot historical client for daily close")
+    except Exception as e:
+        print(f"[VIX] Historical client unavailable ({e}) -- falling back to main session")
+        kite = get_kite_client()
     supabase = get_supabase()
 
     end = datetime.now()

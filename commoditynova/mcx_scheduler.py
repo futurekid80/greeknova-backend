@@ -62,7 +62,18 @@ def run_scan_job(supabase, candles_cache, prev_oi, session_open_oi, session_peak
         if not instruments:
             logger.warning("MCX scan skipped — no instruments cached yet")
             return
-        fresh_candles = fetch_all_candles(instruments, kite)
+        # FIX (Oct 23 2026): kite.historical_data() has no real permission on
+        # the main Production app key (same root cause as the CPR/Wolves/VIX
+        # fixes earlier today). Use the dedicated Trading Bot historical
+        # client for the candle fetch specifically; everything else in this
+        # job (instruments/quotes/ignition scan) keeps using the main `kite`.
+        try:
+            from services.kite_auth import get_historical_kite_client
+            hist_kite = get_historical_kite_client()
+        except Exception as e:
+            logger.warning(f"MCX historical client unavailable ({e}) -- falling back to main session")
+            hist_kite = kite
+        fresh_candles = fetch_all_candles(instruments, hist_kite)
         candles_cache.update(fresh_candles)
         run_ignition_scan(kite, supabase, candles_cache, prev_oi,
                           session_open_oi, session_peak_oi, prev_strike_oi,
