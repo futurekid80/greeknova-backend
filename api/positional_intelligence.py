@@ -109,10 +109,24 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
     today_str = today.isoformat()
 
     # Get last trading day (handles weekends/holidays)
+    #
+    # BUG FIX (Oct 23 2026): this only checked whether `today` is a
+    # trading DAY (weekday + not a holiday) -- not whether the market has
+    # actually OPENED yet. Net Delta/Delivery/Volume below all key off
+    # `last_trading_day` with no further fallback, so in the pre-market
+    # window on a real trading day (e.g. 08:00 IST, market opens 09:15)
+    # this resolved to TODAY even though zero rows exist for today in
+    # oi_snapshots/delivery_data until market open (OI) or end of day
+    # (delivery bhav copy) -- Manish saw Delivery/Net Delta/Volume all
+    # blank across every card on Positional this morning. Same class of
+    # bug as the Oct 20 Wolves Scanner fix ("fall back to last trading
+    # day with data"), just missing here. Step back one more trading day
+    # whenever it's still before market open (09:15 IST) today.
     try:
         from utils.market_calendar import is_trading_day
         _check = today
-        if not is_trading_day(_check):
+        before_open_today = now_ist.hour * 60 + now_ist.minute < (9 * 60 + 15)
+        if not is_trading_day(_check) or before_open_today:
             _check = _check - timedelta(days=1)
             while not is_trading_day(_check):
                 _check = _check - timedelta(days=1)
