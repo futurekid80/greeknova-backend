@@ -508,6 +508,55 @@ def _candles_to_df(candles: list[dict]) -> pd.DataFrame:
     return df[["date", "open", "high", "low", "close", "volume"]]
 
 
+def _cmp_prices_candles(supabase, symbol: str, from_date: str, to_date: str, freq: str) -> list[dict]:
+    """BUG FIX (Oct 23 2026): kite.historical_data() has no real permission
+    on this API key (Manish's Kite Connect app is personal/multiuser, not
+    the public Connect API with the Historical Data add-on) -- it started
+    rejecting every symbol with "Insufficient permission for that call" on
+    2026-10-22, silently zeroing out both the daily/weekly/monthly cache
+    job and the hourly live tick (217 errored, 0 scanned). Same root cause
+    and same fix shape as api/cpr.py's prev-close fix: reconstruct OHLC
+    candles from cmp_prices, which is populated independently every ~5 min
+    during market hours via kite.quote() (no Historical Data permission
+    needed). `freq` is a pandas resample alias -- "D" for daily, "h" for
+    hourly. Returns the same shape _candles_to_df()/kite.historical_data()
+    produce (list of {date, open, high, low, close, volume} dicts) so every
+    caller downstream is unchanged.
+    """
+    try:
+        to_dt = datetime.strptime(to_date, "%Y-%m-%d") + timedelta(days=1)
+        rows = supabase.from_("cmp_prices")\
+            .select("cmp, timestamp")\
+            .eq("symbol", symbol)\
+            .gte("timestamp", f"{from_date}T00:00:00+00:00")\
+            .lt("timestamp", to_dt.strftime("%Y-%m-%dT00:00:00+00:00"))\
+            .order("timestamp")\
+            .limit(50000)\
+            .execute()
+    except Exception as e:
+        print(f"[Wolves] cmp_prices fetch {symbol}: {e}")
+        return []
+
+    data = rows.data or []
+    if not data:
+        return []
+
+    df = pd.DataFrame(data)
+    df["cmp"] = pd.to_numeric(df["cmp"], errors="coerce")
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df = df.dropna(subset=["cmp"]).set_index("timestamp").sort_index()
+    if df.empty:
+        return []
+
+    ohlc = df["cmp"].resample(freq).ohlc().dropna(how="all")
+    ohlc = ohlc.dropna(subset=["open", "high", "low", "close"])
+    if ohlc.empty:
+        return []
+    ohlc["volume"] = 0
+    ohlc = ohlc.reset_index().rename(columns={"timestamp": "date"})
+    return ohlc.to_dict("records")
+
+
 # ---------------------------------------------------------------------------
 # EOD: refresh the Daily/Weekly/Monthly ADX/BB state cache (once per day)
 # ---------------------------------------------------------------------------
@@ -537,12 +586,9 @@ def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
         if not token:
             skipped += 1
             continue
-        try:
-            daily_candles = kite.historical_data(instrument_token=token, from_date=daily_from, to_date=to_date, interval="day", continuous=False, oi=False)
-            time.sleep(0.34)
-        except Exception as e:
-            print(f"[Wolves] {symbol}: daily fetch failed -- {e}")
-            errored += 1
+        daily_candles = _cmp_prices_candles(supabase, symbol, daily_from, to_date, "D")
+        if not daily_candles:
+            skipped += 1
             continue
 
         daily_df = _candles_to_df(daily_candles)
@@ -554,8 +600,26 @@ def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
         weekly_ind = add_indicators(resample_ohlcv(daily_df, "W-FRI"))
         monthly_ind = add_indicators(resample_ohlcv(daily_df, "ME"))
 
+        # BUG FIX (Oct 23 2026) cont'd: cmp_prices only goes back to
+        # 2026-05 (~6 months), plenty of daily bars for Daily ADX/RSI/BB,
+        # but nowhere near enough for a real Weekly/Monthly ADX(14) --
+        # that needs ~28+ bars of its own timeframe to stabilize, i.e.
+        # ~28 weeks / ~28 months of history. Rather than write a noisy or
+        # flat-out invalid Apex Wolf (weekly/monthly) reading over a real
+        # one, only overwrite weekly_*/monthly_* once there's genuinely
+        # enough resampled history (same >=30-bar bar BB Width Pct already
+        # uses) -- omitted keys are left untouched by the upsert, so the
+        # last real cached value (from before Historical Data broke) stays
+        # until there's enough cmp_prices history to trust a fresh one.
+        # Weekly should self-heal in a month or two; Monthly needs a
+        # dedicated properly-subscribed Kite app to ever be timely again.
         row = {"symbol": symbol, "computed_date": today_ist.isoformat()}
-        for tf_name, tf_df in [("daily", daily_ind), ("weekly", weekly_ind), ("monthly", monthly_ind)]:
+        tf_sources = [("daily", daily_ind, True)]
+        tf_sources.append(("weekly", weekly_ind, len(weekly_ind) >= 30))
+        tf_sources.append(("monthly", monthly_ind, len(monthly_ind) >= 30))
+        for tf_name, tf_df, trust_it in tf_sources:
+            if not trust_it:
+                continue
             e = evaluate_timeframe(tf_df, tf_name.capitalize())
             row[f"{tf_name}_adx_cross_bull"] = e["adx_cross_bull"]
             row[f"{tf_name}_adx_cross_bear"] = e["adx_cross_bear"]
@@ -627,12 +691,9 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
         if not token or not cache_row:
             skipped += 1
             continue
-        try:
-            hourly_candles = kite.historical_data(instrument_token=token, from_date=hourly_from, to_date=to_date, interval="60minute", continuous=False, oi=False)
-            time.sleep(0.34)
-        except Exception as e:
-            print(f"[Wolves] {symbol}: hourly fetch failed -- {e}")
-            errored += 1
+        hourly_candles = _cmp_prices_candles(supabase, symbol, hourly_from, to_date, "h")
+        if not hourly_candles:
+            skipped += 1
             continue
 
         hourly_df = _candles_to_df(hourly_candles)
