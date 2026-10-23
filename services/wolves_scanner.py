@@ -579,6 +579,22 @@ def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
     daily_from = (today_ist - timedelta(days=2000)).isoformat()  # ~8yr -- gives the monthly resample a real percentile population
     to_date = today_ist.isoformat()
 
+    # BUG FIX (Oct 23 2026) cont'd: when Manish's dedicated historical-only
+    # Kite app ("Trading Bot", separate from the main login) is configured
+    # and its Historical Data subscription is active, prefer it for the
+    # full years-deep daily fetch -- this is what actually makes
+    # Weekly/Monthly (Apex Wolf) trustworthy again, since cmp_prices alone
+    # only has ~6 months of history. Falls back to cmp_prices reconstruction
+    # per-symbol if the historical client is unavailable or a call fails,
+    # so this can never take the whole job down.
+    historical_kite = None
+    try:
+        from services.kite_auth import get_historical_kite_client
+        historical_kite = get_historical_kite_client()
+        print("[Wolves] Using Trading Bot historical client for full-depth daily candles")
+    except Exception as e:
+        print(f"[Wolves] Historical client unavailable ({e}) -- using cmp_prices reconstruction instead")
+
     rows, cached, skipped, errored = [], 0, 0, 0
 
     for symbol in universe:
@@ -586,7 +602,17 @@ def refresh_tf_cache(symbols: list[str] | None = None) -> dict:
         if not token:
             skipped += 1
             continue
-        daily_candles = _cmp_prices_candles(supabase, symbol, daily_from, to_date, "D")
+
+        daily_candles = None
+        if historical_kite:
+            try:
+                daily_candles = historical_kite.historical_data(instrument_token=token, from_date=daily_from, to_date=to_date, interval="day", continuous=False, oi=False)
+                time.sleep(0.34)
+            except Exception as e:
+                print(f"[Wolves] {symbol}: historical_data (Trading Bot) failed -- {e}")
+                daily_candles = None
+        if not daily_candles:
+            daily_candles = _cmp_prices_candles(supabase, symbol, daily_from, to_date, "D")
         if not daily_candles:
             skipped += 1
             continue
@@ -674,6 +700,13 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
     tf_cache_rows = supabase.from_("wolves_tf_cache").select("*").in_("symbol", universe).execute().data or []
     tf_cache = {r["symbol"]: r for r in tf_cache_rows}
 
+    historical_kite = None
+    try:
+        from services.kite_auth import get_historical_kite_client
+        historical_kite = get_historical_kite_client()
+    except Exception as e:
+        print(f"[Wolves] Historical client unavailable for live tick ({e}) -- using cmp_prices reconstruction")
+
     # Pull today's existing fresh_events once, for the Times-Seen merge below.
     existing_events_rows = supabase.from_("wolves_fresh_events").select(
         "event_key, first_seen, times_seen"
@@ -691,7 +724,16 @@ def run_live_tick(symbols: list[str] | None = None) -> dict:
         if not token or not cache_row:
             skipped += 1
             continue
-        hourly_candles = _cmp_prices_candles(supabase, symbol, hourly_from, to_date, "h")
+        hourly_candles = None
+        if historical_kite:
+            try:
+                hourly_candles = historical_kite.historical_data(instrument_token=token, from_date=hourly_from, to_date=to_date, interval="60minute", continuous=False, oi=False)
+                time.sleep(0.34)
+            except Exception as e:
+                print(f"[Wolves] {symbol}: hourly historical_data (Trading Bot) failed -- {e}")
+                hourly_candles = None
+        if not hourly_candles:
+            hourly_candles = _cmp_prices_candles(supabase, symbol, hourly_from, to_date, "h")
         if not hourly_candles:
             skipped += 1
             continue
