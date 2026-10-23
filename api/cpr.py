@@ -676,6 +676,14 @@ def get_cpr_scanner():
         print(f"[CPR] cpr_rows query failed, retrying once: {e}")
         cpr_rows = _q_cpr()
 
+    # FIX (Oct 23 2026): `query_date` is only the INTENDED date -- when the
+    # compute job silently fails (as it did Oct 22-23 for the historical_data
+    # permission bug) and this falls back to older rows, the response used to
+    # still label itself with `query_date`, so the page kept showing "Trade
+    # date: today" over data that was actually 2 days stale, with nothing to
+    # flag it. `actual_date` now tracks where the served rows really came
+    # from, and the response carries `is_stale` so the frontend can warn.
+    actual_date = query_date
     if not cpr_rows.data:
         # Query not found — get last available date from DB
         last_res = supabase.from_("cpr_levels")\
@@ -685,6 +693,7 @@ def get_cpr_scanner():
         fallback_date = last_res.data[0]["trade_date"] if last_res.data else None
         print(f"[CPR] No data for {query_date}, falling back to {fallback_date}")
         if fallback_date:
+            actual_date = fallback_date
             cpr_rows = supabase.from_("cpr_levels")\
                 .select("*")\
                 .eq("trade_date", fallback_date)\
@@ -818,7 +827,9 @@ def get_cpr_scanner():
     result = {
         "data":             results,
         "total":            len(results),
-        "trade_date":       query_date,
+        "trade_date":       actual_date,
+        "expected_date":    query_date,
+        "is_stale":         actual_date != query_date,
         "confluence_count": sum(1 for r in results if r["confluence"]),
         "narrow_count":     sum(1 for r in results if r["width_priority"] <= 2),
         "source":           "table",
