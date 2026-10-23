@@ -47,6 +47,58 @@ def _get_rollover_expiries(today_date):
             prev_bench.strftime('%Y-%m-%d'))
 
 
+def _get_real_rollover_expiries(supabase, today_date):
+    """Oct 23 2026: _get_rollover_expiries() assumes every NSE monthly F&O
+    expiry falls on the last Tuesday of the month -- true since the
+    FAOP68747 circular, EXCEPT when that Tuesday is itself a trading
+    holiday, in which case NSE shifts it a day. Nov 2026 is exactly that
+    case: the computed "last Tuesday" is Nov 24, but the exchange's real
+    monthly expiry (confirmed straight from Kite's own instrument dump,
+    the same data every snapshot is captured against) is Nov 23 -- a
+    Monday. That single day of drift meant next_expiry never matched any
+    row actually in oi_snapshots, so sym_next stayed permanently empty,
+    all_syms = sym_curr & sym_next came out empty, and the whole tracker
+    went blank -- not a pre-market timing issue, broken all day regardless
+    of market hours, and it'll recur every time a future month's last
+    Tuesday happens to be a holiday.
+
+    Fix: derive curr/next/prev expiries from the real captured FUT expiry
+    calendar (oi_snapshots + its archive, which is what every other part
+    of rollover.py already queries against) instead of trusting the
+    calendar formula. Falls back to the formula-based guess if fewer than
+    3 real expiries are found around today (first run on a fresh DB, etc).
+    """
+    try:
+        cutoff = (today_date - timedelta(days=50)).isoformat()
+        exps = set()
+        for table in ("oi_snapshots", "oi_snapshots_archive"):
+            r = supabase.from_(table)\
+                .select("expiry")\
+                .eq("option_type", "FUT")\
+                .eq("symbol", "NIFTY")\
+                .gte("expiry", cutoff)\
+                .execute()
+            for row in (r.data or []):
+                if row.get("expiry"):
+                    exps.add(str(row["expiry"])[:10])
+        sorted_exps = sorted(exps)
+        today_str = today_date.isoformat()
+        # Current = nearest NOT-yet-expired monthly; next = the one after it.
+        upcoming = [e for e in sorted_exps if e >= today_str]
+        if len(upcoming) >= 2:
+            curr_expiry = upcoming[0]
+            next_expiry = upcoming[1]
+            idx = sorted_exps.index(curr_expiry)
+            prev_curr_expiry = sorted_exps[idx - 1] if idx > 0 else curr_expiry
+            prev_next_expiry = curr_expiry
+            prev_bench_date = prev_curr_expiry
+            return (curr_expiry, next_expiry, prev_curr_expiry, prev_next_expiry, prev_bench_date)
+    except Exception as e:
+        print(f"[ROLLOVER] Real-expiry lookup failed, falling back to calendar formula: {e}")
+    curr, nxt, prev_curr, prev_next, prev_bench = _get_rollover_expiries(today_date)
+    return (curr, nxt, prev_curr, prev_next, prev_bench)
+
+
 def get_rollover(supabase):
     import pytz
     ist = pytz.timezone('Asia/Kolkata')
@@ -72,9 +124,11 @@ def get_rollover(supabase):
 
     print(f"[ROLLOVER] Using trading date: {last_trading_date} (today={today})")
 
-    # Current + previous-benchmark expiries, computed dynamically each run
+    # Current + previous-benchmark expiries, snapped to the real captured
+    # FUT expiry calendar rather than trusting the last-Tuesday formula
+    # alone (see _get_real_rollover_expiries).
     curr_expiry, next_expiry, prev_curr_expiry, prev_next_expiry, prev_bench_date = \
-        _get_rollover_expiries(datetime.now(ist).date())
+        _get_real_rollover_expiries(supabase, datetime.now(ist).date())
 
     # ── 1. Today's OI for both expiries ───────────────────────────────────────
     try:
