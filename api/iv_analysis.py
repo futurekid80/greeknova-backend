@@ -136,14 +136,37 @@ _FALLBACK_SYMBOLS = [
     "ZYDUSLIFE",
 ]
 
-try:
-    from services.fno_universe import get_live_fno_symbols, INDICES as _FNO_INDICES
-    _live = get_live_fno_symbols()
-    SYMBOLS = (_FNO_INDICES + _live) if _live else _FALLBACK_SYMBOLS
-    print(f"[iv_analysis] loaded {len(SYMBOLS)} live F&O symbols from Kite")
-except Exception as _e:
-    print(f"[iv_analysis] could not load live F&O universe ({_e}), using fallback list of {len(_FALLBACK_SYMBOLS)} symbols")
-    SYMBOLS = _FALLBACK_SYMBOLS
+# FIX (Oct 24 2026): this used to call get_live_fno_symbols() -> Kite ->
+# get_kite_client() -> auto_login() directly at MODULE IMPORT TIME -- before
+# main.py even finishes importing, let alone before Uvicorn starts or the
+# FastAPI lifespan hook runs. When login is failing hard (e.g. today's
+# Zerodha CAPTCHA wall on the scripted login, 3 retries x 30s backoff), this
+# single import blocked the whole app from ever starting -- confirmed live:
+# the Oct 24 outage persisted even after moving the OTHER startup login call
+# into a background thread, because this one runs before that fix's code
+# path is even reached. SYMBOLS is imported by value (`from api.iv_analysis
+# import SYMBOLS`) in several other modules, so it must stay the SAME list
+# object once published -- start it as the fallback (instant, no network)
+# and mutate it in place from a background thread once live data loads,
+# rather than rebinding the name (a rebind wouldn't be seen by modules that
+# already did `from ... import SYMBOLS`).
+SYMBOLS = list(_FALLBACK_SYMBOLS)
+print(f"[iv_analysis] starting with fallback list of {len(SYMBOLS)} symbols; live F&O universe loads in the background")
+
+def _load_live_fno_symbols_background():
+    try:
+        from services.fno_universe import get_live_fno_symbols, INDICES as _FNO_INDICES
+        _live = get_live_fno_symbols()
+        if _live:
+            SYMBOLS[:] = _FNO_INDICES + _live
+            print(f"[iv_analysis] loaded {len(SYMBOLS)} live F&O symbols from Kite (background)")
+        else:
+            print("[iv_analysis] background live F&O load returned nothing, keeping fallback list")
+    except Exception as _e:
+        print(f"[iv_analysis] background live F&O load failed ({_e}), keeping fallback list")
+
+import threading as _threading_iv_symbols
+_threading_iv_symbols.Thread(target=_load_live_fno_symbols_background, daemon=True).start()
 
 # How many trading days to look back for IVR/IVP
 # Market standard = 252 (1 year). We use whatever history exists,
