@@ -25,6 +25,7 @@ import os
 import time
 import hashlib
 import threading
+from datetime import datetime, timezone, timedelta
 from collections import Counter, deque
 from typing import Optional
 
@@ -85,7 +86,7 @@ _MEMBER_TTL = 60        # seconds the beta_users list is cached
 
 _lock = threading.Lock()
 _token_cache = {}       # sha256(token) -> (email or None, expires_at)
-_members = {"emails": set(), "loaded_at": 0.0}
+_members = {"emails": set(), "expires": {}, "loaded_at": 0.0}
 _trials = {"active": {}, "expired": set(), "loaded_at": 0.0}  # active: email -> expires_date (iso str)
 _kite_logins = {"dates": {}, "loaded_at": 0.0}  # email -> last_login_date (iso str), anyone who's ever logged in via Zerodha
 _stats = Counter()
@@ -126,16 +127,26 @@ def _load_members():
     # so the member set here must include linked_kite_email values too, or
     # someone correctly granted permanent access at login would still get
     # bounced as "not a member" on their very next page load.
-    res = get_supabase().from_("beta_users").select("email,linked_kite_email").execute()
+    # FIX (Oct 24 2026): also return each email's expires_at so
+    # _access_status() can enforce real expiry (previously tracked but
+    # never checked -- see module docstring history). A row with no
+    # expires_at (the ~145 legacy/manually-added beta rows as of Oct 24)
+    # maps to None, which _access_status() always treats as "never
+    # expires" -- this change must never affect those accounts.
+    res = get_supabase().from_("beta_users").select("email,linked_kite_email,expires_at").execute()
     emails = set()
+    expires = {}
     for r in (res.data or []):
+        exp = r.get("expires_at")
         e = (r.get("email") or "").strip().lower()
         if e:
             emails.add(e)
+            expires[e] = exp
         le = (r.get("linked_kite_email") or "").strip().lower()
         if le:
             emails.add(le)
-    return emails
+            expires[le] = exp
+    return emails, expires
 
 
 def _load_trials():
@@ -185,7 +196,7 @@ def _refresh_members_and_trials():
     if not stale:
         return
     try:
-        emails = _load_members()
+        emails, expires = _load_members()
         active, expired = _load_trials()
         try:
             kite_logins = _load_kite_logins()
@@ -194,6 +205,7 @@ def _refresh_members_and_trials():
             kite_logins = None
         with _lock:
             _members["emails"] = emails
+            _members["expires"] = expires
             _members["loaded_at"] = now
             _trials["active"] = active
             _trials["expired"] = expired
@@ -234,13 +246,32 @@ def _kite_session_stale(email: str) -> bool:
     return last != today_ist().isoformat()
 
 
+# FIX (Oct 24 2026): real expiry enforcement. A member's access is only
+# ever cut off this many days AFTER beta_users.expires_at, never exactly
+# on it -- payment dates/timezones/manual admin entries are imprecise
+# enough that a hard cutoff risks bouncing someone who genuinely renewed
+# on time. 15 days chosen as a reasonable default; easy to tune via env.
+MEMBER_GRACE_DAYS = int(os.getenv("MEMBER_GRACE_DAYS", "15"))
+
 def _access_status(email: str) -> str:
-    """Returns 'member' (permanent, beta_users), 'trial_active' (within
-    trial_users window), 'trial_expired' (trial_users row but past
-    trial_expires_date), or 'none' (never logged in / not tracked)."""
+    """Returns 'member' (permanent, beta_users, not expired or no expiry
+    set), 'member_expired' (beta_users row whose expires_at + grace period
+    has passed), 'trial_active' (within trial_users window), 'trial_expired'
+    (trial_users row but past trial_expires_date), or 'none' (never logged
+    in / not tracked)."""
     _refresh_members_and_trials()
     with _lock:
         if email in _members["emails"]:
+            exp = _members["expires"].get(email)
+            if exp:
+                try:
+                    exp_dt = datetime.fromisoformat(str(exp).replace("Z", "+00:00"))
+                    if datetime.now(timezone.utc) > exp_dt + timedelta(days=MEMBER_GRACE_DAYS):
+                        return "member_expired"
+                except Exception as e:
+                    # Unparseable expires_at must never lock someone out --
+                    # treat as "no expiry" and log it for follow-up.
+                    print(f"[GATE] unparseable expires_at for {email}: {exp!r} ({e})")
             return "member"
         if email in _trials["active"]:
             return "trial_active"
@@ -252,7 +283,8 @@ def _access_status(email: str) -> str:
 def _is_member(email: str) -> bool:
     """Back-compat for callers (kite_byot.py) written against the old
     binary check. Now means 'has access' - permanent member or active
-    trial - matching what _access_status/_gate use everywhere else."""
+    trial - matching what _access_status/_gate use everywhere else.
+    'member_expired' deliberately excluded -- see _access_status()."""
     return _access_status(email) in ("member", "trial_active")
 
 
@@ -389,6 +421,8 @@ async def _gate(request: Request, call_next):
                     )
             elif status_kind == "trial_expired":
                 decision, block, status = "user_trial_expired", True, 403
+            elif status_kind == "member_expired":
+                decision, block, status = "user_member_expired", True, 403
             else:
                 decision, block, status = "user_not_member", True, 403
 
@@ -398,6 +432,8 @@ async def _gate(request: Request, call_next):
             msg = "Your Zerodha session has expired. Please log in with Zerodha again."
         elif decision == "user_trial_expired":
             msg = "Your GreekNova trial has ended. Upgrade to keep access."
+        elif decision == "user_member_expired":
+            msg = "Your GreekNova plan has expired. Renew to keep access."
         elif status == 401:
             msg = "Sign in required"
         else:
