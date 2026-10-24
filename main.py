@@ -2380,6 +2380,24 @@ def me_trial_status(request: Request):
                 from utils.market_calendar import today_ist
                 from datetime import date
                 result["days_left"] = (date.fromisoformat(exp) - today_ist()).days
+    elif status == "member":
+        # FIX (Oct 24 2026): paid members had no visible countdown at all --
+        # expires_at is tracked on beta_users (services/admin_members.py)
+        # but never surfaced to the member themselves, only in the admin
+        # panel. Informational only, same as the trial badge -- this does
+        # NOT gate access; access_gate.py still only checks "is this email
+        # in beta_users" (see its own module docstring). Reusing
+        # trial_expires_date/days_left as the field names so the one
+        # frontend badge component can render either case.
+        from utils.db import get_supabase
+        row = get_supabase().from_("beta_users")\
+            .select("expires_at")\
+            .eq("email", email).limit(1).execute()
+        if row.data and row.data[0].get("expires_at"):
+            from datetime import datetime, timezone
+            exp_dt = datetime.fromisoformat(row.data[0]["expires_at"].replace("Z", "+00:00"))
+            result["trial_expires_date"] = exp_dt.date().isoformat()
+            result["days_left"] = (exp_dt - datetime.now(timezone.utc)).days
     return result
 
 
