@@ -28,6 +28,14 @@ USER_ID    = os.getenv('ZERODHA_USER_ID', 'DQA100')
 PASSWORD   = os.getenv('ZERODHA_PASSWORD', '')
 TOTP_SECRET = os.getenv('ZERODHA_TOTP_SECRET', '')
 
+# Cooldown gate: when auto_login() has failed recently (e.g. Zerodha CAPTCHA
+# wall), don't let every incoming request re-trigger a fresh 3x30s retry loop
+# -- that ties up a request worker per hit and keeps hammering the already-
+# flagged login endpoint. While in cooldown, fail fast instead.
+_LAST_LOGIN_FAILURE_TS = 0.0
+_LOGIN_FAILURE_COOLDOWN_SECONDS = 120
+
+
 # ── Token health check tracking ───────────────────────────────────────────────
 _last_token_check: float = 0
 TOKEN_CHECK_INTERVAL = 30 * 60  # 30 minutes
@@ -362,7 +370,23 @@ def get_kite_client():
             print("  ⚠️ Supabase token invalid, attempting auto-login...")
 
     # ── 3. Auto-login with retry ──────────────────────────────────────────────
+    global _LAST_LOGIN_FAILURE_TS
+    now = time.time()
+    if now - _LAST_LOGIN_FAILURE_TS < _LOGIN_FAILURE_COOLDOWN_SECONDS:
+        remaining = int(_LOGIN_FAILURE_COOLDOWN_SECONDS - (now - _LAST_LOGIN_FAILURE_TS))
+        raise Exception(
+            f"Kite login is in cooldown after a recent failure, retrying in ~{remaining}s "
+            f"(this avoids hammering Zerodha's login on every request)"
+        )
     if TOTP_SECRET and PASSWORD:
-        return auto_login()
+        try:
+            # Fail fast on the lazy per-request path: one attempt, no
+            # in-request backoff -- the cooldown above keeps us from retrying
+            # every few seconds, so there's no benefit to a slow 3x30s loop
+            # blocking this particular request too.
+            return auto_login(max_retries=1, retry_delay=0)
+        except Exception:
+            _LAST_LOGIN_FAILURE_TS = time.time()
+            raise
     else:
         raise Exception("No valid token found and TOTP_SECRET/PASSWORD not set")
