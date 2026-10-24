@@ -822,6 +822,40 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="GreekNova API", version="0.1.0", lifespan=lifespan)
 
+# FIX (Oct 24 2026): "index cards load fast, section below takes time" --
+# /cpr-scanner, /oi-pulse, /52-week-high and /vol-oi-breakout (which feed
+# Sector Performance, Spotlight, Activity Leaders and the Vol+OI Breakout
+# card) had no caching at all, unlike /index-data -- every single page load
+# recomputed each from scratch against the full F&O universe. Same pattern
+# as the /index-data fix: short TTL during live trading hours (so signals
+# stay fresh), much longer outside them (the underlying data can't have
+# changed since capture only runs during market hours, so there's no reason
+# to keep paying the full computation cost on every request).
+def _market_hours_now() -> bool:
+    from utils.market_calendar import is_trading_day, today_ist
+    from datetime import datetime
+    import pytz
+    ist_now = datetime.now(pytz.timezone("Asia/Kolkata"))
+    return is_trading_day(today_ist()) and (9, 15) <= (ist_now.hour, ist_now.minute) <= (15, 30)
+
+def _short_cache(ttl_market: int = 60, ttl_closed: int = 600):
+    """Per-process TTL cache for a zero-arg endpoint function. Mirrors the
+    cache already on /index-data: short TTL while the market is live,
+    much longer outside trading hours."""
+    def decorator(fn):
+        state = {"data": None, "time": 0.0}
+        def wrapped():
+            ttl = ttl_market if _market_hours_now() else ttl_closed
+            if state["data"] is not None and (time.time() - state["time"]) < ttl:
+                return state["data"]
+            result = fn()
+            state["data"] = result
+            state["time"] = time.time()
+            return result
+        wrapped.__name__ = fn.__name__
+        return wrapped
+    return decorator
+
 # Access gate (Sep 26 2026) - added BEFORE CORS so CORS stays the outermost layer.
 from services.access_gate import install_gate
 install_gate(app)
@@ -1872,6 +1906,7 @@ def eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     return get_eod_analysis(symbol.upper(), date, expiry)
 
 @app.get("/oi-pulse")
+@_short_cache()
 def oi_pulse():
     from api.oi_pulse import get_oi_pulse
     return get_oi_pulse()
@@ -3116,6 +3151,7 @@ def vacuum_scanner(max_distance_pct: float = 10.0):
     return get_vacuum_scanner(max_distance_pct=max_distance_pct)
 
 @app.get("/cpr-scanner")
+@_short_cache()
 def cpr_scanner():
     from api.cpr import get_cpr_scanner
     return get_cpr_scanner()
@@ -3479,7 +3515,8 @@ def wall_migration():
     return get_wall_migration(get_supabase())
     
 @app.get("/vol-oi-breakout")
-async def vol_oi_breakout_endpoint():
+@_short_cache()
+def vol_oi_breakout_endpoint():
     from api.vol_oi_breakout import get_vol_oi_breakout
     from utils.db import get_supabase
     return get_vol_oi_breakout(get_supabase())
@@ -3694,6 +3731,7 @@ def run_archive_watchdog():
         return {"status": "error", "detail": str(e)}
 
 @app.get("/52-week-high")
+@_short_cache()
 def week52_high():
     """52-week high per symbol, computed from spot_daily_bars (see
     api/week52_high.py). Flags stocks trading at/near their 52-week high
