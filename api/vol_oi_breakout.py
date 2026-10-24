@@ -145,9 +145,14 @@ def _save_to_supabase(supabase, signals, total, trade_date):
     except Exception as e:
         print(f"[VOL_OI_BREAKOUT] Supabase save failed: {e}")
 
-def _get_eod_from_summary(supabase, now_ist):
-    """Fallback: compute Vol+OI breakout from daily_oi_summary when cache is stale."""
-    from collections import defaultdict
+def _resolve_eod_trade_date(now_ist):
+    """The trading session an off-hours EOD snapshot should represent --
+    today if market closed for the day (after 3:40 PM) but today was itself
+    a trading day, otherwise the most recent prior trading day. Shared by
+    get_vol_oi_breakout()'s cache-date checks and _get_eod_from_summary()'s
+    own query so the two can never disagree about which day is "today" --
+    see the Oct 24 2026 fix note below for what happens when they do.
+    """
     check = now_ist.date()
     # Post-market: use today if after 3:40 PM, else use previous trading day
     # BUG FIX (Aug 3 2026): was 15:30 — CAS goes live today, F&O trades
@@ -158,7 +163,12 @@ def _get_eod_from_summary(supabase, now_ist):
             check -= timedelta(days=1)
             while check.weekday() >= 5:
                 check -= timedelta(days=1)
-    trade_date = check.isoformat()
+    return check.isoformat()
+
+def _get_eod_from_summary(supabase, now_ist):
+    """Fallback: compute Vol+OI breakout from daily_oi_summary when cache is stale."""
+    from collections import defaultdict
+    trade_date = _resolve_eod_trade_date(now_ist)
 
     rows = supabase.from_("daily_oi_summary")\
         .select("symbol, fut_vol, oi_chg_pct, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price")\
@@ -266,23 +276,38 @@ def get_vol_oi_breakout(supabase):
 
     # Post-market or weekend: serve EOD snapshot
     if not is_market_hours():
+        # BUG FIX (Oct 24 2026): "Vol+OI Breakout stuck loading" -- every
+        # one of these cache checks compared against calendar "today", but
+        # on a non-trading day (weekend/holiday, or before 3:40 PM on a day
+        # that's still "today" chronologically but the session hasn't
+        # closed) the EOD snapshot this endpoint actually serves is dated
+        # the PREVIOUS trading day via _resolve_eod_trade_date() below --
+        # e.g. "today"=Saturday but the computed snapshot's date=Friday.
+        # That mismatch meant fresh.get("date") == today was always False
+        # on a weekend, so the freshly-computed result was never written to
+        # either the in-memory cache or the vol_oi_breakout_cache table --
+        # every single request recomputed the full thing from scratch
+        # (including the per-symbol cmp_prices lookups in
+        # _get_eod_from_summary), measured on Railway at a consistent ~30s
+        # per call. Compare against the actual resolved trade date instead.
+        expected_date = _resolve_eod_trade_date(now_ist)
         # Invalidate cache if stale date
-        if _breakout_cache.get("date") != today:
+        if _breakout_cache.get("date") != expected_date:
             _breakout_cache = {}
             _breakout_cache_time = 0.0
         # Check if today's snapshot exists in cache
-        if _breakout_cache.get("signals") and _breakout_cache.get("date") == today:
+        if _breakout_cache.get("signals") and _breakout_cache.get("date") == expected_date:
             return dict(_breakout_cache, is_eod_snapshot=True)
         saved = _load_from_supabase(supabase)
-        # Only serve saved data if it's from today
-        if saved and saved.get("date") == today:
+        # Only serve saved data if it's from the expected trading day
+        if saved and saved.get("date") == expected_date:
             _breakout_cache = saved
             return saved
         # Today's data not yet saved — compute fresh from the fully-settled
         # daily_oi_summary table (reliable source), then persist THIS result
         # so subsequent requests today load fast without recomputing.
         fresh = _get_eod_from_summary(supabase, now_ist)
-        if fresh.get("signals") is not None and fresh.get("date") == today:
+        if fresh.get("signals") is not None and fresh.get("date") == expected_date:
             try:
                 _save_to_supabase(supabase, fresh["signals"], fresh["total"], fresh["date"])
                 _breakout_cache = fresh
