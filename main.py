@@ -1718,6 +1718,42 @@ def auto_refresh_token():
     except Exception as e:
         print(f"❌ Railway auto-login failed: {e}")
 
+@app.get("/admin/complete-kite-login")
+def admin_complete_kite_login(request_token: str):
+    """One-time manual completion of the Kite Connect OAuth flow -- added
+    Oct 24 2026 as an emergency path when the scripted password+TOTP login
+    in kite_auth.auto_login() is blocked by a Zerodha-side CAPTCHA wall on
+    the raw /api/login call (the real browser login flow isn't affected,
+    since the browser silently solves the CAPTCHA). Caller logs in once by
+    hand via https://kite.trade/connect/login?api_key=<KITE_API_KEY>&v=3,
+    copies the request_token out of the resulting redirect URL, and passes
+    it here -- this exchanges it for an access_token exactly like the main
+    login flow's Step 4 does, and saves it the same way (local file +
+    Supabase), so every endpoint that reads the cached token picks it up
+    immediately without needing a fresh scripted login."""
+    from kiteconnect import KiteConnect
+    from services.kite_auth import API_KEY, API_SECRET, TOKEN_FILE, save_token_to_supabase
+    import json, time
+    try:
+        kite = KiteConnect(api_key=API_KEY)
+        session_data = kite.generate_session(request_token, api_secret=API_SECRET)
+        access_token = session_data["access_token"]
+        try:
+            with open(TOKEN_FILE, 'w') as f:
+                json.dump({
+                    "access_token": access_token,
+                    "timestamp":    time.time(),
+                    "date":         time.strftime("%Y-%m-%d")
+                }, f)
+        except Exception:
+            pass
+        save_token_to_supabase(access_token)
+        kite.set_access_token(access_token)
+        profile = kite.profile()
+        return {"ok": True, "user_name": profile.get("user_name"), "user_id": profile.get("user_id")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 @app.get("/admin/trigger-kite-login")
 def admin_trigger_kite_login():
     """Manual on-demand trigger for the 8:30am Kite auto-login (see
