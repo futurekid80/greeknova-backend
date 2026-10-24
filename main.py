@@ -1,7 +1,7 @@
-import os, sys
+import os, sys, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi import FastAPI, Request, Response, HTTPException, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -2469,15 +2469,16 @@ def me_trial_status(request: Request):
         raise HTTPException(status_code=401, detail="Sign in required")
 
     status = _access_status(email)
-    result = {"status": status, "trial_expires_date": None, "days_left": None}
+    result = {"status": status, "trial_expires_date": None, "days_left": None, "phone_captured": None}
     if status in ("trial_active", "trial_expired"):
         from utils.db import get_supabase
         row = get_supabase().from_("trial_users")\
-            .select("trial_expires_date")\
+            .select("trial_expires_date, phone")\
             .eq("email", email).limit(1).execute()
         if row.data:
             exp = row.data[0]["trial_expires_date"]
             result["trial_expires_date"] = exp
+            result["phone_captured"] = bool(row.data[0].get("phone"))
             if status == "trial_active":
                 from utils.market_calendar import today_ist
                 from datetime import date
@@ -2501,6 +2502,45 @@ def me_trial_status(request: Request):
             result["trial_expires_date"] = exp_dt.date().isoformat()
             result["days_left"] = (exp_dt - datetime.now(timezone.utc)).days
     return result
+
+
+@app.post("/me/update-phone")
+def me_update_phone(request: Request, payload: dict = Body(...)):
+    """Oct 24 2026: lets a logged-in trial user (or member) share a WhatsApp
+    number so support/renewal/expiry outreach can reach them directly --
+    Kite's OAuth profile never returns a phone number, so this is the only
+    way it gets captured. Optional/skippable on the frontend by design: the
+    Zerodha-only login is a selling point (zero extra friction), so this
+    must never become a second mandatory signup field."""
+    from services.access_gate import _verify_token, _access_status
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Sign in required")
+    email, err = _verify_token(token)
+    if err or not email:
+        raise HTTPException(status_code=401, detail="Sign in required")
+
+    raw_phone = str(payload.get("phone", "")).strip()
+    digits = re.sub(r"[^0-9]", "", raw_phone)
+    # Accept a bare 10-digit Indian mobile, or the same with a 91/0 prefix.
+    if digits.startswith("91") and len(digits) == 12:
+        digits = digits[2:]
+    elif digits.startswith("0") and len(digits) == 11:
+        digits = digits[1:]
+    if len(digits) != 10 or digits[0] not in "6789":
+        raise HTTPException(status_code=400, detail="Enter a valid 10-digit Indian mobile number")
+
+    status = _access_status(email)
+    from utils.db import get_supabase
+    sb = get_supabase()
+    if status in ("trial_active", "trial_expired"):
+        sb.from_("trial_users").update({"phone": digits}).eq("email", email).execute()
+    elif status in ("member", "member_expired"):
+        sb.from_("beta_users").update({"mobile": digits}).eq("email", email).execute()
+    else:
+        raise HTTPException(status_code=403, detail="No active trial or membership found for this account")
+    return {"ok": True}
 
 
 @app.get("/chart-data/{symbol}")
