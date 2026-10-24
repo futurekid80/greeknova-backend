@@ -1702,6 +1702,21 @@ def auto_refresh_token():
     except Exception as e:
         print(f"❌ Railway auto-login failed: {e}")
 
+@app.get("/admin/trigger-kite-login")
+def admin_trigger_kite_login():
+    """Manual on-demand trigger for the 8:30am Kite auto-login (see
+    auto_refresh_token above) -- added Oct 24 2026 so a credential rotation
+    (password/TOTP secret changed after the Oct 22 Railway breach) can be
+    verified end-to-end right away instead of waiting for the next
+    trading-day cron fire, which skips weekends entirely."""
+    from services.kite_auth import auto_login
+    try:
+        kite = auto_login()
+        profile = kite.profile()
+        return {"ok": True, "user_name": profile.get("user_name"), "user_id": profile.get("user_id")}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
 @app.get("/uoa")
 def uoa(date: str = None, strike_zone: str = "all"):
     from api.uoa import get_uoa
