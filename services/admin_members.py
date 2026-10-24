@@ -128,7 +128,16 @@ def log_payment(supabase, email: str, name: str, plan: str, payment_date: str = 
         "amount_paid": cfg["amount"],
         "paid_at": start.isoformat(),
         "expires_at": expires_at.isoformat(),
+        # FIX (Oct 24 2026): renewal-tracking groundwork -- join_date is set
+        # once on first signup and never touched again; last_renewed_date
+        # updates on every log_payment() call (initial or renewal), so both
+        # survive future renewals without needing a separate migration.
+        # rate_locked marks the founding cohort's locked-for-life rate.
+        "last_renewed_date": start.date().isoformat(),
     }
+    if not is_renewal:
+        row["join_date"] = start.date().isoformat()
+        row["rate_locked"] = (plan == "founding")
     if name:
         row["name"] = name
     elif not is_renewal:
