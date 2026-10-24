@@ -2281,6 +2281,7 @@ def auth_kite_login(body: KiteLoginRequest):
     except Exception as e:
         print(f"[KiteLogin] beta_users lookup warning: {e}")
     is_member = bool(beta_row)
+    is_new_trial = False  # set True below only when a brand-new trial_users row is created
 
     if is_member:
         # Oct 23 2026: the existing "unrecognized login" Telegram ping below
@@ -2390,6 +2391,7 @@ def auth_kite_login(body: KiteLoginRequest):
                     "trial_expires_date": expires.isoformat(),
                 }).execute()
                 print(f"[KiteLogin] new trial for {kite_email}: {start} -> {expires}")
+                is_new_trial = True
             except Exception as e:
                 print(f"[KiteLogin] trial_users insert warning: {e}")
 
@@ -2447,7 +2449,7 @@ def auth_kite_login(body: KiteLoginRequest):
     if not token_hash:
         raise HTTPException(status_code=500, detail="Kite login session link missing token")
 
-    return {"email": kite_email, "token_hash": token_hash}
+    return {"email": kite_email, "token_hash": token_hash, "is_new_trial": is_new_trial}
 
 
 @app.get("/me/trial-status")
