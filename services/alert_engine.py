@@ -66,17 +66,33 @@ def _get_milestone(persistence_pct: int) -> Optional[int]:
     return max(crossed) if crossed else None
 
 
-def send_telegram(text: str) -> bool:
+def send_telegram(text: str, markdown: bool = True) -> bool:
+    # FIX (Oct 24 2026): Telegram's legacy "Markdown" parse_mode has no
+    # backslash-escaping at all (only MarkdownV2 supports \-escapes) -- the
+    # Oct 19 fix for the kite-login pings assumed it did and backslash-
+    # escaped _ * ` [ in dynamic name/email values, which doesn't work:
+    # Telegram still sees the raw _ / * / [ as a real formatting delimiter,
+    # the literal backslash just rides along as ordinary text, and an odd
+    # count anywhere in the message still 400s with "can't find end of the
+    # entity" -- silently dropping the whole alert. There's no reliable way
+    # to escape free-form user-supplied text (a real name or email) for
+    # legacy Markdown, so callers with unpredictable dynamic content should
+    # pass markdown=False instead of trying to escape it. The existing
+    # trading-signal alerts below all only wrap a plain stock symbol in
+    # *asterisks* (always balanced, never user-free-text), so they keep
+    # markdown=True and are unaffected.
     token = _get_bot_token()
     if not token:
         print("[ALERTS] TELEGRAM_BOT_TOKEN env var is empty/not set -- cannot send")
         return False
     try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={
-            "chat_id":    PERSONAL_CHAT_ID,
-            "text":       text,
-            "parse_mode": "Markdown"
-        }, timeout=10)
+        payload = {
+            "chat_id": PERSONAL_CHAT_ID,
+            "text":    text,
+        }
+        if markdown:
+            payload["parse_mode"] = "Markdown"
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload, timeout=10)
         # BUG FIX (Aug 3 2026): this only ever logged on network-level
         # exceptions (timeout, connection error) -- a non-200 response from
         # Telegram's own API (e.g. 401 for a bad/revoked token, 400 for a

@@ -2192,17 +2192,18 @@ def auth_kite_login(body: KiteLoginRequest):
             already_seen = admin.from_("kite_login_log").select("email").eq("email", kite_email).limit(1).execute().data
             if not already_seen:
                 from services.alert_engine import send_telegram
-                def _escape_md(s):
-                    s = str(s or '-')
-                    for ch in ('_', '*', '`', '['):
-                        s = s.replace(ch, '\\' + ch)
-                    return s
+                # FIX (Oct 24 2026): plain text, not Markdown -- see the
+                # note on send_telegram() in alert_engine.py. A real name
+                # or email is free-form text Claude/Manish don't control,
+                # so there's no safe way to Markdown-escape it; this alert
+                # doesn't need bold formatting anyway.
                 send_telegram(
                     f"\U0001F4B0 GreekNova: paid member's first login\n"
-                    f"Name: {_escape_md(kite_user_name)}\n"
-                    f"Kite email: {_escape_md(kite_email)}\n"
-                    f"Client ID: {_escape_md(kite_user_id)}\n"
-                    f"Matched beta_users row: {_escape_md(beta_row['email'])}"
+                    f"Name: {kite_user_name or '-'}\n"
+                    f"Kite email: {kite_email or '-'}\n"
+                    f"Client ID: {kite_user_id or '-'}\n"
+                    f"Matched beta_users row: {beta_row['email']}",
+                    markdown=False,
                 )
         except Exception as e:
             print(f"[KiteLogin] paid-login telegram notify skipped: {e}")
@@ -2233,18 +2234,19 @@ def auth_kite_login(body: KiteLoginRequest):
             # actually arrived even though the code ran with no exception
             # until the send() call itself. Escape the few Markdown special
             # characters in every dynamic value before building the message.
-            def _escape_md(s):
-                s = str(s or '-')
-                for ch in ('_', '*', '`', '['):
-                    s = s.replace(ch, '\\' + ch)
-                return s
+            # FIX (Oct 24 2026): plain text -- see send_telegram() note in
+            # alert_engine.py. The Oct 19 backslash-escaping fix didn't
+            # actually work (legacy Telegram Markdown has no \-escapes),
+            # so this kept silently 400-ing on names/emails with an odd
+            # number of _ * ` [ characters.
             send_telegram(
                 f"\U0001F514 GreekNova: unrecognized Zerodha login\n"
-                f"Name: {_escape_md(kite_user_name)}\n"
-                f"Kite email: {_escape_md(kite_email)}\n"
-                f"Client ID: {_escape_md(kite_user_id)}\n"
+                f"Name: {kite_user_name or '-'}\n"
+                f"Kite email: {kite_email or '-'}\n"
+                f"Client ID: {kite_user_id or '-'}\n"
                 f"Started on a 7-day trial. If this is a paid customer, "
-                f"add their Client ID to their beta_users row to upgrade them."
+                f"add their Client ID to their beta_users row to upgrade them.",
+                markdown=False,
             )
         except Exception as e:
             print(f"[KiteLogin] telegram notify skipped: {e}")
