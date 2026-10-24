@@ -3973,7 +3973,7 @@ async def admin_log_payment(request: Request):
     if not verify_admin(request.headers.get("authorization", "")):
         return JSONResponse({"error": "Not authorized"}, status_code=403)
     body = await request.json()
-    result = log_payment(get_supabase(), body.get("email"), body.get("name"), body.get("plan"))
+    result = log_payment(get_supabase(), body.get("email"), body.get("name"), body.get("plan"), body.get("payment_date"))
     if "error" in result:
         return JSONResponse(result, status_code=400)
     return result
