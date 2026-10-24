@@ -379,12 +379,28 @@ def fetch_delivery_data():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Login on startup ───────────────────────────────────────────────────
-    try:
-        from services.kite_auth import auto_login
-        auto_login()
-        print("✅ Startup login successful")
-    except Exception as e:
-        print(f"⚠️ Startup login failed: {e}")
+    # FIX (Oct 24 2026): this used to call auto_login() synchronously here,
+    # which retries 3x with a 30s backoff on failure (~90-100s total). When
+    # login is actually failing (e.g. Zerodha presenting a CAPTCHA to the
+    # scripted login after a password/TOTP rotation), that blocking wait
+    # exceeded Railway's startup health-check window, so Railway kept
+    # killing and restarting the container before it ever finished starting
+    # -- a restart loop that re-ran the same slow, failing login every time
+    # and took the whole site down (confirmed: 85-93% error rate while this
+    # was happening). Login is NOT a hard prerequisite for the app to start
+    # serving -- every endpoint that needs Kite already calls
+    # get_kite_client()/auto_login() lazily on its own (see kite_auth.py) --
+    # so run it in a background thread, same pattern as the startup capture
+    # just below, instead of blocking app startup on it.
+    def _startup_login():
+        try:
+            from services.kite_auth import auto_login
+            auto_login()
+            print("✅ Startup login successful")
+        except Exception as e:
+            print(f"⚠️ Startup login failed: {e}")
+    import threading as _threading_startup_login
+    _threading_startup_login.Thread(target=_startup_login, daemon=True).start()
 
     # ── Startup capture — runs immediately after login ─────────────────────
     try:
