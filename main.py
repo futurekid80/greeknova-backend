@@ -2327,32 +2327,51 @@ def auth_kite_login(body: KiteLoginRequest):
         # is actually a paid customer logging in with an email/Client ID he
         # doesn't recognize yet (a spreadsheet typo, an unregistered ID,
         # etc.) rather than finding out only when they complain.
+        #
+        # Oct 25 2026 FIX: this used to fire on EVERY login from a non-
+        # member, not just their first -- so an existing trial user simply
+        # re-opening the app every day re-sent "unrecognized Zerodha login
+        # / Started on a 7-day trial" on every single login, even days
+        # into an already-running trial (reported: Akshay Satish Patil,
+        # trial_start_date Oct 20, still got this exact ping on a routine
+        # re-login on Oct 25). Gate it the same way the paid-member ping
+        # above already is: only send when kite_login_log has no row yet
+        # for this email, i.e. this really is their first-ever login.
         try:
-            from services.alert_engine import send_telegram
-            # Oct 19 2026 fix: Telegram's "Markdown" parse_mode treats _ * ` [
-            # as formatting characters -- a kite_user_name or kite_email with
-            # an underscore (very common in real emails, e.g. john_doe@...)
-            # left an odd/invalid entity and Telegram silently rejected the
-            # whole message (400, "can't parse entities"), so this ping never
-            # actually arrived even though the code ran with no exception
-            # until the send() call itself. Escape the few Markdown special
-            # characters in every dynamic value before building the message.
-            # FIX (Oct 24 2026): plain text -- see send_telegram() note in
-            # alert_engine.py. The Oct 19 backslash-escaping fix didn't
-            # actually work (legacy Telegram Markdown has no \-escapes),
-            # so this kept silently 400-ing on names/emails with an odd
-            # number of _ * ` [ characters.
-            send_telegram(
-                f"\U0001F514 GreekNova: unrecognized Zerodha login\n"
-                f"Name: {kite_user_name or '-'}\n"
-                f"Kite email: {kite_email or '-'}\n"
-                f"Client ID: {kite_user_id or '-'}\n"
-                f"Started on a 7-day trial. If this is a paid customer, "
-                f"add their Client ID to their beta_users row to upgrade them.",
-                markdown=False,
+            already_seen_trial = (
+                admin.from_("kite_login_log").select("email").eq("email", kite_email).limit(1).execute().data
             )
         except Exception as e:
-            print(f"[KiteLogin] telegram notify skipped: {e}")
+            print(f"[KiteLogin] kite_login_log lookup (trial notify) warning: {e}")
+            already_seen_trial = None
+
+        if not already_seen_trial:
+            try:
+                from services.alert_engine import send_telegram
+                # Oct 19 2026 fix: Telegram's "Markdown" parse_mode treats _ * ` [
+                # as formatting characters -- a kite_user_name or kite_email with
+                # an underscore (very common in real emails, e.g. john_doe@...)
+                # left an odd/invalid entity and Telegram silently rejected the
+                # whole message (400, "can't parse entities"), so this ping never
+                # actually arrived even though the code ran with no exception
+                # until the send() call itself. Escape the few Markdown special
+                # characters in every dynamic value before building the message.
+                # FIX (Oct 24 2026): plain text -- see send_telegram() note in
+                # alert_engine.py. The Oct 19 backslash-escaping fix didn't
+                # actually work (legacy Telegram Markdown has no \-escapes),
+                # so this kept silently 400-ing on names/emails with an odd
+                # number of _ * ` [ characters.
+                send_telegram(
+                    f"\U0001F514 GreekNova: unrecognized Zerodha login\n"
+                    f"Name: {kite_user_name or '-'}\n"
+                    f"Kite email: {kite_email or '-'}\n"
+                    f"Client ID: {kite_user_id or '-'}\n"
+                    f"Started on a 7-day trial. If this is a paid customer, "
+                    f"add their Client ID to their beta_users row to upgrade them.",
+                    markdown=False,
+                )
+            except Exception as e:
+                print(f"[KiteLogin] telegram notify skipped: {e}")
         try:
             existing_trial = (
                 admin.from_("trial_users").select("email,login_count").eq("email", kite_email).execute().data
