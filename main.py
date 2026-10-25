@@ -1967,6 +1967,15 @@ def oi_dates(symbol: str = "NIFTY"):
     from api.oi_history import get_available_dates
     return get_available_dates(symbol.upper())
 
+@app.get("/strike-history/{symbol}")
+def strike_history(symbol: str, date: str, strike: float, option_type: str, expiry: str = None):
+    # Oct 25 2026: one strike's intraday OI+Premium time series, same
+    # oi_snapshots data as the Historical Chain tools above, sliced
+    # differently (one strike all day, instead of all strikes at one
+    # moment) -- see api/historical_chain.py's get_strike_history docstring.
+    from api.historical_chain import get_strike_history
+    return get_strike_history(symbol.upper(), date, strike, option_type.upper(), expiry)
+
 @app.get("/eod-analysis/{symbol}")
 def eod_analysis(symbol: str = "NIFTY", date: str = None, expiry: str = None):
     from api.eod_analysis import get_eod_analysis

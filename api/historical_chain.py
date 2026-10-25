@@ -11,7 +11,7 @@ Earliest available data: 2026-05-26 (nothing survives before that).
 Both tables are queried and merged wherever a date could plausibly live in
 either one, since the exact live/archive cutover date shifts week to week.
 """
-from datetime import datetime, date as date_type
+from datetime import datetime, date as date_type, timedelta
 from utils.db import get_supabase
 from api.option_chain import calculate_iv, calculate_greeks
 
@@ -181,4 +181,103 @@ def get_historical_chain(symbol: str, date_str: str, timestamp: str = None, expi
         "days_left": days_left,
         "expiries": available_expiries,
         "chain": chain,
+    }
+
+
+def get_strike_history(symbol: str, date_str: str, strike: float, option_type: str, expiry: str = None):
+    """Oct 25 2026 (Manish): one strike's full-day OI + premium time series,
+    so a user can see the real intraday move behind an Alert/UOA signal
+    instead of taking the badge's word for it -- same oi_snapshots data
+    this whole file already reads, just sliced by one strike across the
+    whole day instead of one timestamp across the whole chain.
+
+    If expiry isn't given, picks whichever expiry has the most rows for
+    this strike (a stock/index can have this same strike listed under more
+    than one expiry -- see the FUT-placeholder-row comment above for why
+    not every expiry row is a real option)."""
+    supabase = get_supabase()
+    symbol = symbol.upper()
+    option_type = option_type.upper()
+
+    day_start = f"{date_str}T00:00:00+00:00"
+    day_end   = f"{date_str}T23:59:59+00:00"
+
+    def build(q):
+        qq = q.select("timestamp, oi, last_price, volume, expiry")\
+            .eq("symbol", symbol)\
+            .eq("strike", strike)\
+            .eq("option_type", option_type)\
+            .gte("timestamp", day_start)\
+            .lte("timestamp", day_end)\
+            .order("timestamp")\
+            .limit(5000)
+        if expiry:
+            qq = qq.eq("expiry", expiry)
+        return qq
+
+    rows = _query_both_tables(supabase, build)
+    if not rows:
+        return {
+            "symbol": symbol, "date": date_str, "strike": strike,
+            "option_type": option_type, "expiry": expiry, "points": [],
+            "error": "No data for this strike on this date",
+        }
+
+    # Pick the active expiry (most rows) if the caller didn't pin one.
+    if not expiry:
+        counts: dict = {}
+        for r in rows:
+            counts[r["expiry"]] = counts.get(r["expiry"], 0) + 1
+        expiry = max(counts, key=counts.get)
+        rows = [r for r in rows if r["expiry"] == expiry]
+
+    # One point per minute (dedupe the ~1min double-write some crons do),
+    # keeping the LAST reading in each minute.
+    by_minute: dict = {}
+    for r in rows:
+        minute_key = r["timestamp"][:16]  # "...T09:45" -- minute precision
+        by_minute[minute_key] = r
+    points = [
+        {"timestamp": r["timestamp"], "oi": r["oi"], "last_price": r["last_price"], "volume": r["volume"]}
+        for r in sorted(by_minute.values(), key=lambda r: r["timestamp"])
+    ]
+
+    open_ltp = points[0]["last_price"] if points else None
+    last = points[-1] if points else None
+    # OI change over the last ~30 min (same window the Alert cards use),
+    # not the full day -- that's the number that actually matches what an
+    # Alert/UOA badge is claiming.
+    window_start = None
+    if last:
+        last_t = datetime.fromisoformat(last["timestamp"].replace("Z", "+00:00"))
+        target = last_t - timedelta(minutes=30)
+        for p in points:
+            pt = datetime.fromisoformat(p["timestamp"].replace("Z", "+00:00"))
+            if pt <= target:
+                window_start = p
+            else:
+                break
+
+    def pct(a, b):
+        if not a:
+            return None
+        return round((b - a) / a * 100, 1)
+
+    return {
+        "symbol": symbol,
+        "date": date_str,
+        "strike": strike,
+        "option_type": option_type,
+        "expiry": expiry,
+        "points": points,
+        "summary": {
+            "open_ltp": open_ltp,
+            "last_ltp": last["last_price"] if last else None,
+            "last_oi": last["oi"] if last else None,
+            "ltp_from_open_pct": pct(open_ltp, last["last_price"]) if last else None,
+            "oi_window_start": window_start["oi"] if window_start else (points[0]["oi"] if points else None),
+            "oi_window_pct": pct(window_start["oi"], last["oi"]) if window_start and last else (
+                pct(points[0]["oi"], last["oi"]) if points and last else None
+            ),
+        },
     }
