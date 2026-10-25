@@ -244,13 +244,15 @@ def get_strike_history(symbol: str, date_str: str, strike: float, option_type: s
 
     open_ltp = points[0]["last_price"] if points else None
     last = points[-1] if points else None
-    # OI change over the last ~30 min (same window the Alert cards use),
+    # OI change over the last ~5 min (same window the Alert cards use),
     # not the full day -- that's the number that actually matches what an
-    # Alert/UOA badge is claiming.
+    # Alert/UOA badge is claiming. (Oct 25 2026: corrected from an earlier
+    # 30-min assumption -- the real Alert window is ~5 min.)
+    OI_WINDOW_MINUTES = 5
     window_start = None
     if last:
         last_t = datetime.fromisoformat(last["timestamp"].replace("Z", "+00:00"))
-        target = last_t - timedelta(minutes=30)
+        target = last_t - timedelta(minutes=OI_WINDOW_MINUTES)
         for p in points:
             pt = datetime.fromisoformat(p["timestamp"].replace("Z", "+00:00"))
             if pt <= target:
@@ -279,5 +281,6 @@ def get_strike_history(symbol: str, date_str: str, strike: float, option_type: s
             "oi_window_pct": pct(window_start["oi"], last["oi"]) if window_start and last else (
                 pct(points[0]["oi"], last["oi"]) if points and last else None
             ),
+            "oi_window_minutes": OI_WINDOW_MINUTES,
         },
     }
