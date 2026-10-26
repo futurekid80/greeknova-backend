@@ -332,8 +332,14 @@ def get_rollover(supabase):
     prev_mkt_rollover_pct = round(total_prev_next / prev_mkt_total * 100, 1) if prev_mkt_total > 0 else None
 
     # Days to expiry
+    # BUG FIX (Oct 26 2026): expiry_date was a hardcoded literal
+    # (date(2026, 6, 30)) left stale from whenever this was first written --
+    # showed "-118 days to expiry" live on Oct 26 instead of the real ~1 day
+    # to the Oct 27 monthly expiry. curr_expiry is already the real,
+    # correctly-derived current expiry (see _get_real_rollover_expiries
+    # above) -- just use that instead of a separate guess.
     from datetime import date
-    expiry_date = date(2026, 6, 30)
+    expiry_date = date.fromisoformat(curr_expiry)
     today_date  = datetime.now(ist).date()
     dte = (expiry_date - today_date).days
 
