@@ -518,12 +518,22 @@ def get_cpr_scanner_timeframe(timeframe: str = "daily"):
     ist = pytz.timezone('Asia/Kolkata')
     now_ist = datetime.now(ist)
 
+    # FIX (Oct 26 2026): all three branches here used to compute
+    # "next trading day" -- a copy-paste of get_cpr_scanner()'s daily
+    # logic that dropped its market-hours case. During live market hours
+    # this asked for TOMORROW's weekly/monthly CPR row (not computed yet
+    # until tonight's EOD job), so the page showed "No data" even though
+    # today's already-computed weekly CPR was sitting right there valid
+    # all week. Weekly/monthly CPR storage uses the same "stored under
+    # next trading day" convention as daily (see compute_and_store_
+    # weekly_monthly_cpr), so the correct read during market hours is
+    # TODAY's date, exactly like get_cpr_scanner() does.
     if now_ist.weekday() >= 5:
         query_date = _get_next_trading_day(now_ist.date()).isoformat()
     elif now_ist.hour > 16 or (now_ist.hour == 16 and now_ist.minute >= 30):
         query_date = _get_next_trading_day(now_ist.date()).isoformat()
     else:
-        query_date = _get_next_trading_day(now_ist.date()).isoformat()
+        query_date = now_ist.date().isoformat()
 
     rows = supabase.from_("cpr_levels_weekly")\
         .select("*")\
