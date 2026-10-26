@@ -62,36 +62,34 @@ def _get_real_rollover_expiries(supabase, today_date):
     of market hours, and it'll recur every time a future month's last
     Tuesday happens to be a holiday.
 
-    Fix: derive curr/next/prev expiries from the real captured FUT expiry
-    calendar (oi_snapshots + its archive, which is what every other part
-    of rollover.py already queries against) instead of trusting the
-    calendar formula. Falls back to the formula-based guess if fewer than
-    3 real expiries are found around today (first run on a fresh DB, etc).
+    Oct 26 2026 FIX: the original version of this fix queried BOTH
+    oi_snapshots and oi_snapshots_archive to build the expiry list. The
+    archive table is ~120M rows / 23GB with no index covering `expiry`,
+    so that query blew the DB connection's statement_timeout on every
+    single call since this landed on Oct 23 -- confirmed in Railway logs,
+    every request falling back to the (wrong, for Nov 2026) calendar
+    formula. The tracker has been silently blank continuously since then,
+    not just today.
+
+    Real fix: curr/next are BY DEFINITION not-yet-expired, so they are
+    always present in the live oi_snapshots table (captured every 5 min
+    all day) -- the archive table is never actually needed to find them.
+    Only drop to the archive-free calendar formula for the prev/benchmark
+    fields (the historical "vs last series" comparison columns, which
+    don't block the tracker showing current data if they're approximate).
     """
     try:
-        cutoff = (today_date - timedelta(days=50)).isoformat()
-        exps = set()
-        for table in ("oi_snapshots", "oi_snapshots_archive"):
-            r = supabase.from_(table)\
-                .select("expiry")\
-                .eq("option_type", "FUT")\
-                .eq("symbol", "NIFTY")\
-                .gte("expiry", cutoff)\
-                .execute()
-            for row in (r.data or []):
-                if row.get("expiry"):
-                    exps.add(str(row["expiry"])[:10])
-        sorted_exps = sorted(exps)
         today_str = today_date.isoformat()
-        # Current = nearest NOT-yet-expired monthly; next = the one after it.
-        upcoming = [e for e in sorted_exps if e >= today_str]
-        if len(upcoming) >= 2:
-            curr_expiry = upcoming[0]
-            next_expiry = upcoming[1]
-            idx = sorted_exps.index(curr_expiry)
-            prev_curr_expiry = sorted_exps[idx - 1] if idx > 0 else curr_expiry
-            prev_next_expiry = curr_expiry
-            prev_bench_date = prev_curr_expiry
+        r = supabase.from_("oi_snapshots")\
+            .select("expiry")\
+            .eq("option_type", "FUT")\
+            .eq("symbol", "NIFTY")\
+            .gte("expiry", today_str)\
+            .execute()
+        exps = sorted({str(row["expiry"])[:10] for row in (r.data or []) if row.get("expiry")})
+        if len(exps) >= 2:
+            curr_expiry, next_expiry = exps[0], exps[1]
+            _, _, prev_curr_expiry, prev_next_expiry, prev_bench_date = _get_rollover_expiries(today_date)
             return (curr_expiry, next_expiry, prev_curr_expiry, prev_next_expiry, prev_bench_date)
     except Exception as e:
         print(f"[ROLLOVER] Real-expiry lookup failed, falling back to calendar formula: {e}")
