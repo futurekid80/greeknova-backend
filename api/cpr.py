@@ -345,16 +345,30 @@ def compute_and_store_weekly_monthly_cpr(trade_date: str = None):
 
     all_symbols = INDICES + STOCKS
 
+    # FIX (Oct 26 2026): week/month boundaries must anchor on `trade_date`
+    # (the date this CPR row is FOR), not on `today` (the date the job
+    # happens to run). They're the same on an ordinary Mon-Thu run, since
+    # "today" and "tomorrow" fall in the same week either way -- but the
+    # Friday-evening run that produces the FOLLOWING Monday's row computes
+    # for a date in the NEW week while `today` is still in the OLD one,
+    # so anchoring on `today` subtracts an extra 7 days it shouldn't and
+    # lands two weeks back instead of one. Caught via Manish noticing
+    # BHARATFORG's weekly CPR (badged "Extremely Narrow") didn't match a
+    # visibly volatile week on the chart -- it had quietly used Oct 12-16
+    # instead of Oct 19-23. Same root cause would hit monthly CPR once a
+    # month at the month-end rollover.
+    target_date = date_type.fromisoformat(trade_date)
+
     # Weekly CPR always uses the PREVIOUS completed week (Mon-Fri)
     # GoCharting convention: prev week H/L/C → current/next week's CPR
-    this_week_monday = today - timedelta(days=today.weekday())  # Mon of current week
+    this_week_monday = target_date - timedelta(days=target_date.weekday())  # Mon of trade_date's week
     prev_week_monday = this_week_monday - timedelta(days=7)
     prev_week_friday = this_week_monday - timedelta(days=3)
 
     week_start = prev_week_monday
     week_end   = prev_week_friday
 
-    first_of_month = today.replace(day=1)
+    first_of_month = target_date.replace(day=1)
     prev_month_end = first_of_month - timedelta(days=1)
     prev_month_start = prev_month_end.replace(day=1)
 
