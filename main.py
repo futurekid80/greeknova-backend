@@ -3303,7 +3303,7 @@ async def custom_scanner(request: Request):
     return run_custom_scan(conditions, date)
 
 @app.get("/option-stealth-buildup")
-def option_stealth_buildup(date: str = None, zone: str = None):
+def option_stealth_buildup(date: str = None, zone: str = None, window: str = None):
     """(Oct 27 2026): Option Strike Stealth Buildup -- per-strike OI piling
     up hard while that strike's own premium stays quiet. `zone` is the same
     selectable ATM/+-1/+-2/+-5/+-10/All strike-zone filter already used on
@@ -3313,10 +3313,16 @@ def option_stealth_buildup(date: str = None, zone: str = None):
     FUT-level Stealth Buildup hit right now (api/positional_intelligence.py),
     always capped to ATM+-5 regardless of the zone picked above -- that cap
     is Manish's Oct 25 2026 scope call and isn't meant to be adjustable.
+    `window` picks the comparison baseline -- "5min" (default, the original
+    instant-pulse window), "hourly" (new, intraday monitoring), or "eod"
+    (new, since-today's-market-open, live-running -- for next-day trade
+    planning the same way Positional Intelligence's Elite Setups are used).
     See services/option_stealth_buildup.py's module docstring for the full
-    design rationale and for why the tier thresholds there are a first pass."""
-    from services.option_stealth_buildup import run_option_stealth_scan, DEFAULT_ZONE
-    return run_option_stealth_scan(get_supabase(), date, zone or DEFAULT_ZONE)
+    design rationale and for why the tier thresholds there (especially
+    hourly/eod, added Oct 27 2026) are a first pass pending Manish watching
+    a normal, non-expiry session."""
+    from services.option_stealth_buildup import run_option_stealth_scan, DEFAULT_ZONE, DEFAULT_WINDOW
+    return run_option_stealth_scan(get_supabase(), date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW)
 
 @app.get("/straddle-chart/{symbol}")
 def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):

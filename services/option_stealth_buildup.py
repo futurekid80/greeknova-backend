@@ -26,18 +26,33 @@ Scope decisions locked with Manish on Oct 25 2026 (see memory notes):
   - Manual-run only for now, same as Custom Scanner (no push alerting) --
     prove it live first.
 
-Tier thresholds below are a FIRST PASS, not validated against a live
-trading session (built post-market on an expiry day) -- flagged to Manish
-to tune after seeing real results, the same way Custom Scanner's MIN_OI_PCT
-was an initial guess. Unlike the FUT-level scanner's daily open->close
-OI%/price%, these are per-STRIKE changes over a single 5-min snapshot pair,
-which is a very different scale -- don't assume the FUT-level numbers
-(ELITE >=2% OI / <=0.5% price) transfer directly; they don't.
+Oct 27 2026 follow-up -- multiple time windows: Manish wants to use this
+the same way he uses Positional Intelligence's Elite Setups -- an EOD/
+since-open cumulative read at day end to plan next-day trades -- on top of
+the original 5-min "instant pulse" window, plus an hourly window as a
+middle ground for intraday monitoring. All three windows share the same
+scan logic (services/oi_diff.py's new fetch_oi_diff_window, a generalized
+sibling of fetch_latest_oi_diff with a configurable baseline) and the same
+zone/Confluence machinery below -- only the baseline snapshot, the min-OI
+floor, and the tier cutoffs change per window (see WINDOWS below).
+
+IMPORTANT CALIBRATION CAVEAT: the hourly/EOD tier cutoffs were sanity-
+checked against real Supabase data on Oct 27 2026 -- but Oct 27 2026 is
+NIFTY's own monthly expiry day, which turned out to make that data useless
+for calibration: next-month OI grows mechanically by several hundred to
+several thousand percent all day as positions roll from the expiring
+contract into the new month (confirmed via direct SQL -- e.g. a liquid
+large-cap CE at 20k+ opening OI still closed the day up 600-1100%). That's
+structural rollover volume, not a "stealth" signal, and it would swamp any
+threshold picked from today's numbers. The cutoffs below are therefore a
+genuine first-pass GUESS (same posture the original 5-min thresholds
+started from), picked to be directionally sensible rather than fitted to
+today's contaminated data -- flagged to Manish to tune once he's watched a
+normal (non-expiry) session on each window, same as the 5-min tiers.
 """
-from services.oi_diff import fetch_latest_oi_diff
+from services.oi_diff import fetch_latest_oi_diff, fetch_oi_diff_window
 from services.strike_zones import build_strike_index_map, strikes_away, in_zone, ZONE_OPTIONS
 
-MIN_OLD_OI = 1000        # same floor used everywhere else before trusting a % change
 CONFLUENCE_MAX_STRIKES_AWAY = 5  # Manish's Oct 25 call: ATM+-5 only for Confluence
 
 # (Oct 27 2026): a real-data sanity check (on NIFTY's own monthly expiry
@@ -51,17 +66,52 @@ CONFLUENCE_MAX_STRIKES_AWAY = 5  # Manish's Oct 25 call: ATM+-5 only for Conflue
 # to avoid noise" ask.
 DEFAULT_ZONE = "5"
 
-# tier: (min OI % growth over the 5-min window, max |premium % change|)
-TIERS = [
-    ("ELITE",  25.0, 3.0),
-    ("STRONG", 15.0, 5.0),
-    ("WATCH",   8.0, 8.0),
-]
+DEFAULT_WINDOW = "5min"
+
+# Per-window config: lookback_minutes (None = since today's market open,
+# live-running), min_old_oi (floor before trusting a % change -- raised for
+# the longer windows since the baseline has had more time to grow and
+# illiquid-contract noise gets worse the further back the baseline goes),
+# and tiers (min OI % growth over the window, max |premium % change| over
+# the same window). See the module docstring's calibration caveat above --
+# hourly/EOD numbers are an unvalidated first pass.
+WINDOWS = {
+    "5min": {
+        "label": "5-min",
+        "lookback_minutes": 5,
+        "min_old_oi": 1000,
+        "tiers": [
+            ("ELITE",  25.0, 3.0),
+            ("STRONG", 15.0, 5.0),
+            ("WATCH",   8.0, 8.0),
+        ],
+    },
+    "hourly": {
+        "label": "Hourly",
+        "lookback_minutes": 60,
+        "min_old_oi": 3000,
+        "tiers": [
+            ("ELITE",  40.0, 6.0),
+            ("STRONG", 25.0, 10.0),
+            ("WATCH",  15.0, 15.0),
+        ],
+    },
+    "eod": {
+        "label": "EOD / since open",
+        "lookback_minutes": None,
+        "min_old_oi": 10000,
+        "tiers": [
+            ("ELITE",  60.0, 10.0),
+            ("STRONG", 40.0, 18.0),
+            ("WATCH",  25.0, 28.0),
+        ],
+    },
+}
 TIER_LABELS = {"ELITE": "Elite", "STRONG": "Strong", "WATCH": "Watch"}
 
 
-def _classify(oi_pct: float, premium_pct: float):
-    for tier, min_oi, max_prem in TIERS:
+def _classify(oi_pct: float, premium_pct: float, tiers):
+    for tier, min_oi, max_prem in tiers:
         if oi_pct >= min_oi and abs(premium_pct) <= max_prem:
             return tier, TIER_LABELS[tier]
     return None, None
@@ -80,14 +130,26 @@ def _fut_stealth_symbols():
         return set()
 
 
-def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE) -> dict:
-    new_data, old_map, cmp_map, ts_new, ts_old, timestamps = fetch_latest_oi_diff(supabase, date)
+def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE, window: str = DEFAULT_WINDOW) -> dict:
+    cfg = WINDOWS.get(window) or WINDOWS[DEFAULT_WINDOW]
+
+    if cfg["lookback_minutes"] == 5:
+        # Keep using the original, already-live fetch for the default 5-min
+        # window -- zero behavior change for existing callers/results.
+        new_data, old_map, cmp_map, ts_new, ts_old, timestamps = fetch_latest_oi_diff(supabase, date)
+    else:
+        new_data, old_map, cmp_map, ts_new, ts_old, timestamps = fetch_oi_diff_window(
+            supabase, date, lookback_minutes=cfg["lookback_minutes"]
+        )
 
     if not new_data or ts_new is None:
         return {"error": "Need at least 2 snapshots", "hits": [], "total": 0}
 
     index_map = build_strike_index_map(new_data, cmp_map)
     fut_stealth_symbols = _fut_stealth_symbols()
+
+    min_old_oi = cfg["min_old_oi"]
+    tiers = cfg["tiers"]
 
     hits = []
     for row in new_data:
@@ -109,7 +171,7 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
 
         old_oi = old_row.get("oi") or 0
         new_oi = row.get("oi") or 0
-        if old_oi < MIN_OLD_OI:
+        if old_oi < min_old_oi:
             continue
         oi_pct = (new_oi - old_oi) / old_oi * 100
         if oi_pct <= 0:
@@ -121,7 +183,7 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
             continue
         premium_pct = (new_premium - old_premium) / old_premium * 100
 
-        tier, tier_label = _classify(oi_pct, premium_pct)
+        tier, tier_label = _classify(oi_pct, premium_pct, tiers)
         if not tier:
             continue
 
@@ -156,6 +218,9 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         "ts_new": ts_new,
         "ts_old": ts_old,
         "zone": zone,
+        "window": window,
+        "window_label": cfg["label"],
+        "tiers": tiers,  # so the frontend can render the correct legend numbers per window without hardcoding them
         "total": len(hits),
         "confluence_count": sum(1 for h in hits if h["is_confluence"]),
         "hits": hits,
