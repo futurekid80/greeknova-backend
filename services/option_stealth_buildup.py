@@ -35,21 +35,21 @@ which is a very different scale -- don't assume the FUT-level numbers
 (ELITE >=2% OI / <=0.5% price) transfer directly; they don't.
 """
 from services.oi_diff import fetch_latest_oi_diff
-from services.strike_zones import build_strike_index_map, strikes_away
+from services.strike_zones import build_strike_index_map, strikes_away, in_zone, ZONE_OPTIONS
 
 MIN_OLD_OI = 1000        # same floor used everywhere else before trusting a % change
 CONFLUENCE_MAX_STRIKES_AWAY = 5  # Manish's Oct 25 call: ATM+-5 only for Confluence
 
-# Hygiene guard for the scanner itself (separate from the tighter
-# Confluence-only ATM+-5 cap above). Added after a real-data sanity check
-# (Oct 27 2026, on NIFTY's own monthly expiry day -- so an unusually
-# churny session) showed ~430 raw hits across the WHOLE F&O universe with
-# no zone restriction at all, most of it deep-OTM strikes where OI is thin
-# enough that small absolute changes register as huge %, i.e. exactly the
-# kind of tail noise Manish flagged for Confluence. Scoping the whole
-# scanner to ATM+-10 keeps results to strikes someone could plausibly
-# trade, while staying wider than Confluence's tighter ATM+-5.
-MAX_STRIKES_AWAY = 10
+# (Oct 27 2026): a real-data sanity check (on NIFTY's own monthly expiry
+# day -- so an unusually churny session) showed ~430 raw hits across the
+# WHOLE F&O universe with no zone restriction at all, most of it deep-OTM
+# strikes where OI is thin enough that small absolute changes register as
+# huge %. Manish's own call: give this the SAME selectable ATM/+-1/+-2/
+# +-5/+-10/All zone filter already used on Jungle/UOA/OI Profile/Alerts
+# (services/strike_zones.py's ZONE_OPTIONS) instead of a hardcoded cap --
+# default to "5" so it's quiet out of the box, same spirit as his "ATM+-5
+# to avoid noise" ask.
+DEFAULT_ZONE = "5"
 
 # tier: (min OI % growth over the 5-min window, max |premium % change|)
 TIERS = [
@@ -80,7 +80,7 @@ def _fut_stealth_symbols():
         return set()
 
 
-def run_option_stealth_scan(supabase, date: str = None) -> dict:
+def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE) -> dict:
     new_data, old_map, cmp_map, ts_new, ts_old, timestamps = fetch_latest_oi_diff(supabase, date)
 
     if not new_data or ts_new is None:
@@ -100,7 +100,7 @@ def run_option_stealth_scan(supabase, date: str = None) -> dict:
             continue
 
         sa = strikes_away(symbol, strike, index_map)
-        if sa is None or abs(sa) > MAX_STRIKES_AWAY:
+        if not in_zone(sa, zone):
             continue
         key = f"{symbol}_{row['tradingsymbol']}"
         old_row = old_map.get(key)
@@ -154,6 +154,7 @@ def run_option_stealth_scan(supabase, date: str = None) -> dict:
         "date": (date or (ts_new[:10] if ts_new else None)),
         "ts_new": ts_new,
         "ts_old": ts_old,
+        "zone": zone,
         "total": len(hits),
         "confluence_count": sum(1 for h in hits if h["is_confluence"]),
         "hits": hits,

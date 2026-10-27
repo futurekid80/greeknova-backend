@@ -3303,16 +3303,20 @@ async def custom_scanner(request: Request):
     return run_custom_scan(conditions, date)
 
 @app.get("/option-stealth-buildup")
-def option_stealth_buildup(date: str = None):
+def option_stealth_buildup(date: str = None, zone: str = None):
     """(Oct 27 2026): Option Strike Stealth Buildup -- per-strike OI piling
-    up hard while that strike's own premium stays quiet, within ATM+-10.
-    A "Confluence" flag marks symbols that ALSO have a live FUT-level
-    Stealth Buildup hit right now (api/positional_intelligence.py), within
-    ATM+-5 -- Manish's Oct 25 2026 scope call. See services/
-    option_stealth_buildup.py's module docstring for the full design
-    rationale and for why the tier thresholds there are a first pass."""
-    from services.option_stealth_buildup import run_option_stealth_scan
-    return run_option_stealth_scan(get_supabase(), date)
+    up hard while that strike's own premium stays quiet. `zone` is the same
+    selectable ATM/+-1/+-2/+-5/+-10/All strike-zone filter already used on
+    Jungle/UOA/OI Profile/Alerts (services/strike_zones.py) -- defaults to
+    "5" per Manish's own call to keep this quiet out of the box. A
+    "Confluence" flag separately marks symbols that ALSO have a live
+    FUT-level Stealth Buildup hit right now (api/positional_intelligence.py),
+    always capped to ATM+-5 regardless of the zone picked above -- that cap
+    is Manish's Oct 25 2026 scope call and isn't meant to be adjustable.
+    See services/option_stealth_buildup.py's module docstring for the full
+    design rationale and for why the tier thresholds there are a first pass."""
+    from services.option_stealth_buildup import run_option_stealth_scan, DEFAULT_ZONE
+    return run_option_stealth_scan(get_supabase(), date, zone or DEFAULT_ZONE)
 
 @app.get("/straddle-chart/{symbol}")
 def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):
