@@ -39,6 +39,11 @@ def _fmt_oi(n):
         return f"{n/10000000:.1f}Cr"
     if abs(n) >= 100000:
         return f"{n/100000:.1f}L"
+    # (Oct 27 2026, Vinod feedback): below 1L this used to fall through to a
+    # plain comma-grouped number (e.g. "47,175"), inconsistent with every
+    # other OI figure on the page being in L/Cr. Round to K for readability.
+    if abs(n) >= 1000:
+        return f"{n/1000:.0f}K"
     return f"{n:,.0f}"
 
 
@@ -90,8 +95,15 @@ def _check_options_jungle(supabase):
 
         oi_pct = spike.get("oi_pct", 0)
         interp = spike.get("interpretation")
+        # (Oct 27 2026, Vinod feedback): "in 5 min" was repeated on every
+        # single OI-spike/Jungle-signal alert, all day -- all these alerts
+        # share the SAME fixed 5-min window, so saying it once (as a page-
+        # level note on /alerts) instead of per-row cuts the repetition
+        # without losing the information. NOT applied to NEAR_STRIKE_UNWIND
+        # below, which genuinely uses a different (~20min) window and still
+        # needs to say so per-alert.
         body = (
-            f"OI {'+' if oi_pct > 0 else ''}{oi_pct}% in 5 min | "
+            f"OI {'+' if oi_pct > 0 else ''}{oi_pct}% | "
             f"OI: {_fmt_oi(spike.get('new_oi'))} | LTP: ₹{spike.get('last_price')}"
             + (f" | {interp.replace('_', ' ')}" if interp else "")
         )
