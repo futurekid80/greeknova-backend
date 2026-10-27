@@ -133,6 +133,7 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
                 and abs(sa) <= CONFLUENCE_MAX_STRIKES_AWAY
             ),
             "strike": strike,
+            "expiry": row.get("expiry"),  # YYYY-MM-DD -- lets Manish tell weekly vs monthly apart at a glance
             "option_type": opt_type,
             "strikes_away": sa,
             "cmp": cmp_map.get(symbol),
