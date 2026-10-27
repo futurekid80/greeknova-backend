@@ -429,6 +429,31 @@ async def lifespan(app: FastAPI):
 
     def _run_gamma_exposure_refresh_job():
         try:
+            # BUG FIX (Oct 27 2026): this job ran unconditionally every 3
+            # minutes with no trading-day/market-hours gate at all -- so on
+            # a weekend or a mid-week holiday (e.g. Oct 20 2026), it kept
+            # recomputing off the last real snapshot (_resolve_gex_day()
+            # rolls back to the last trading day when today has no fresh
+            # data) and re-inserting that SAME stale regime into
+            # gex_regime_log every single cycle, all day -- hundreds of
+            # duplicate rows stamped with a non-trading date, discovered
+            # while pulling a week's regime history for a video script
+            # (Oct 24/25 weekend and Oct 20 holiday all showed up with full
+            # days of "data" that was just Oct 19's close replayed).
+            # Same root cause already fixed once in _run_push_checks_job
+            # (Oct 2 2026) -- mirroring that exact gate here.
+            from utils.market_calendar import is_trading_day
+            from datetime import datetime as _dt
+            import pytz as _pytz
+            _ist = _pytz.timezone("Asia/Kolkata")
+            _now = _dt.now(_ist)
+            _is_mkt = (
+                _now.weekday() < 5
+                and is_trading_day(_now.date())
+                and (9*60+15) <= (_now.hour*60+_now.minute) <= (15*60+40)
+            )
+            if not _is_mkt:
+                return
             from services.gamma_exposure import refresh_gamma_exposure_cache
             refresh_gamma_exposure_cache()
         except Exception as e:
