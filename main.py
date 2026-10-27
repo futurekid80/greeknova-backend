@@ -3302,6 +3302,18 @@ async def custom_scanner(request: Request):
         return {"error": "conditions (a non-empty list) is required", "matches": [], "total": 0}
     return run_custom_scan(conditions, date)
 
+@app.get("/option-stealth-buildup")
+def option_stealth_buildup(date: str = None):
+    """(Oct 27 2026): Option Strike Stealth Buildup -- per-strike OI piling
+    up hard while that strike's own premium stays quiet, within ATM+-10.
+    A "Confluence" flag marks symbols that ALSO have a live FUT-level
+    Stealth Buildup hit right now (api/positional_intelligence.py), within
+    ATM+-5 -- Manish's Oct 25 2026 scope call. See services/
+    option_stealth_buildup.py's module docstring for the full design
+    rationale and for why the tier thresholds there are a first pass."""
+    from services.option_stealth_buildup import run_option_stealth_scan
+    return run_option_stealth_scan(get_supabase(), date)
+
 @app.get("/straddle-chart/{symbol}")
 def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):
     from api.straddle_chart import get_straddle_chart
