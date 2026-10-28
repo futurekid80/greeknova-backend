@@ -410,6 +410,52 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"⚠️ Startup capture failed: {e}")
 
+    # ── Wolves TF cache self-heal (Oct 28 2026) ─────────────────────────────
+    # BUG FOUND: wolves_tf_cache (the Daily/Weekly/Monthly ADX/RSI/BB state
+    # that /wolves's "Swing Event" rows read) is refreshed by a single
+    # once-a-day cron at 15:50 IST (see wolves_tf_cache_refresh below). That
+    # cron is wall-clock scheduled on the IN-PROCESS scheduler, so if a
+    # deploy restarts the server anywhere in the 15:40-16:00 IST window --
+    # which is exactly when same-day post-market bug-fix deploys land per
+    # standing policy -- the old process dies before 15:50 and the new one
+    # starts after it, silently skipping that whole day's refresh with no
+    # catch-up. Confirmed via Supabase: every row in wolves_tf_cache was
+    # still stamped updated_at=2026-10-16, 12 days stale, universe-wide --
+    # Manish caught it because INDHOTEL's real ADX had crossed 25 live but
+    # the frozen Oct 16 cache (23.38) never knew. Fix: on every startup,
+    # check the cache's newest computed_date against the most recently
+    # completed trading day -- if it's stale, kick off a background
+    # refresh_tf_cache() immediately instead of waiting for the next lucky
+    # 15:50 window. Self-healing regardless of deploy timing.
+    def _wolves_cache_self_heal():
+        try:
+            from utils.market_calendar import today_ist, is_trading_day, get_prev_trading_day
+            from datetime import datetime as _dt
+            import pytz as _pytz
+
+            now_ist = _dt.now(_pytz.timezone("Asia/Kolkata"))
+            today = today_ist()
+            if is_trading_day(today) and (now_ist.hour, now_ist.minute) >= (15, 50):
+                expected_date = today
+            else:
+                expected_date = get_prev_trading_day(today) if is_trading_day(today) else get_prev_trading_day(today)
+
+            supabase = get_supabase()
+            row = supabase.from_("wolves_tf_cache").select("computed_date").order("computed_date", desc=True).limit(1).execute().data
+            newest = row[0]["computed_date"] if row else None
+
+            if newest is None or newest < expected_date.isoformat():
+                print(f"[WOLVES] Self-heal: tf_cache newest={newest}, expected>={expected_date.isoformat()} -- stale, refreshing now")
+                from services.wolves_scanner import refresh_tf_cache
+                res = refresh_tf_cache()
+                print(f"[WOLVES] Self-heal refresh done: {res}")
+            else:
+                print(f"[WOLVES] Self-heal: tf_cache is current (newest={newest}), no action needed")
+        except Exception as e:
+            print(f"[WOLVES] Self-heal check failed: {e}")
+    import threading as _threading_wolves_heal
+    _threading_wolves_heal.Thread(target=_wolves_cache_self_heal, daemon=True).start()
+
     # CLEANUP (Aug 7 2026): removed the /positional-radar warm-up here --
     # confirmed both positional_radar_cache (the table) and /positional-radar
     # (the endpoint) are fully orphaned. Positional Intelligence was rebuilt
