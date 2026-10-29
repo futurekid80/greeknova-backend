@@ -246,12 +246,13 @@ def _kite_session_stale(email: str) -> bool:
     return last != today_ist().isoformat()
 
 
-# FIX (Oct 24 2026): real expiry enforcement. A member's access is only
-# ever cut off this many days AFTER beta_users.expires_at, never exactly
-# on it -- payment dates/timezones/manual admin entries are imprecise
-# enough that a hard cutoff risks bouncing someone who genuinely renewed
-# on time. 15 days chosen as a reasonable default; easy to tune via env.
-MEMBER_GRACE_DAYS = int(os.getenv("MEMBER_GRACE_DAYS", "15"))
+# FIX (Oct 24 2026, revised Oct 29 2026): real expiry enforcement. A member's
+# access is only ever cut off this many days AFTER beta_users.expires_at, never
+# exactly on it -- payment dates/timezones/manual admin entries are imprecise
+# enough that a hard cutoff risks bouncing someone who genuinely renewed on
+# time. 3 days is enough slack for that without leaving a lapsed member in
+# for two extra weeks; easy to tune via env.
+MEMBER_GRACE_DAYS = int(os.getenv("MEMBER_GRACE_DAYS", "3"))
 
 def _access_status(email: str) -> str:
     """Returns 'member' (permanent, beta_users, not expired or no expiry
