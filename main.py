@@ -3501,6 +3501,9 @@ def option_stealth_buildup(date: str = None, zone: str = None, window: str = Non
         if hit and time.time() - hit[0] < ttl:
             return hit[1]
         result = run_option_stealth_scan(get_supabase(), date, key[1], key[2])
+        if key[2] == "eod" and isinstance(result, dict) and not result.get("error"):
+            from services.option_stealth_buildup import enrich_intraday
+            result = enrich_intraday(get_supabase(), result)
         if not (isinstance(result, dict) and result.get("error")):
             _STEALTH_SCAN_CACHE[key] = (time.time(), result)
         return result

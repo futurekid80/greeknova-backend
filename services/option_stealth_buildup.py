@@ -367,3 +367,117 @@ def get_saved_events(supabase, date: str = None, window: str = DEFAULT_WINDOW, z
                                TIER_RANK.get(e["best_tier"], 3), -float(e["oi_pct"] or 0)))
     return {"date": q_date, "window": window, "window_label": WINDOWS[window]["label"],
             "zone": zone, "total": len(events), "events": events}
+
+
+# ---------------------------------------------------------------------------
+# Oct 31 2026: intraday context for EOD-window hits (INDHOTEL 860 CE case)
+# ---------------------------------------------------------------------------
+# The EOD label compares only prev-close vs now, so a premium that swings and
+# returns (INDHOTEL 860 CE: 5.50 -> 8.20 -> 5.45 -> 5.50) reads "Quiet" even
+# though most of the OI was added in the last hour while premium fell (writing).
+# This adds, per hit: the day's premium range, how much of the build came in
+# the last hour, and what the LAST HOUR on its own looks like -- plus a
+# conflict flag when the two readings disagree. EOD window only (the extra
+# per-contract history query is heavier), cached per capture cycle.
+_INTRADAY_CACHE: dict = {}   # ts_new -> {tradingsymbol: stats}
+LAST_HOUR_MIN = 60
+CONFLICT_MIN_SHARE = 30.0    # last hour must hold >=30% of the day's OI build to matter
+
+
+def _ist_day_start_utc(ts_new: str):
+    dt = datetime.fromisoformat(ts_new.replace("Z", "+00:00"))
+    ist = dt + timedelta(hours=5, minutes=30)
+    start_ist = ist.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (start_ist - timedelta(hours=5, minutes=30)).astimezone(timezone.utc), dt
+
+
+def _fetch_history(supabase, symbols: list, start_iso: str, end_iso: str) -> dict:
+    from concurrent.futures import ThreadPoolExecutor
+    out: dict = {}
+
+    def _one(chunk):
+        rows, offset = [], 0
+        while offset < 20000:
+            batch = supabase.from_("oi_snapshots").select("tradingsymbol,timestamp,oi,last_price") \
+                .in_("tradingsymbol", chunk).gte("timestamp", start_iso).lte("timestamp", end_iso) \
+                .order("timestamp").range(offset, offset + 999).execute().data or []
+            rows.extend(batch)
+            if len(batch) < 1000:
+                break
+            offset += 1000
+        return rows
+
+    chunks = [symbols[i:i + 40] for i in range(0, len(symbols), 40)]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        for rows in ex.map(lambda c: _safe(_one, c), chunks):
+            for r in rows or []:
+                out.setdefault(r["tradingsymbol"], []).append(r)
+    return out
+
+
+def _safe(fn, arg):
+    try:
+        return fn(arg)
+    except Exception as e:
+        print(f"[OptionStealth] intraday chunk failed: {e}")
+        return []
+
+
+def enrich_intraday(supabase, result: dict) -> dict:
+    """Adds prem_low/prem_high/prem_range_pct, hr_* fields and activity_conflict
+    to each hit in an EOD scan result. Best-effort: on any failure the plain
+    result is returned unchanged."""
+    try:
+        hits = result.get("hits") or []
+        ts_new = result.get("ts_new")
+        if not hits or not ts_new:
+            return result
+        cached = _INTRADAY_CACHE.get(ts_new)
+        if cached is None:
+            day_start, dt_new = _ist_day_start_utc(ts_new)
+            syms = sorted({h["tradingsymbol"] for h in hits if h.get("tradingsymbol")})
+            cached = {"hist": _fetch_history(supabase, syms, day_start.isoformat(), ts_new)}
+            _INTRADAY_CACHE.clear()          # keep only the latest cycle
+            _INTRADAY_CACHE[ts_new] = cached
+        hist = cached["hist"]
+        dt_new = datetime.fromisoformat(ts_new.replace("Z", "+00:00"))
+        hr_cut = dt_new - timedelta(minutes=LAST_HOUR_MIN)
+
+        for h in hits:
+            series = hist.get(h.get("tradingsymbol")) or []
+            if len(series) < 3:
+                continue
+            prices = [float(r["last_price"]) for r in series if r.get("last_price")]
+            if prices:
+                h["prem_low"], h["prem_high"] = min(prices), max(prices)
+                base = h.get("old_premium") or 0
+                if base > 0:
+                    h["prem_range_pct"] = round((h["prem_high"] - h["prem_low"]) / base * 100, 1)
+            ref = None
+            for r in series:
+                ts = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
+                if ts <= hr_cut:
+                    ref = r
+                else:
+                    break
+            if ref is None or not ref.get("oi") or not ref.get("last_price"):
+                continue
+            hr_old_oi, hr_old_prem = ref["oi"], float(ref["last_price"])
+            hr_added = h["new_oi"] - hr_old_oi
+            day_added = h["new_oi"] - h["old_oi"]
+            h["hr_oi_added"] = hr_added
+            h["hr_oi_pct"] = round(hr_added / hr_old_oi * 100, 1) if hr_old_oi else None
+            if hr_old_prem > 0:
+                h["hr_prem_pct"] = round((h["new_premium"] - hr_old_prem) / hr_old_prem * 100, 2)
+            if day_added > 0:
+                h["hr_share_pct"] = round(max(hr_added, 0) / day_added * 100)
+            if hr_added > 0 and h.get("hr_prem_pct") is not None:
+                act, label = _activity(h["option_type"], h["hr_prem_pct"])
+                h["hr_activity"], h["hr_activity_label"] = act, label
+                h["activity_conflict"] = bool(
+                    act != h.get("activity") and (h.get("hr_share_pct") or 0) >= CONFLICT_MIN_SHARE
+                )
+        return result
+    except Exception as e:
+        print(f"[OptionStealth] enrich_intraday failed: {e}")
+        return result

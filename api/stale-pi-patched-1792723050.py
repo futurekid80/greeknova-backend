@@ -1,0 +1,728 @@
+"""
+positional_intelligence.py
+Unified scanner combining:
+  - Active Conviction  : 2+ consecutive FUT signal days (from daily_oi_summary.fut_signal)
+  - Stealth Buildup    : Top FUT OI rank + small price candle
+  - Volume Breakout    : FUT vol > 1.5x 5-day avg + OI confirmation
+  - Series Buildup     : 60%+ consistent signal days over full series
+
+Single source of truth: daily_oi_summary.fut_signal (FUT open→close classification)
+"""
+import time as time_module
+import threading
+from datetime import datetime, timezone, timedelta
+from collections import defaultdict
+
+_cache: dict = {}
+_cache_time: float = 0.0
+_CACHE_TTL = 300  # 5 min during market, 3600 post-market
+_compute_lock = threading.Lock()
+
+
+def _current_ttl():
+    import pytz
+    ist = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.now(ist)
+    is_market = now_ist.weekday() < 5 and (9 * 60 + 15) <= (now_ist.hour * 60 + now_ist.minute) <= (15 * 60 + 40)
+    return 300 if is_market else 3600
+
+
+def _get_expiry_and_series(today):
+    """Get current monthly expiry and series start date."""
+    from api.positional_radar import get_current_expiry, get_series_start
+    expiry = get_current_expiry(today)
+    series_start = get_series_start(expiry)
+    return expiry, series_start
+
+
+def _classify_stealth_tier(rank, abs_price, net_delta_bullish):
+    """Classify stealth buildup tier."""
+    if rank <= 3 and abs_price <= 0.5 and net_delta_bullish:
+        return "ELITE", "Elite"
+    elif rank <= 3 and abs_price <= 1.0:
+        return "STRONG", "Strong"
+    elif rank <= 5 and abs_price <= 1.5:
+        return "WATCH", "Watch"
+    return None, None
+
+
+def clear_positional_intelligence_cache():
+    """Clear the in-memory cache so the next call fetches fresh data.
+    BUG FIX (Aug 10 2026): nothing was calling this (it didn't even exist)
+    -- the 1-hour post-market cache TTL meant that if this got populated
+    even slightly before the 4:45 PM EOD job finished writing today's
+    daily_oi_summary row, the Stealth Buildup / Volume Breakout cards
+    would keep showing missing Volume for up to an hour afterward, with
+    nothing forcing a refresh once the real data actually became
+    available. Now called right after compute_daily_summary() finishes."""
+    global _cache, _cache_time
+    _cache = {}
+    _cache_time = 0.0
+
+
+def get_positional_intelligence(min_consec: int = 0):
+    """Oct 21 2026 PERF FIX (launch-day incident): the real computation
+    below (_get_positional_intelligence_uncached) is expensive and was
+    being called with no lock, so once real concurrent launch traffic
+    showed up, several requests landing right as the 5-min cache
+    expired would all trigger a full recompute in parallel ("thundering
+    herd"), fighting each other for DB connections -- traced via
+    repeated 15-30s p90/p95/p99 latency spikes on launch day. Now only
+    the first caller past an expired cache actually recomputes; anyone
+    else queued behind the lock gets served the result that call just
+    cached, instead of starting its own redundant recompute."""
+    cache_key = str(min_consec)
+    ttl = _current_ttl()
+    cached = _cache.get(cache_key)
+    if cached and (time_module.time() - _cache_time) < ttl:
+        return cached
+    with _compute_lock:
+        cached = _cache.get(cache_key)
+        if cached and (time_module.time() - _cache_time) < ttl:
+            return cached
+        return _get_positional_intelligence_uncached(min_consec)
+
+
+def _get_positional_intelligence_uncached(min_consec: int = 0):
+    global _cache, _cache_time
+
+    import pytz
+    ist = pytz.timezone("Asia/Kolkata")
+    now_ist = datetime.now(ist)
+    # BUG FIX (Aug 10 2026): was checking market close at 15:30 -- the
+    # same pre-CAS assumption already fixed elsewhere (services.
+    # alert_engine.is_market_hours etc.) when SEBI's Closing Auction
+    # Session extended F&O trading to 15:40. This file never got that
+    # fix, so it switched to the longer 1-hour post-market cache TTL
+    # 10 minutes too early every day.
+    is_market = now_ist.weekday() < 5 and (9 * 60 + 15) <= (now_ist.hour * 60 + now_ist.minute) <= (15 * 60 + 40)
+    ttl = 300 if is_market else 3600
+
+    cache_key = str(min_consec)
+    if _cache.get(cache_key) and (time_module.time() - _cache_time) < ttl:
+        return _cache[cache_key]
+
+    from utils.db import get_supabase
+    supabase = get_supabase()
+
+    today = now_ist.date()
+    today_str = today.isoformat()
+
+    # Get last trading day (handles weekends/holidays)
+    #
+    # BUG FIX (Oct 23 2026): this only checked whether `today` is a
+    # trading DAY (weekday + not a holiday) -- not whether the market has
+    # actually OPENED yet. Net Delta/Delivery/Volume below all key off
+    # `last_trading_day` with no further fallback, so in the pre-market
+    # window on a real trading day (e.g. 08:00 IST, market opens 09:15)
+    # this resolved to TODAY even though zero rows exist for today in
+    # oi_snapshots/delivery_data until market open (OI) or end of day
+    # (delivery bhav copy) -- Manish saw Delivery/Net Delta/Volume all
+    # blank across every card on Positional this morning. Same class of
+    # bug as the Oct 20 Wolves Scanner fix ("fall back to last trading
+    # day with data"), just missing here. Step back one more trading day
+    # whenever it's still before market open (09:15 IST) today.
+    try:
+        from utils.market_calendar import is_trading_day
+        _check = today
+        before_open_today = now_ist.hour * 60 + now_ist.minute < (9 * 60 + 15)
+        if not is_trading_day(_check) or before_open_today:
+            _check = _check - timedelta(days=1)
+            while not is_trading_day(_check):
+                _check = _check - timedelta(days=1)
+        last_trading_day = _check.isoformat()
+    except:
+        last_trading_day = today_str
+
+    # Get expiry and series dates
+    try:
+        expiry, series_start = _get_expiry_and_series(today)
+    except Exception as e:
+        print(f"[PI] Expiry calc failed: {e}")
+        return {"error": str(e), "results": []}
+
+    # ── 1. Get positional intelligence from RPC ───────────────────────────
+    try:
+        rpc = supabase.rpc("get_positional_intelligence", {
+            "p_series_start": series_start,
+            "p_series_end": today_str
+        }).execute()
+        pi_data = {r["symbol"]: r for r in (rpc.data or [])}
+    except Exception as e:
+        print(f"[PI] RPC failed: {e}")
+        pi_data = {}
+
+    # ── 2. Get stealth buildup data (last 15 days FUT OI history) ─────────
+    hist_start = (today - timedelta(days=25)).isoformat()
+    try:
+        hist_res = supabase.from_("daily_oi_summary")\
+            .select("symbol, trade_date, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, fut_price_chg_pct, close_price, fut_signal")\
+            .gte("trade_date", hist_start)\
+            .lte("trade_date", today_str)\
+            .order("trade_date", desc=False)\
+            .limit(5000)\
+            .execute()
+        sym_history = defaultdict(list)
+        for r in (hist_res.data or []):
+            sym_history[r["symbol"]].append(r)
+    except Exception as e:
+        print(f"[PI] History fetch failed: {e}")
+        sym_history = defaultdict(list)
+
+    # ── 3. Get CMP ────────────────────────────────────────────────────────
+    try:
+        cmp_res = supabase.from_("cmp_prices")\
+            .select("symbol, cmp")\
+            .gte("timestamp", f"{last_trading_day}T00:00:00+00:00")\
+            .lte("timestamp", f"{last_trading_day}T23:59:59+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(500)\
+            .execute()
+        cmp_map = {}
+        seen = set()
+        for r in (cmp_res.data or []):
+            if r["symbol"] not in seen:
+                cmp_map[r["symbol"]] = float(r["cmp"])
+                seen.add(r["symbol"])
+    except Exception as e:
+        print(f"[PI] CMP fetch failed: {e}")
+        cmp_map = {}
+
+    # ── 4. Get volume breakout data ───────────────────────────────────────
+    vol_start = (today - timedelta(days=35)).isoformat()
+    try:
+        vol_hist = supabase.from_("daily_oi_summary")\
+            .select("symbol, trade_date, fut_vol, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price")\
+            .gte("trade_date", vol_start)\
+            .lte("trade_date", today_str)\
+            .gt("fut_vol", 0)\
+            .order("trade_date", desc=False)\
+            .limit(5000)\
+            .execute()
+        vol_sym_data = defaultdict(list)
+        for r in (vol_hist.data or []):
+            vol_sym_data[r["symbol"]].append(r)
+    except Exception as e:
+        print(f"[PI] Vol hist failed: {e}")
+        vol_sym_data = defaultdict(list)
+
+    # ── 5. Get OI walls (CPR position) ────────────────────────────────────
+    try:
+        # CPR is stored for next trading day — find nearest available
+        cpr_res = supabase.from_("cpr_levels")\
+            .select("symbol, tc, bc, width_label, width_emoji, cpr_trend, trade_date, prev_close")\
+            .gte("trade_date", today_str)\
+            .order("trade_date", desc=False)\
+            .limit(500)\
+            .execute()
+        cpr_map = {r["symbol"]: r for r in (cpr_res.data or [])}
+    except:
+        cpr_map = {}
+
+  # ── 5b. Get live intraday FUT OI change (market hours only) ──────────
+    live_oi_map = {}
+    if is_market:
+        try:
+            snap_start = f"{today_str}T03:45:00+00:00"  # 9:15 IST
+            # (Aug 22 2026): now also select expiry, so this snapshot can
+            # be split into near-month and next-month per symbol -- the
+            # same distinction added to the EOD path in daily_oi_summary.py.
+            snap_res = supabase.from_("oi_snapshots")\
+                .select("symbol, oi, last_price, timestamp, expiry")\
+                .eq("option_type", "FUT")\
+                .gte("timestamp", snap_start)\
+                .order("timestamp", desc=False)\
+                .limit(10000)\
+                .execute()
+            rows_raw = snap_res.data or []
+
+            # Determine each symbol's nearest and next-nearest expiry from
+            # everything seen in today's snapshot window.
+            sym_expiries: dict = defaultdict(set)
+            for r in rows_raw:
+                exp = str(r.get("expiry") or "")
+                if exp and exp >= today_str:
+                    sym_expiries[r["symbol"]].add(exp)
+            nearest_exp = {}
+            next_exp = {}
+            for s, exps in sym_expiries.items():
+                sorted_exps = sorted(exps)
+                nearest_exp[s] = sorted_exps[0]
+                if len(sorted_exps) > 1:
+                    next_exp[s] = sorted_exps[1]
+
+            first_oi = {}
+            latest_oi = {}
+            latest_price = {}
+            open_price = {}
+            first_oi_next = {}
+            latest_oi_next = {}
+            snap_by_ts: dict = {}
+            snap_by_ts_next: dict = {}
+            for r in rows_raw:
+                s = r["symbol"]
+                exp = str(r.get("expiry") or "")
+                oi = int(r.get("oi") or 0)
+                ts = r.get("timestamp", "")
+                key = f"{s}_{ts}"
+                if exp == nearest_exp.get(s):
+                    if oi > snap_by_ts.get(key, {}).get("oi", 0):
+                        snap_by_ts[key] = {"symbol": s, "oi": oi, "lp": float(r.get("last_price") or 0)}
+                elif exp == next_exp.get(s):
+                    if oi > snap_by_ts_next.get(key, {}).get("oi", 0):
+                        snap_by_ts_next[key] = {"symbol": s, "oi": oi}
+            for row in snap_by_ts.values():
+                s = row["symbol"]
+                oi = row["oi"]
+                lp = row["lp"]
+                if s not in first_oi and oi > 0:
+                    first_oi[s] = oi
+                    open_price[s] = lp
+                if oi > 0:
+                    latest_oi[s] = oi
+                    latest_price[s] = lp
+            for row in snap_by_ts_next.values():
+                s = row["symbol"]
+                oi = row["oi"]
+                if s not in first_oi_next and oi > 0:
+                    first_oi_next[s] = oi
+                if oi > 0:
+                    latest_oi_next[s] = oi
+            # Fetch genuine previous trading day close — NOT last_trading_day,
+            # which equals today during market hours. Mirrors vol_oi_breakout.py.
+            # BUG FIX (Oct 5 2026), part 1: date selection was weekend-only
+            # (weekday<5), not NSE-holiday aware -- same duplicated-date-logic
+            # bug already fixed in api/cpr.py, api/oi_pulse.py and
+            # api/vol_oi_breakout.py. Delegate to the shared helper.
+            # BUG FIX (Oct 5 2026), part 2 -- the bigger one: prev_close was
+            # sourced from cmp_prices' last intraday LTP poll of the prev
+            # day, which is NOT the exchange's official closing price (NSE's
+            # close is set by a post-15:30 closing auction and can differ
+            # meaningfully from the last continuous-session LTP -- confirmed
+            # live, a ~2.5% gap for ANGELONE). cpr_map's prev_close (fetched
+            # above) comes from Kite's official daily candle and is correct
+            # -- use it first, falling back to the cmp_prices approximation
+            # only for a symbol cpr_map doesn't have.
+            prev_close_map = {}
+            for _sym, _row in cpr_map.items():
+                if _row.get("prev_close") is not None:
+                    prev_close_map[_sym] = float(_row["prev_close"])
+            try:
+                from utils.market_calendar import get_prev_trading_day
+                _prev_date = get_prev_trading_day(datetime.strptime(today_str, '%Y-%m-%d').date()).strftime('%Y-%m-%d')
+                _prev_cmp_res = supabase.from_("cmp_prices")\
+                    .select("symbol, cmp")\
+                    .gte("timestamp", f"{_prev_date}T00:00:00+00:00")\
+                    .lte("timestamp", f"{_prev_date}T23:59:59+00:00")\
+                    .order("timestamp", desc=True)\
+                    .limit(500)\
+                    .execute()
+                _seen_prev = set()
+                for _row in (_prev_cmp_res.data or []):
+                    _sym = _row["symbol"]
+                    if _sym not in prev_close_map and _sym not in _seen_prev:
+                        prev_close_map[_sym] = float(_row["cmp"])
+                        _seen_prev.add(_sym)
+            except Exception as e:
+                print(f"[PI] Prev close fetch failed: {e}")
+
+            for s in first_oi:
+                if first_oi[s] > 0:
+                    oi_chg = ((latest_oi[s] - first_oi[s]) / first_oi[s]) * 100
+                    prev_close = prev_close_map.get(s, 0)
+                    if prev_close > 0:
+                        price_chg = ((latest_price[s] - prev_close) / prev_close) * 100
+                    else:
+                        price_chg = ((latest_price[s] - open_price[s]) / open_price[s]) * 100 if open_price[s] > 0 else 0
+                    oi_chg_next = None
+                    if s in first_oi_next and first_oi_next[s] > 0 and s in latest_oi_next:
+                        oi_chg_next = round(((latest_oi_next[s] - first_oi_next[s]) / first_oi_next[s]) * 100, 2)
+                    live_oi_map[s] = {
+                        "fut_oi_chg_pct": round(oi_chg, 2),
+                        "price_chg_pct": round(price_chg, 2),
+                        "fut_oi_chg_pct_next": oi_chg_next,
+                        # (Aug 27 2026): absolute OI, not just % change
+                        "fut_oi_close": latest_oi.get(s),
+                        "fut_oi_close_next": latest_oi_next.get(s),
+                    }
+        except Exception as e:
+            print(f"[PI] Live OI fetch failed: {e}")
+
+    # ── 5c. Get Net Delta for stealth stocks (ATM±5 CE/PE OI) ────────────
+    # Fetch latest options snapshot for all symbols, compute PE OI - CE OI
+    net_delta_map = {}
+    try:
+        # Get latest timestamp in today's snapshots
+        latest_snap = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .gte("timestamp", f"{last_trading_day}T03:45:00+00:00")\
+            .lt("timestamp", f"{last_trading_day}T11:00:00+00:00")\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        if latest_snap.data:
+            latest_ts = latest_snap.data[0]["timestamp"]
+            # Fetch CE/PE OI for all symbols at latest snapshot
+            # BUG FIX (Oct 5 2026): a single .limit(10000) request with no
+            # pagination -- sized for the old ~66-symbol universe. Now that
+            # F&O covers all 216 symbols, one snapshot holds ~17,900 CE/PE
+            # rows, so this was silently dropping ~44% of them. With no
+            # explicit ORDER BY, which rows got cut wasn't even a clean
+            # alphabetical tail -- it depended on insertion order, so Net
+            # Delta randomly went missing for an unpredictable scatter of
+            # stocks (ANANDRATHI, RADICO, APOLLOHOSP, MANKIND, UNOMINDA, LTF
+            # confirmed missing live while others on either side of them
+            # alphabetically were fine). Same "limit sized for the 66-symbol
+            # universe" class already fixed today in Scanners' CMP fetch.
+            # Paginate instead, same pattern used elsewhere (oi_profile.py,
+            # pcr_trend.py).
+            options_rows = []
+            for offset in range(0, 50000, 1000):
+                batch = supabase.from_("oi_snapshots")\
+                    .select("symbol, option_type, strike, oi, last_price, expiry")\
+                    .eq("timestamp", latest_ts)\
+                    .in_("option_type", ["CE", "PE"])\
+                    .range(offset, offset + 999)\
+                    .execute()
+                if not batch.data:
+                    break
+                options_rows.extend(batch.data)
+                if len(batch.data) < 1000:
+                    break
+            # Group by symbol
+            sym_options: dict = defaultdict(list)
+            for r in options_rows:
+                sym_options[r["symbol"]].append(r)
+            # Compute net delta per symbol using ATM±5 strikes
+            # BUG FIX: was summing OI across ALL expiries mixed together (no
+            # expiry filter at all) — e.g. ITC's Net Delta showed +11.8L but
+            # the correct near-month-only figure was ~-0.1L, a huge distortion
+            # caused by silently merging weekly/monthly OI at the same strike.
+            # Now filters to each symbol's nearest (soonest) expiry first.
+            for sym, opts in sym_options.items():
+                cmp_price = cmp_map.get(sym, 0)
+                if cmp_price <= 0:
+                    continue
+                expiries = sorted(set(str(r.get("expiry") or "") for r in opts if r.get("expiry")))
+                if not expiries:
+                    continue
+                nearest_expiry = expiries[0]
+                opts = [r for r in opts if str(r.get("expiry") or "") == nearest_expiry]
+                # Find ATM strike
+                strikes = sorted(set(float(r["strike"]) for r in opts if r.get("strike")))
+                if not strikes:
+                    continue
+                atm = min(strikes, key=lambda x: abs(x - cmp_price))
+                atm_idx = strikes.index(atm)
+                atm_range = strikes[max(0, atm_idx-5): atm_idx+6]
+                pe_oi = sum(int(r.get("oi") or 0) for r in opts if float(r.get("strike") or 0) in atm_range and r["option_type"] == "PE")
+                ce_oi = sum(int(r.get("oi") or 0) for r in opts if float(r.get("strike") or 0) in atm_range and r["option_type"] == "CE")
+                net_delta_map[sym] = pe_oi - ce_oi
+    except Exception as e:
+        print(f"[PI] Net delta fetch failed: {e}")
+
+  # ── 6. Delivery data ─────────────────────────────────────────────────
+    try:
+        del_res = supabase.from_("delivery_data")\
+            .select("symbol, delivery_pct")\
+            .eq("trade_date", last_trading_day)\
+            .execute()
+        delivery_map = {r["symbol"]: float(r["delivery_pct"] or 0) for r in (del_res.data or [])}
+    except Exception as e:
+        print(f"[PI] Delivery fetch failed: {e}")
+        delivery_map = {}
+
+    # ── Build results ─────────────────────────────────────────────────────
+    active_conviction = []
+    stealth_buildup = []
+    vol_breakout = []
+    series_buildup = []
+
+    SYMBOLS = list(pi_data.keys()) if pi_data else list(sym_history.keys())
+
+    for sym in SYMBOLS:
+        pi = pi_data.get(sym, {})
+        history = sym_history.get(sym, [])
+        cmp = cmp_map.get(sym, float(pi.get("latest_price") or 0))
+        cpr = cpr_map.get(sym, {})
+
+        cpr_position = None
+        if cpr and cmp > 0:
+            tc = float(cpr.get("tc") or 0)
+            bc = float(cpr.get("bc") or 0)
+            if tc and bc:
+                cpr_position = "Above CPR" if cmp > tc else "Below CPR" if cmp < bc else "Inside CPR"
+
+        # Cap consecutive days to current series length (prevents cross-series streaks)
+        series_days = len([h for h in sym_history.get(sym, []) if h["trade_date"] >= series_start])
+        consec_lb = min(int(pi.get("consec_lb") or 0), series_days)
+        consec_sb = min(int(pi.get("consec_sb") or 0), series_days)
+        lb_consistency = int(pi.get("lb_consistency_pct") or 0)
+        sb_consistency = int(pi.get("sb_consistency_pct") or 0)
+        latest_signal = pi.get("latest_fut_signal", "NEUTRAL")
+        series_lb_oi = float(pi.get("series_lb_oi") or 0)
+        series_sb_oi = float(pi.get("series_sb_oi") or 0)
+        total_days = int(pi.get("total_days") or 0)
+
+        # Volume context — today's FUT vol vs 5-day avg (reuses vol_sym_data already fetched)
+        vol_data_for_sym = vol_sym_data.get(sym, [])
+        today_vol_amt = None
+        vol_ratio_ctx = None
+        if vol_data_for_sym:
+            today_row = next((r for r in reversed(vol_data_for_sym) if r["trade_date"] == last_trading_day), None)
+            if today_row:
+                today_vol_amt = int(today_row.get("fut_vol") or 0)
+                hist_rows_ctx = sorted(
+                    [r for r in vol_data_for_sym[:-1] if int(r.get("fut_vol") or 0) > 0],
+                    key=lambda r: r["trade_date"], reverse=True
+                )[:5]
+                hist_vols_ctx = [int(r.get("fut_vol") or 0) for r in hist_rows_ctx]
+                avg_5d_ctx = sum(hist_vols_ctx) / len(hist_vols_ctx) if hist_vols_ctx else 0
+                vol_ratio_ctx = round(today_vol_amt / avg_5d_ctx, 2) if avg_5d_ctx > 0 else None
+
+        base = {
+            "symbol": sym,
+            "cmp": round(cmp, 2),
+            "latest_signal": latest_signal,
+            "latest_fut_oi_chg": round(float(pi.get("latest_fut_oi_chg") or 0), 2),
+            "latest_price_chg": round(float(pi.get("latest_price_chg") or 0), 2),
+            "cpr_position": cpr_position,
+            "cpr_width_label": cpr.get("width_label"),
+            "cpr_width_emoji": cpr.get("width_emoji"),
+            "cpr_trend": cpr.get("cpr_trend"),
+            "total_days": total_days,
+            "delivery_pct": delivery_map.get(sym, None),
+            "volume": today_vol_amt,
+            "vol_ratio": vol_ratio_ctx,
+        }
+
+        # ── Active Conviction ─────────────────────────────────────────────
+        consec = consec_lb if consec_lb >= 2 else (consec_sb if consec_sb >= 2 else 0)
+        if consec >= 2:
+            signal = "LONG_BUILDUP" if consec_lb >= consec_sb else "SHORT_BUILDUP"
+            consistency = lb_consistency if signal == "LONG_BUILDUP" else sb_consistency
+            series_oi = series_lb_oi if signal == "LONG_BUILDUP" else series_sb_oi
+
+            if min_consec == 0 or consec >= min_consec:
+                active_conviction.append({
+                    **base,
+                    "signal": signal,
+                    "consec_days": consec,
+                    "consistency_pct": consistency,
+                    "series_oi_pct": round(series_oi, 1),
+                    "lb_days": int(pi.get("lb_days") or 0),
+                    "sb_days": int(pi.get("sb_days") or 0),
+                })
+
+        # ── Stealth Buildup ─────────────────────────────────────────────
+        # No minimum-history requirement by design — fires on ANY day with
+        # a small price candle + large OI change, standalone per-day check.
+        if len(history) >= 1:
+            last_15 = history[-15:]
+            # During market hours use live snapshot data, else use daily_oi_summary
+            if is_market and sym in live_oi_map:
+                today_oi = live_oi_map[sym].get("fut_oi_chg_pct", 0)
+                today_price = live_oi_map[sym].get("price_chg_pct", 0)
+                today_oi_next = live_oi_map[sym].get("fut_oi_chg_pct_next", None)
+                today_oi_abs = live_oi_map[sym].get("fut_oi_close")
+                today_oi_abs_next = live_oi_map[sym].get("fut_oi_close_next")
+            else:
+                today_data = next((h for h in reversed(last_15) if h["trade_date"] == today_str), None)
+                if not today_data:
+                    today_data = history[-1] if history else None
+                today_oi = float((today_data or {}).get("fut_oi_chg_pct") or 0)
+                _next_raw = (today_data or {}).get("fut_oi_chg_pct_next")
+                today_oi_next = float(_next_raw) if _next_raw is not None else None
+                today_oi_abs = (today_data or {}).get("fut_oi_close")
+                today_oi_abs_next = (today_data or {}).get("fut_oi_close_next")
+                # BUG FIX (Oct 18 2026): reverting the Oct 6 2026 change above.
+                # fut_price_chg_pct is the FUT contract's own TODAY-ONLY
+                # open->close move -- it says nothing about an overnight gap.
+                # On a day the stock gaps down/up hard at the open and then
+                # trades flat (LTF on Oct 16: cash close-to-close -3.42%,
+                # but FUT open->close only -0.04%), this basis hid the real
+                # move entirely and showed "Stealth Buildup" on a stock that
+                # had already been heavily repriced -- not a quiet
+                # accumulation day at all. The Oct 6 fix's premise was that
+                # the live/intraday branch above compares a FUT price to
+                # prior close, so this should match it on a FUT basis too --
+                # but that's not what the live branch does: live_oi_map's
+                # price_chg_pct (set a few dozen lines above) is cash LTP
+                # (cmp_prices) vs cash prev_close (Kite's daily candle), not
+                # FUT at all. So this restores the ORIGINAL cash
+                # close-to-close basis (price_chg_pct, already computed and
+                # stored on every row), which is what "price barely moved"
+                # should mean and what actually matches the live branch's
+                # basis. This reopens the narrow RADICO-style basis mismatch
+                # the Oct 6 fix targeted (FUT and cash diverging right before
+                # expiry) -- but that is far rarer than an ordinary overnight
+                # gap, which this bug broke on nearly any gap day.
+                _raw_price_chg = (today_data or {}).get("price_chg_pct")
+                today_price = float(_raw_price_chg) if _raw_price_chg is not None else 0.0
+            # Combined = near + next month OI change. Genuine rollover shows
+            # up as OI leaving near-month and arriving in next-month in
+            # roughly equal size, so it largely cancels out here -- what's
+            # left over is closer to real net positioning change.
+            today_oi_combined = round(today_oi + today_oi_next, 2) if today_oi_next is not None else None
+            if today_oi > 0 and abs(today_price) <= 1.0:
+                if True:
+                    if today_oi >= 2.0 and abs(today_price) <= 0.5:
+                        tier, tier_label = "ELITE", "Elite"
+                    elif today_oi >= 1.5 and abs(today_price) <= 1.0:
+                        tier, tier_label = "STRONG", "Strong"
+                    elif today_oi >= 1.0 and abs(today_price) <= 1.5:
+                        tier, tier_label = "WATCH", "Watch"
+                    else:
+                        tier, tier_label = None, None
+                    if tier:
+                            stealth_buildup.append({
+                                **base,
+                                "signal": "STEALTH",
+                                "tier": tier,
+                                "tier_label": tier_label,
+                                "rank": 0,
+                                "today_oi_chg": round(today_oi, 2),
+                                "next_month_oi_chg": round(today_oi_next, 2) if today_oi_next is not None else None,
+                                "combined_oi_chg": today_oi_combined,
+                                "today_oi_abs": today_oi_abs,
+                                "next_month_oi_abs": today_oi_abs_next,
+                                "price_chg": round(today_price, 2),
+                                "net_delta": net_delta_map.get(sym, None),
+                                "delivery_pct": delivery_map.get(sym, None),
+                                "oi_history": [round(float(h.get("fut_oi_chg_pct") or 0), 2) for h in last_15],
+                            })
+
+        # ── Volume Breakout ───────────────────────────────────────────────
+        vol_data = vol_sym_data.get(sym, [])
+        if len(vol_data) >= 5:
+            today_vol_row = next((r for r in reversed(vol_data) if r["trade_date"] == today_str), None)
+            if today_vol_row:
+                today_vol = int(today_vol_row.get("fut_vol") or 0)
+                hist_rows = sorted(
+                    [r for r in vol_data[:-1] if int(r.get("fut_vol") or 0) > 0],
+                    key=lambda r: r["trade_date"], reverse=True
+                )[:5]
+                hist_vols = [int(r.get("fut_vol") or 0) for r in hist_rows]
+                avg_5d = sum(hist_vols) / len(hist_vols) if hist_vols else 0
+                vol_ratio = round(today_vol / avg_5d, 2) if avg_5d > 0 else 0
+                # Oct 15 2026: same basis mismatch already fixed for Stealth
+                # Buildup (see the Oct 6 2026 note above) was still live
+                # here -- this classified fut_oi_chg_pct (FUTURES OI)
+                # together with cash price_chg_pct, which can diverge from
+                # the FUT contract's own move (basis, especially close to
+                # expiry). Use fut_price_chg_pct instead, and skip
+                # classifying (don't fall back to cash) when no FUT
+                # open+close snapshot pair exists for that day, so this
+                # doesn't silently reintroduce the mismatch. Unlike the
+                # Stealth Buildup fix, this must NOT `continue` the outer
+                # per-symbol loop -- Series Buildup below still needs to run
+                # for this symbol even when Volume Breakout has no FUT price.
+                _raw_fut_price_chg = today_vol_row.get("fut_price_chg_pct")
+                if vol_ratio >= 1.5 and _raw_fut_price_chg is not None:
+                    fut_oi = float(today_vol_row.get("fut_oi_chg_pct") or 0)
+                    price_chg = float(_raw_fut_price_chg)
+                    if abs(fut_oi) >= 2.0:
+                        if fut_oi > 0 and price_chg >= 0.3:
+                            vol_signal = "LONG_BUILDUP"
+                        elif fut_oi > 0 and price_chg <= -0.3:
+                            vol_signal = "SHORT_BUILDUP"
+                        elif fut_oi < 0 and price_chg >= 0.3:
+                            vol_signal = "SHORT_COVERING"
+                        elif fut_oi < 0 and price_chg <= -0.3:
+                            vol_signal = "LONG_UNWINDING"
+                        else:
+                            vol_signal = None
+                        if vol_signal:
+                            vol_breakout.append({
+                                **base,
+                                "signal": vol_signal,
+                                "vol_ratio": vol_ratio,
+                                "vol_today": today_vol,
+                                "vol_avg_5d": round(avg_5d),
+                                "fut_oi_chg_pct": round(fut_oi, 2),
+                                "price_chg_pct": round(price_chg, 2),
+                            })
+
+        # ── Series Buildup ────────────────────────────────────────────────
+        dominant_signal = None
+        dominant_consistency = 0
+        dominant_series_oi = 0
+
+        lb_days_count = int(pi.get("lb_days") or 0)
+        sb_days_count = int(pi.get("sb_days") or 0)
+
+        if lb_consistency >= 60 and consec_lb < 2 and lb_days_count >= 3:
+            dominant_signal = "LONG_BUILDUP"
+            dominant_consistency = lb_consistency
+            dominant_series_oi = series_lb_oi
+        elif sb_consistency >= 60 and consec_sb < 2 and sb_days_count >= 3:
+            dominant_signal = "SHORT_BUILDUP"
+            dominant_consistency = sb_consistency
+            dominant_series_oi = series_sb_oi
+
+        if dominant_signal and total_days >= 5:
+            series_buildup.append({
+                **base,
+                "signal": dominant_signal,
+                "consistency_pct": dominant_consistency,
+                "series_oi_pct": round(dominant_series_oi, 1),
+                "lb_days": int(pi.get("lb_days") or 0),
+                "sb_days": int(pi.get("sb_days") or 0),
+            })
+
+    # Sort each section
+    active_conviction.sort(key=lambda x: (-x["consec_days"], -x["consistency_pct"]))
+    # Was sorting by x["rank"] as tiebreaker, but that field is always 0 for
+    # every entry — never actually computed — so within a tier the order was
+    # arbitrary, not by signal strength. This meant strong signals could get
+    # silently cut off by the top-10 cap while weaker ones stayed visible.
+    # Sort by today's OI change magnitude within each tier instead, so the
+    # genuinely strongest signals always surface first.
+    #
+    # Oct 6 2026: that fix only addressed ordering WITHIN a tier -- the
+    # final stealth_buildup[:10] slice below is a single flat cut across all
+    # tiers combined, so on any day with >=10 ELITE-tier stocks (common --
+    # ELITE just needs oi>=2.0% + |price|<=0.5%), every STRONG/WATCH entry
+    # gets starved out of the list entirely, no matter how strong its OI
+    # buildup is. That's exactly what hid LODHA (STRONG tier, OI +2.9%,
+    # price +0.84%) today -- it was a perfectly valid signal, just never
+    # reached because 10 ELITE stocks filled the cap first. Reserving
+    # per-tier slots below guarantees STRONG/WATCH stay visible regardless
+    # of how many ELITE signals exist that day.
+    stealth_buildup.sort(key=lambda x: -abs(x.get("today_oi_chg", 0)))
+    _stealth_total_count = len(stealth_buildup)  # full qualifying count, pre-cap -- summary below must report this, not the capped list
+    # Oct 6 2026: display-only cap, requested by Manish to cut clutter --
+    # top 5 ELITE + top 5 STRONG shown, WATCH tier dropped from the capped
+    # display entirely (fewer, stronger candidates on screen). This does
+    # NOT change the underlying entry gates/tiers -- a stock still qualifies
+    # and is still counted in summary.stealth_buildup (_stealth_total_count
+    # above) exactly as before; it just won't appear in this capped list.
+    _elite = [x for x in stealth_buildup if x["tier"] == "ELITE"][:5]
+    _strong = [x for x in stealth_buildup if x["tier"] == "STRONG"][:5]
+    stealth_buildup = _elite + _strong
+    vol_breakout.sort(key=lambda x: -x["vol_ratio"])
+    series_buildup.sort(key=lambda x: -x["consistency_pct"])
+
+    result = {
+        "expiry": expiry,
+        "series_start": series_start,
+        "total_trading_days": max((p.get("total_days", 0) for p in pi_data.values()), default=0),
+        "date": today_str,
+        "active_conviction": active_conviction,
+        "stealth_buildup": stealth_buildup,  # already tier-capped (12 ELITE + 8 STRONG + 5 WATCH) above
+        "vol_breakout": vol_breakout[:10],
+        "series_buildup": series_buildup[:15],
+        "summary": {
+            "active_conviction": len(active_conviction),
+            "stealth_buildup": _stealth_total_count,
+            "vol_breakout": len(vol_breakout),
+            "series_buildup": len(series_buildup),
+            "long_bias": sum(1 for r in active_conviction if r["signal"] == "LONG_BUILDUP"),
+            "short_bias": sum(1 for r in active_conviction if r["signal"] == "SHORT_BUILDUP"),
+        }
+    }
+
+    _cache[cache_key] = result
+    _cache_time = time_module.time()
+    print(f"[PI] Done — conviction:{len(active_conviction)} stealth:{len(stealth_buildup)} vol:{len(vol_breakout)} series:{len(series_buildup)}")
+    return result
