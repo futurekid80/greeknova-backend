@@ -1228,9 +1228,44 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbo
             "oiPct":      r.get("oi_pct"),
             "volPct":     r.get("vol_pct"),
             "ltp":        r.get("ltp"),
+            "spot":       r.get("spot"),
             "direction":  r.get("direction"),
             "strikesAway": r.get("strikes_away"),
         } for r in rows]
+        return {"alerts": alerts, "count": len(alerts)}
+    except Exception as e:
+        return {"alerts": [], "count": 0, "error": str(e)}
+
+@app.get("/alerts/day")
+def get_alerts_full_day(date: str = None):
+    """Oct 31 2026 (Vinod): every alert for one IST day (no 200-row cap) so the
+    Alerts page can offer a complete end-of-day CSV download. Paged in 1000s."""
+    try:
+        from datetime import datetime, timezone, timedelta
+        supabase = get_supabase()
+        try:
+            target = datetime.strptime(date, "%Y-%m-%d") if date else datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        except ValueError:
+            target = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        start = target.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=5, minutes=30)
+        end = start + timedelta(hours=24)
+        out, offset = [], 0
+        while offset < 20000:
+            rows = supabase.from_("alert_log").select("*") \
+                .gte("created_at", start.isoformat()).lt("created_at", end.isoformat()) \
+                .order("id").range(offset, offset + 999).execute().data or []
+            out.extend(rows)
+            if len(rows) < 1000:
+                break
+            offset += 1000
+        alerts = [{
+            "id": r["id"], "signal": r.get("signal"), "symbol": r.get("symbol"),
+            "strike": r.get("strike"), "optionType": r.get("option_type"),
+            "message": r.get("message"), "receivedAt": r.get("created_at"),
+            "score": r.get("score"), "bias": r.get("bias"), "oiPct": r.get("oi_pct"),
+            "volPct": r.get("vol_pct"), "ltp": r.get("ltp"), "spot": r.get("spot"),
+            "direction": r.get("direction"), "strikesAway": r.get("strikes_away"),
+        } for r in out]
         return {"alerts": alerts, "count": len(alerts)}
     except Exception as e:
         return {"alerts": [], "count": 0, "error": str(e)}

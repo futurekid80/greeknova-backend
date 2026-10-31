@@ -23,6 +23,30 @@ _strike_map_cache: dict = {}
 _STRIKE_MAP_TTL = 240  # seconds
 
 
+# Oct 31 2026 (Vinod): every alert carries the underlying's spot at the moment
+# it fired. One short-TTL lookup per symbol (latest cmp_prices row) shared by
+# all alerts in a pass; None when unknown -- never blocks an alert.
+_spot_cache: dict = {}
+_SPOT_TTL = 45  # seconds
+
+
+def _get_spot(supabase, symbol: str):
+    if not symbol:
+        return None
+    cached = _spot_cache.get(symbol)
+    if cached and time.time() - cached[1] < _SPOT_TTL:
+        return cached[0]
+    try:
+        r = supabase.from_("cmp_prices").select("cmp") \
+            .eq("symbol", symbol).order("timestamp", desc=True).limit(1).execute()
+        spot = float(r.data[0]["cmp"]) if r.data and r.data[0].get("cmp") else None
+    except Exception as e:
+        print(f"[Push] spot lookup failed for {symbol}: {e}")
+        return None
+    _spot_cache[symbol] = (spot, time.time())
+    return spot
+
+
 def _get_strikes_away(supabase, symbol: str, strike) -> int | None:
     """Looks up how many strikes `strike` sits from `symbol`'s ATM, using
     that symbol's most recent capture cycle. Returns None if symbol/strike
@@ -291,8 +315,14 @@ def broadcast_alert(supabase, alert: dict):
     # depending entirely on the SW->open-tab postMessage relay (which only
     # reaches tabs open at the exact moment a push fires -- native OS
     # notifications aren't tab-dependent, but the in-app panel always was).
+    spot = alert.get("spot")
+    if spot is None:
+        spot = _get_spot(supabase, alert.get("symbol"))
+        if spot is not None:
+            alert["spot"] = spot
     try:
         supabase.from_("alert_log").insert({
+            "spot":         spot,
             "symbol":       alert.get("symbol"),
             "signal":       alert.get("signal"),
             "strike":       alert.get("strike"),
@@ -380,6 +410,8 @@ def broadcast_alert(supabase, alert: dict):
             stats.append(f"Vol +{alert.get('volPct')}%")
         if alert.get("ltp") is not None:
             stats.append(f"LTP ₹{alert.get('ltp')}")
+        if alert.get("spot") is not None:
+            stats.append(f"Spot {alert.get('spot'):,.1f}")
         compact_body = " | ".join(stats) if stats else alert.get("message", "")
 
         payload = {
