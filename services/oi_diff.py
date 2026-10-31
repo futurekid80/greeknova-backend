@@ -19,6 +19,26 @@ this file and options_jungle.py's fetch_snapshot() for drift.
 from datetime import datetime, timezone, timedelta, date as date_type
 
 
+def _prev_close_ts(supabase, ts_new: str):
+    """Last NIFTY snapshot timestamp strictly before ts_new's UTC calendar
+    day, i.e. the previous trading session's final capture. NSE hours
+    (09:15-15:40 IST) sit inside one UTC date, so a UTC-day cut is safe.
+    Returns None if nothing earlier exists or the query fails."""
+    try:
+        day_start = f"{ts_new[:10]}T00:00:00+00:00"
+        r = supabase.from_("oi_snapshots")\
+            .select("timestamp")\
+            .eq("symbol", "NIFTY")\
+            .lt("timestamp", day_start)\
+            .order("timestamp", desc=True)\
+            .limit(1)\
+            .execute()
+        return r.data[0]["timestamp"] if r.data else None
+    except Exception as e:
+        print(f"[oi_diff] prev-close lookup failed: {e}")
+        return None
+
+
 def fetch_oi_diff_window(supabase, date: str = None, lookback_minutes=5):
     """Generalized sibling of fetch_latest_oi_diff (Oct 27 2026, for Option
     Strike Stealth Buildup's hourly/EOD windows) -- same shape, same
@@ -32,9 +52,9 @@ def fetch_oi_diff_window(supabase, date: str = None, lookback_minutes=5):
 
     lookback_minutes: minutes before the latest snapshot to use as the
     baseline (e.g. 60 for an hourly window). Pass None for "since today's
-    market open" -- i.e. the EOD/day-cumulative baseline, which is just the
-    earliest snapshot captured today, live-running at any point after open
-    and becoming the day's final number once the market closes.
+    market open" -- NOW (Oct 31 2026) the previous trading day's last snapshot
+    (prev close), live-running at any point after open and becoming the
+    day's final number once the market closes.
 
     Returns the same 6-tuple as fetch_latest_oi_diff: (new_data, old_map,
     cmp_map, ts_new, ts_old, timestamps)."""
@@ -79,8 +99,14 @@ def fetch_oi_diff_window(supabase, date: str = None, lookback_minutes=5):
     ts_new = timestamps[-1]
 
     if lookback_minutes is None:
-        # EOD/day-cumulative: baseline is simply the day's first capture.
-        ts_old = timestamps[0]
+        # EOD/day-cumulative. Oct 31 2026 FIX: baseline is now the PREVIOUS
+        # trading day's last snapshot (its closing OI + premium), not today's
+        # first capture. The first capture (9:19 IST) is already AFTER the
+        # opening premium crash/spike and OI gap, so "since open" hid the real
+        # day move (COALINDIA 380 CE read OI +209% / premium -0.8% instead of
+        # ~+900% / -34% vs yesterday's close). Falls back to the day's first
+        # capture only if no earlier day exists in oi_snapshots.
+        ts_old = _prev_close_ts(supabase, ts_new) or timestamps[0]
     else:
         ts_new_dt = datetime.fromisoformat(ts_new.replace('+00:00', '')).replace(tzinfo=timezone.utc)
         target_old = ts_new_dt - timedelta(minutes=lookback_minutes)

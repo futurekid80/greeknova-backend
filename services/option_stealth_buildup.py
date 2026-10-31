@@ -97,7 +97,7 @@ WINDOWS = {
         ],
     },
     "eod": {
-        "label": "EOD / since open",
+        "label": "EOD / vs prev close",
         "lookback_minutes": None,
         "min_old_oi": 10000,
         "tiers": [
@@ -108,6 +108,19 @@ WINDOWS = {
     },
 }
 TIER_LABELS = {"ELITE": "Elite", "STRONG": "Strong", "WATCH": "Watch"}
+
+
+def _activity(opt_type: str, premium_pct: float):
+    """Oct 31 2026: Writing vs Buying. OI up + premium down = sellers adding
+    (WRITING); OI up + premium up = buyers adding (BUYING); within +-0.5% is
+    NEUTRAL (genuinely quiet). A CE writing is bearish-leaning, a PE writing
+    bullish-leaning -- the label says WHO is adding, the user reads direction."""
+    side = "Call" if opt_type == "CE" else "Put"
+    if premium_pct <= -0.5:
+        return "WRITING", f"{side} Writing"
+    if premium_pct >= 0.5:
+        return "BUYING", f"{side} Buying"
+    return "NEUTRAL", f"{side} Quiet"
 
 
 def _classify(oi_pct: float, premium_pct: float, tiers):
@@ -187,8 +200,12 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         if not tier:
             continue
 
+        activity, activity_label = _activity(opt_type, premium_pct)
         hits.append({
             "symbol": symbol,
+            "tradingsymbol": row.get("tradingsymbol"),
+            "activity": activity,
+            "activity_label": activity_label,
             "is_confluence": (
                 symbol in fut_stealth_symbols
                 and sa is not None
@@ -225,3 +242,128 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         "confluence_count": sum(1 for h in hits if h["is_confluence"]),
         "hits": hits,
     }
+
+
+
+# ---------------------------------------------------------------------------
+# Oct 31 2026: persistence (mirrors the Wolves fresh-events pattern)
+# ---------------------------------------------------------------------------
+# A background job calls run_persist_tick() every 5 min in market hours. It
+# runs all three windows and upserts every hit into option_stealth_events
+# (one row per day+window+contract) tracking first_seen / last_seen /
+# times_seen, so a strike that qualifies briefly is no longer lost when
+# nobody has the page open. Freshness (Fresh Now / Still Active / Seen
+# Earlier Today) is computed at READ time from last_seen, because a hit that
+# stops qualifying simply stops being updated.
+from datetime import datetime, timezone, timedelta
+
+PERSIST_ZONE = "5"          # same default the page shows; keeps volume sane
+FRESH_WINDOW_MIN = 7        # last_seen within this => still on the current tick
+TIER_RANK = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
+
+
+def _parse_ts(ts: str):
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else None
+
+
+def persist_scan_result(supabase, window: str, result: dict) -> int:
+    """Upsert one window's scan hits. Returns number of rows written."""
+    hits = result.get("hits") or []
+    ts_new = result.get("ts_new")
+    if not hits or not ts_new:
+        return 0
+    scan_date = ts_new[:10]
+    seen_dt = _parse_ts(ts_new)
+
+    existing_rows = supabase.from_("option_stealth_events").select(
+        "event_key, first_seen, last_seen, times_seen, best_tier, peak_oi_pct"
+    ).eq("scan_date", scan_date).eq("window", window).execute().data or []
+    existing = {r["event_key"]: r for r in existing_rows}
+
+    rows = []
+    for h in hits:
+        if not h.get("tradingsymbol"):
+            continue
+        key = f"{scan_date}|{window}|{h['tradingsymbol']}"
+        prev = existing.get(key)
+        if prev:
+            prev_last = _parse_ts(prev["last_seen"])
+            if prev_last and seen_dt <= prev_last:
+                continue  # same snapshot already counted (manual re-run etc.)
+            first_seen = prev["first_seen"]
+            times_seen = int(prev.get("times_seen") or 1) + 1
+            best_tier = h["tier"] if TIER_RANK[h["tier"]] < TIER_RANK.get(prev.get("best_tier") or "WATCH", 2) else prev.get("best_tier")
+            peak_oi = max(float(prev.get("peak_oi_pct") or 0), h["oi_pct"])
+        else:
+            first_seen = ts_new
+            times_seen = 1
+            best_tier = h["tier"]
+            peak_oi = h["oi_pct"]
+        rows.append({
+            "event_key": key, "scan_date": scan_date, "window": window,
+            "symbol": h["symbol"], "tradingsymbol": h["tradingsymbol"],
+            "strike": h["strike"], "expiry": h.get("expiry"), "option_type": h["option_type"],
+            "strikes_away": h.get("strikes_away"), "atm_strike": h.get("atm_strike"), "cmp": h.get("cmp"),
+            "tier": h["tier"], "best_tier": best_tier,
+            "activity": h.get("activity"), "activity_label": h.get("activity_label"),
+            "oi_pct": h["oi_pct"], "peak_oi_pct": peak_oi,
+            "old_oi": h["old_oi"], "new_oi": h["new_oi"],
+            "premium_pct": h["premium_pct"], "old_premium": h["old_premium"], "new_premium": h["new_premium"],
+            "is_confluence": bool(h.get("is_confluence")),
+            "first_seen": first_seen, "last_seen": ts_new, "times_seen": times_seen,
+        })
+    if rows:
+        supabase.from_("option_stealth_events").upsert(rows, on_conflict="event_key").execute()
+    return len(rows)
+
+
+def run_persist_tick(supabase) -> dict:
+    """Run all three windows once and persist hits. Safe to call repeatedly."""
+    out = {}
+    for window in WINDOWS:
+        try:
+            res = run_option_stealth_scan(supabase, None, PERSIST_ZONE, window)
+            out[window] = persist_scan_result(supabase, window, res) if not res.get("error") else res["error"]
+        except Exception as e:
+            print(f"[OptionStealth] persist tick failed for {window}: {e}")
+            out[window] = f"error: {e}"
+    return out
+
+
+def get_saved_events(supabase, date: str = None, window: str = DEFAULT_WINDOW, zone: str = DEFAULT_ZONE) -> dict:
+    """Read saved hits for a day (falls back to the latest day that has any),
+    with freshness computed from last_seen."""
+    window = window if window in WINDOWS else DEFAULT_WINDOW
+    q_date = date
+    if not q_date:
+        latest = supabase.from_("option_stealth_events").select("scan_date").order("scan_date", desc=True).limit(1).execute().data
+        q_date = latest[0]["scan_date"] if latest else None
+    if not q_date:
+        return {"date": None, "window": window, "total": 0, "events": []}
+
+    rows = supabase.from_("option_stealth_events").select("*").eq("scan_date", q_date).eq("window", window)\
+        .order("last_seen", desc=True).limit(2000).execute().data or []
+
+    all_rows = supabase.from_("option_stealth_events").select("last_seen").eq("scan_date", q_date)\
+        .order("last_seen", desc=True).limit(1).execute().data
+    ref = _parse_ts(all_rows[0]["last_seen"]) if all_rows else None
+    now = datetime.now(timezone.utc)
+    if ref and q_date == now.strftime("%Y-%m-%d") and (now - ref) < timedelta(minutes=FRESH_WINDOW_MIN * 2):
+        ref = max(ref, now - timedelta(minutes=1))  # live: measure against the current tick
+
+    events = []
+    for r in rows:
+        sa = r.get("strikes_away")
+        if sa is not None and not in_zone(sa, zone):
+            continue
+        last = _parse_ts(r["last_seen"])
+        age_min = (ref - last).total_seconds() / 60 if ref and last else 9999
+        if age_min <= FRESH_WINDOW_MIN:
+            r["freshness"] = "Fresh Now" if (r.get("times_seen") or 1) <= 1 else "Still Active"
+        else:
+            r["freshness"] = "Seen Earlier Today"
+        events.append(r)
+    events.sort(key=lambda e: ({"Fresh Now": 0, "Still Active": 1, "Seen Earlier Today": 2}[e["freshness"]],
+                               TIER_RANK.get(e["best_tier"], 3), -float(e["oi_pct"] or 0)))
+    return {"date": q_date, "window": window, "window_label": WINDOWS[window]["label"],
+            "zone": zone, "total": len(events), "events": events}

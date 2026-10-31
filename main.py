@@ -642,6 +642,26 @@ async def lifespan(app: FastAPI):
             print(f"[WOLVES] Live tick job failed: {e}")
     scheduler.add_job(_run_wolves_live_tick_job, "cron", hour="9-15", minute="*/5", timezone="Asia/Kolkata", id="wolves_live_tick")
 
+    def _run_option_stealth_job():
+        """Every 5 min, 9:15-15:35 IST (Oct 31 2026): scan all three Option
+        Strike Stealth Buildup windows and persist hits to
+        option_stealth_events. Fires 45s past each 5-min mark to give the
+        snapshot capture time to land. Self-gates to trading days/hours."""
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            if not is_trading_day(today_ist()):
+                return
+            from datetime import datetime as _dt
+            import pytz as _pytz
+            now = _dt.now(_pytz.timezone("Asia/Kolkata"))
+            if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
+                return
+            from services.option_stealth_buildup import run_persist_tick
+            print(f"[OptionStealth] tick: {run_persist_tick(get_supabase())}")
+        except Exception as e:
+            print(f"[OptionStealth] tick job failed: {e}")
+    scheduler.add_job(_run_option_stealth_job, "cron", hour="9-15", minute="*/5", second=45, timezone="Asia/Kolkata", id="option_stealth_tick", max_instances=1, coalesce=True)
+
     def _run_vix_daily_close_job():
         """Daily 15:40 IST: append today's INDIA VIX close to vix_daily_history.
         (Oct 14 2026) This table was only ever written by the one-off
@@ -3369,6 +3389,28 @@ def option_stealth_buildup(date: str = None, zone: str = None, window: str = Non
     a normal, non-expiry session."""
     from services.option_stealth_buildup import run_option_stealth_scan, DEFAULT_ZONE, DEFAULT_WINDOW
     return run_option_stealth_scan(get_supabase(), date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW)
+
+@app.get("/option-stealth-buildup/saved")
+def option_stealth_buildup_saved(date: str = None, zone: str = None, window: str = None):
+    """(Oct 31 2026): hits saved by the 5-min background job, with
+    Fresh Now / Still Active / Seen Earlier Today tags -- nothing is lost
+    when nobody has the page open. Falls back to the latest day with data."""
+    from services.option_stealth_buildup import get_saved_events, DEFAULT_ZONE, DEFAULT_WINDOW
+    return get_saved_events(get_supabase(), date, window or DEFAULT_WINDOW, zone or DEFAULT_ZONE)
+
+@app.post("/option-stealth-buildup/run-now")
+def option_stealth_buildup_run_now():
+    """Manual trigger of the same persist tick the cron runs (background
+    thread -- the scan takes a while; poll /option-stealth-buildup/saved)."""
+    import threading
+    def _bg():
+        try:
+            from services.option_stealth_buildup import run_persist_tick
+            print(f"[OptionStealth] manual tick: {run_persist_tick(get_supabase())}")
+        except Exception as e:
+            print(f"[OptionStealth] manual tick failed: {e}")
+    threading.Thread(target=_bg, daemon=True).start()
+    return {"status": "started"}
 
 @app.get("/straddle-chart/{symbol}")
 def straddle_chart(symbol: str, strike: float = None, expiry: str = None, date: str = None):
