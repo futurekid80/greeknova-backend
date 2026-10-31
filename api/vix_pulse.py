@@ -41,6 +41,53 @@ def classify_zone(vix: float) -> dict:
         return {"zone": "Panic", "color": "red"}
 
 
+def _stale_fallback(supabase):
+    """Last saved VIX reading from vix_snapshots, shaped like the live result
+    (plus "stale": True). None if the table is empty."""
+    now = datetime.now(timezone.utc)
+    last = (
+        supabase.table("vix_snapshots")
+        .select("timestamp, vix_value, prev_close, change_pct")
+        .order("timestamp", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if not last.data:
+        return None
+    row = last.data[0]
+    vix_value = float(row["vix_value"])
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    today_rows = (
+        supabase.table("vix_snapshots")
+        .select("vix_value")
+        .gte("timestamp", day_start)
+        .execute()
+    ).data or []
+    vals = [float(r["vix_value"]) for r in today_rows if r.get("vix_value") is not None]
+    history_cutoff = (now - timedelta(hours=3)).isoformat()
+    history = (
+        supabase.table("vix_snapshots")
+        .select("timestamp, vix_value")
+        .gte("timestamp", history_cutoff)
+        .order("timestamp")
+        .execute()
+    )
+    zone = classify_zone(vix_value)
+    return {
+        "vix_value": vix_value,
+        "prev_close": float(row["prev_close"]) if row.get("prev_close") is not None else None,
+        "change_pct": float(row["change_pct"]) if row.get("change_pct") is not None else None,
+        "day_high": max(vals) if vals else vix_value,
+        "day_low": min(vals) if vals else vix_value,
+        "zone": zone["zone"],
+        "color": zone["color"],
+        "alert": None,
+        "history": history.data,
+        "timestamp": row["timestamp"],
+        "stale": True,
+    }
+
+
 def get_vix_pulse():
     import time as time_module
     global _vix_cache, _vix_cache_time
@@ -58,10 +105,22 @@ def get_vix_pulse():
             return _vix_cache
 
         from services.kite_auth import get_kite_client
-        kite = get_kite_client()
         supabase = get_supabase()
-
-        quote = kite.quote(["NSE:INDIA VIX"])["NSE:INDIA VIX"]
+        try:
+            kite = get_kite_client()
+            quote = kite.quote(["NSE:INDIA VIX"])["NSE:INDIA VIX"]
+        except Exception as e:
+            # Oct 31 2026: no live Kite session (e.g. pre-market before the
+            # day's first login, weekends) used to 500 on every 30s poll from
+            # the top-bar VIX box. Serve the last saved reading instead,
+            # flagged stale; only raise if there is nothing saved at all.
+            fb = _stale_fallback(supabase)
+            if fb is None:
+                raise
+            print(f"[vix_pulse] live Kite unavailable ({e}); serving last saved reading")
+            _vix_cache = fb
+            _vix_cache_time = now_epoch
+            return fb
         vix_value = quote["last_price"]
         prev_close = quote["ohlc"]["close"]
         change_pct = round((vix_value - prev_close) / prev_close * 100, 2) if prev_close else None

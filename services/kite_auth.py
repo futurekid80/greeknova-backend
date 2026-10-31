@@ -33,7 +33,15 @@ TOTP_SECRET = os.getenv('ZERODHA_TOTP_SECRET', '')
 # -- that ties up a request worker per hit and keeps hammering the already-
 # flagged login endpoint. While in cooldown, fail fast instead.
 _LAST_LOGIN_FAILURE_TS = 0.0
-_LOGIN_FAILURE_COOLDOWN_SECONDS = 120
+# Oct 31 2026: 120s -> 1800s. Zerodha's scripted login has been answering
+# "Invalid CAPTCHA values" since the Oct 24 credential resets, so every retry
+# after a cooldown just failed again -- and every morning between the overnight
+# token expiry and the first real (OAuth/Mac) login, pollers like the VIX box
+# triggered a fresh scripted attempt every 2 minutes (~10-15 failed hits on
+# Zerodha per morning). A token saved to Supabase by a real login is still
+# picked up immediately (step 2 of get_kite_client runs BEFORE this gate), so a
+# longer cooldown only reduces pointless scripted attempts.
+_LOGIN_FAILURE_COOLDOWN_SECONDS = 1800
 
 
 # ── Token health check tracking ───────────────────────────────────────────────
