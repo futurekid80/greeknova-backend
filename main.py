@@ -964,6 +964,40 @@ def _short_cache(ttl_market: int = 60, ttl_closed: int = 600):
         return wrapped
     return decorator
 
+# Oct 31 2026: /stock-intel used to re-run three MARKET-WIDE scans (UOA, Options
+# Jungle, Max Pain) on every request just to pick out one symbol -- ~30s per call,
+# which the Pulse Command Centre (8s timeout) mostly couldn't survive. This keeps
+# the scan result briefly and, once stale, serves the old copy instantly while a
+# background thread refreshes it. Only the very first call after a deploy is slow.
+_INTEL_STATE: dict = {}
+_INTEL_LOCKS: dict = {}
+
+def _swr_cached(key: str, fn, ttl_market: int = 60, ttl_closed: int = 900):
+    import threading
+    ttl = ttl_market if _market_hours_now() else ttl_closed
+    ent = _INTEL_STATE.get(key)
+    if ent and (time.time() - ent["t"]) < ttl:
+        return ent["d"]
+    if ent:  # stale -> serve it now, refresh behind the scenes
+        if not ent.get("busy"):
+            ent["busy"] = True
+            def _bg():
+                try:
+                    _INTEL_STATE[key] = {"t": time.time(), "d": fn(), "busy": False}
+                except Exception as e:
+                    print(f"[stock-intel] background refresh of {key} failed: {e}")
+                    ent["busy"] = False
+            threading.Thread(target=_bg, daemon=True).start()
+        return ent["d"]
+    lock = _INTEL_LOCKS.setdefault(key, threading.Lock())
+    with lock:  # first ever call: compute once, others wait for it
+        ent = _INTEL_STATE.get(key)
+        if ent:
+            return ent["d"]
+        d = fn()
+        _INTEL_STATE[key] = {"t": time.time(), "d": d, "busy": False}
+        return d
+
 # Access gate (Sep 26 2026) - added BEFORE CORS so CORS stays the outermost layer.
 from services.access_gate import install_gate
 install_gate(app)
@@ -3326,7 +3360,7 @@ def stock_intel(symbol: str):
     # ── 5. UOA ────────────────────────────────────────────────────────────
     try:
         from api.uoa import get_uoa
-        uoa_data = get_uoa()
+        uoa_data = _swr_cached("uoa", get_uoa)
         result["uoa"] = [s for s in (uoa_data.get("signals") or []) if s.get("symbol") == sym]
     except:
         result["uoa"] = []
@@ -3334,7 +3368,7 @@ def stock_intel(symbol: str):
     # ── 6. Options Jungle — writing signals ───────────────────────────────
     try:
         from api.options_jungle import get_options_jungle
-        jungle = get_options_jungle()
+        jungle = _swr_cached("jungle", get_options_jungle)
         sym_jungle = [s for s in (jungle.get("oi_spikes") or []) if s.get("symbol") == sym]
         result["jungle"] = sym_jungle
         result["put_writing"] = [s for s in sym_jungle if s.get("interpretation") == "PUT_WRITING"]
@@ -3347,7 +3381,7 @@ def stock_intel(symbol: str):
     # ── 7. Max Pain ───────────────────────────────────────────────────────
     try:
         from api.max_pain import get_max_pain_all
-        mp_data = get_max_pain_all()
+        mp_data = _swr_cached("maxpain", get_max_pain_all)
         mp_item = next((s for s in (mp_data.get("symbols") or []) if s.get("symbol") == sym), None)
         result["max_pain"] = mp_item
     except:
