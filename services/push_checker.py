@@ -78,6 +78,10 @@ def run_push_checks(supabase):
         _check_technical_levels(supabase)
     except Exception as e:
         print(f"[PushCheck] Technical levels failed: {e}")
+    try:
+        _check_pcr_crossover(supabase)
+    except Exception as e:
+        print(f"[PushCheck] PCR crossover failed: {e}")
 
 
 def _check_options_jungle(supabase):
@@ -440,3 +444,62 @@ def _check_technical_levels(supabase):
             prev["below_pwl"] = below_pwl
 
         _tech_state[sym] = prev
+
+
+# ── PCR crossover (Oct 31 2026, Pawan's ask) ─────────────────────────────
+# Fires when an index's Vol PCR crosses its OI PCR (the same crossover the PCR
+# page describes in words). Opt-in signal. Hysteresis so a line hovering at
+# equality doesn't chatter: a side only changes once the gap exceeds the band,
+# and each symbol has a cool-down after firing.
+PCR_CROSS_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
+PCR_CROSS_BAND = 0.03        # |vol_pcr - oi_pcr| must exceed this to count as a side
+PCR_CROSS_COOLDOWN_MIN = 30  # at most one alert per symbol per this many minutes
+_pcr_side: dict = {}         # symbol -> "above" | "below" (day state, reset daily)
+_pcr_last_fire: dict = {}    # symbol -> epoch seconds
+_pcr_day: str = ""
+
+
+def _check_pcr_crossover(supabase):
+    global _pcr_side, _pcr_last_fire, _pcr_day
+    import time as _t
+    from api.pcr_trend import get_pcr_trend
+    from api.push_notifications import broadcast_alert
+
+    today = datetime.now(timezone.utc).date().isoformat()
+    if today != _pcr_day:
+        _pcr_side, _pcr_last_fire, _pcr_day = {}, {}, today
+
+    for sym in PCR_CROSS_SYMBOLS:
+        try:
+            pts = get_pcr_trend(sym).get("points") or []
+        except Exception as e:
+            print(f"[PCRCross] {sym} fetch failed: {e}")
+            continue
+        if not pts:
+            continue
+        last = pts[-1]
+        oi_pcr, vol_pcr = last.get("pcr"), last.get("vol_pcr")
+        if not oi_pcr or not vol_pcr:
+            continue
+        gap = vol_pcr - oi_pcr
+        side = "above" if gap > PCR_CROSS_BAND else "below" if gap < -PCR_CROSS_BAND else None
+        if side is None:
+            continue
+        prev = _pcr_side.get(sym)
+        _pcr_side[sym] = side
+        if prev is None or prev == side:
+            continue  # first reading of the day sets the baseline; no change
+        if _t.time() - _pcr_last_fire.get(sym, 0) < PCR_CROSS_COOLDOWN_MIN * 60:
+            continue
+        _pcr_last_fire[sym] = _t.time()
+        word = "above" if side == "above" else "below"
+        meaning = ("today's put activity is running heavier than standing positioning"
+                   if side == "above" else
+                   "today's put activity is easing relative to standing positioning")
+        broadcast_alert(supabase, {
+            "signal": "PCR_CROSSOVER",
+            "symbol": sym,
+            "message": f"Vol PCR crossed {word} OI PCR ({vol_pcr:.2f} vs {oi_pcr:.2f}) at {last.get('time')} IST — {meaning}",
+            "url": "/pcr",
+        })
+        print(f"[PCRCross] {sym}: {prev} -> {side} (vol {vol_pcr}, oi {oi_pcr})")

@@ -158,6 +158,7 @@ ALL_SIGNAL_TYPES = [
 OPT_IN_SIGNAL_TYPES = [
     "EMA_BULLISH_CROSS", "EMA_BEARISH_CROSS",
     "PDH_CROSS", "PDL_CROSS", "PWH_CROSS", "PWL_CROSS",
+    "PCR_CROSSOVER",   # Oct 31 2026 (Pawan): Vol PCR crossing OI PCR on an index
 ]
 
 # Every signal name that's legal to store in enabled_signals -- used for
