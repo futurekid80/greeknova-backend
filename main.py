@@ -542,6 +542,7 @@ async def lifespan(app: FastAPI):
             print(f"[Push] Scheduled check failed: {e}")
     scheduler.add_job(_run_push_checks_job, "interval", minutes=5, id="push_checks")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
+    scheduler.add_job(kite_login_nudge, "cron", hour=9, minute=5, timezone="Asia/Kolkata", id="kite_login_nudge", max_instances=1, coalesce=True)
 
     def _run_fno_universe_refresh_job():
         # Re-asks Kite which stocks currently have live F&O contracts and
@@ -1802,12 +1803,49 @@ def auto_refresh_token():
     if not is_trading_day(now.date()): return
     print(f"🔐 Railway auto-login at {now.strftime('%H:%M IST')}...")
     try:
-        from services.kite_auth import auto_login
-        kite = auto_login()
+        from services.kite_auth import auto_login, get_token_from_supabase
+        # Oct 31 2026: if the owner already logged in early via app.greeknova.com
+        # (which now saves the data token), don't make a fresh scripted login.
+        if get_token_from_supabase():
+            print("✅ Railway auto-login skipped: today's token already saved")
+            return
+        # Single attempt only -- Zerodha's CAPTCHA makes repeats pointless.
+        kite = auto_login(max_retries=1, retry_delay=0)
         profile = kite.profile()
         print(f"✅ Railway auto-login successful: {profile['user_name']}")
     except Exception as e:
-        print(f"❌ Railway auto-login failed: {e}")
+        print(f"❌ Railway auto-login failed (single attempt; 9:05 nudge will follow if still not connected): {e}")
+
+_KITE_NUDGE_SENT_DATE = None
+
+def kite_login_nudge():
+    """Oct 31 2026: once-a-day Telegram nudge at 9:05 IST, only if no Kite
+    data token has been saved today (neither scripted login nor Manish's
+    early login via app.greeknova.com succeeded)."""
+    global _KITE_NUDGE_SENT_DATE
+    from datetime import datetime
+    import pytz
+    now = datetime.now(pytz.timezone('Asia/Kolkata'))
+    if now.weekday() >= 5: return
+    from utils.market_calendar import is_trading_day
+    if not is_trading_day(now.date()): return
+    if _KITE_NUDGE_SENT_DATE == now.date(): return
+    try:
+        from services.kite_auth import get_token_from_supabase
+        if get_token_from_supabase():
+            print("[KiteNudge] token present, no nudge")
+            return
+        from services.alert_engine import send_telegram
+        send_telegram(
+            "GreekNova: data session is NOT connected yet today.\n"
+            "Open https://app.greeknova.com/login and tap Login with Zerodha "
+            "(tick 'confirm human' if asked). Data resumes right after.",
+            markdown=False,
+        )
+        _KITE_NUDGE_SENT_DATE = now.date()
+        print("[KiteNudge] Telegram sent")
+    except Exception as e:
+        print(f"[KiteNudge] failed: {e}")
 
 @app.get("/admin/complete-kite-login")
 def admin_complete_kite_login(request_token: str):
@@ -2568,7 +2606,28 @@ def auth_kite_login(body: KiteLoginRequest):
     if not token_hash:
         raise HTTPException(status_code=500, detail="Kite login session link missing token")
 
-    return {"email": kite_email, "token_hash": token_hash, "is_new_trial": is_new_trial}
+    # Oct 31 2026: when the DATA account itself (ZERODHA_USER_ID) logs in via
+    # the normal button, also save today's token for the server's data session.
+    # Only that one account; every other user's token is still discarded.
+    data_session_refreshed = False
+    try:
+        from services.kite_auth import USER_ID as _DATA_USER_ID, TOKEN_FILE, save_token_to_supabase
+        if access_token and (kite_user_id or "").strip().upper() == (_DATA_USER_ID or "").strip().upper():
+            import json as _json, time as _time
+            try:
+                with open(TOKEN_FILE, 'w') as f:
+                    _json.dump({"access_token": access_token, "timestamp": _time.time(),
+                                "date": _time.strftime("%Y-%m-%d")}, f)
+            except Exception:
+                pass
+            save_token_to_supabase(access_token)
+            data_session_refreshed = True
+            print("[KiteLogin] data-account login: server data token refreshed")
+    except Exception as e:
+        print(f"[KiteLogin] data token save failed: {e}")
+
+    return {"email": kite_email, "token_hash": token_hash, "is_new_trial": is_new_trial,
+            "data_session_refreshed": data_session_refreshed}
 
 
 @app.get("/me/trial-status")
