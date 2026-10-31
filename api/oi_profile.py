@@ -470,7 +470,9 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, 
     # day the slider is scrubbed to, the same way prev_oi_map above shows
     # "change since yesterday's close" for the regular OI Profile view.
     day_open_map: dict = {}
-    if at_time:
+    # Oct 31 2026 (Vinod): now always computed (not only for the Timeline
+    # slider) so the plain OI Profile can toggle "change since today's open".
+    if True:
         try:
             open_ts_q = supabase.from_("oi_snapshots")\
                 .select("timestamp")\
