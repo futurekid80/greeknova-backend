@@ -3462,6 +3462,10 @@ async def custom_scanner(request: Request):
         return {"error": "conditions (a non-empty list) is required", "matches": [], "total": 0}
     return run_custom_scan(conditions, date)
 
+import threading as _threading
+_STEALTH_SCAN_CACHE: dict = {}
+_STEALTH_SCAN_LOCK = _threading.Lock()
+
 @app.get("/option-stealth-buildup")
 def option_stealth_buildup(date: str = None, zone: str = None, window: str = None):
     """(Oct 27 2026): Option Strike Stealth Buildup -- per-strike OI piling
@@ -3482,7 +3486,24 @@ def option_stealth_buildup(date: str = None, zone: str = None, window: str = Non
     hourly/eod, added Oct 27 2026) are a first pass pending Manish watching
     a normal, non-expiry session."""
     from services.option_stealth_buildup import run_option_stealth_scan, DEFAULT_ZONE, DEFAULT_WINDOW
-    return run_option_stealth_scan(get_supabase(), date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW)
+    # Oct 31 2026: the scan takes ~30-40s (whole F&O universe), and every page
+    # open / window click re-ran it from scratch. Short per-(date,zone,window)
+    # cache -- 60s while the market is live (data only changes every 5 min),
+    # 15 min when closed -- plus a lock so concurrent callers share ONE scan
+    # instead of each starting their own.
+    key = (date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW)
+    ttl = 60 if _market_hours_now() else 900
+    hit = _STEALTH_SCAN_CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    with _STEALTH_SCAN_LOCK:
+        hit = _STEALTH_SCAN_CACHE.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        result = run_option_stealth_scan(get_supabase(), date, key[1], key[2])
+        if not (isinstance(result, dict) and result.get("error")):
+            _STEALTH_SCAN_CACHE[key] = (time.time(), result)
+        return result
 
 @app.get("/option-stealth-buildup/saved")
 def option_stealth_buildup_saved(date: str = None, zone: str = None, window: str = None):
