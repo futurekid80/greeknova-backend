@@ -47,6 +47,34 @@ def _get_spot(supabase, symbol: str):
     return spot
 
 
+# Oct 31 2026: per-process repeat-push suppression (see broadcast_alert).
+_last_push: dict = {}   # (symbol, signal, strike, optionType) -> (epoch, abs_oi_pct)
+REPEAT_COOLDOWN_MIN = int(os.environ.get("ALERT_REPEAT_COOLDOWN_MIN", "30"))
+REPEAT_GROWTH = 1.5
+
+
+def _is_repeat_push(alert: dict) -> bool:
+    if REPEAT_COOLDOWN_MIN <= 0:
+        return False
+    key = (alert.get("symbol"), alert.get("signal"), alert.get("strike"), alert.get("optionType"))
+    now = time.time()
+    try:
+        oi = abs(float(alert.get("oiPct"))) if alert.get("oiPct") is not None else None
+    except (TypeError, ValueError):
+        oi = None
+    prev = _last_push.get(key)
+    if prev and now - prev[0] < REPEAT_COOLDOWN_MIN * 60:
+        grew = oi is not None and prev[1] is not None and prev[1] > 0 and oi >= prev[1] * REPEAT_GROWTH
+        if not grew:
+            return True
+    _last_push[key] = (now, oi)
+    if len(_last_push) > 20000:   # bound memory
+        cutoff = now - REPEAT_COOLDOWN_MIN * 60
+        for k in [k for k, v in _last_push.items() if v[0] < cutoff]:
+            _last_push.pop(k, None)
+    return False
+
+
 def _get_strikes_away(supabase, symbol: str, strike) -> int | None:
     """Looks up how many strikes `strike` sits from `symbol`'s ATM, using
     that symbol's most recent capture cycle. Returns None if symbol/strike
@@ -340,6 +368,14 @@ def broadcast_alert(supabase, alert: dict):
         }).execute()
     except Exception as e:
         print(f"[Push] alert_log persist failed: {e}")
+
+    # Oct 31 2026 (Pawan/Vinod, alert noise): Friday's log showed 42% of
+    # alerts were repeats of the same stock+signal+strike (one fired 31x).
+    # The alert is always LOGGED above (full history stays in the Alerts
+    # feed), but a repeat PUSH is held back for REPEAT_COOLDOWN_MIN unless the
+    # OI move has grown >=50% beyond what we last pushed for it.
+    if _is_repeat_push(alert):
+        return
 
     if not VAPID_PRIVATE_KEY:
         print("[Push] VAPID_PRIVATE_KEY not set — skipping push")
