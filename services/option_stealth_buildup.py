@@ -164,6 +164,18 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
     min_old_oi = cfg["min_old_oi"]
     tiers = cfg["tiers"]
 
+    # Nov 2 2026: when the baseline snapshot is from a PREVIOUS session (EOD window, and the
+    # first ticks of the day for the shorter windows) an OI jump with an unchanged premium is
+    # not a buildup -- OI cannot change without trades, so it is the exchange's overnight OI
+    # update against a stale baseline (seen on illiquid MCX strikes). Skip those.
+    baseline_prior_session = False
+    try:
+        day_start_utc, _ = _ist_day_start_utc(ts_new)
+        old_dt = datetime.fromisoformat(str(ts_old).replace("Z", "+00:00")) if ts_old else None
+        baseline_prior_session = bool(old_dt and old_dt < day_start_utc)
+    except Exception:
+        baseline_prior_session = False
+
     hits = []
     for row in new_data:
         opt_type = row.get("option_type")
@@ -195,6 +207,8 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         if old_premium <= 0:
             continue
         premium_pct = (new_premium - old_premium) / old_premium * 100
+        if baseline_prior_session and new_premium == old_premium:
+            continue  # no trade since the previous session -> stale-baseline artifact
 
         tier, tier_label = _classify(oi_pct, premium_pct, tiers)
         if not tier:
@@ -450,6 +464,8 @@ def enrich_intraday(supabase, result: dict) -> dict:
             prices = [float(r["last_price"]) for r in series if r.get("last_price")]
             if prices:
                 h["prem_low"], h["prem_high"] = min(prices), max(prices)
+                if h["prem_low"] == h["prem_high"]:
+                    h["_no_trades"] = True      # premium never moved all day
                 base = h.get("old_premium") or 0
                 if base > 0:
                     h["prem_range_pct"] = round((h["prem_high"] - h["prem_low"]) / base * 100, 1)
@@ -477,6 +493,12 @@ def enrich_intraday(supabase, result: dict) -> dict:
                 h["activity_conflict"] = bool(
                     act != h.get("activity") and (h.get("hr_share_pct") or 0) >= CONFLICT_MIN_SHARE
                 )
+        kept = [h for h in hits if not h.pop("_no_trades", False)]
+        if len(kept) != len(hits):
+            result["hits"] = kept
+            result["total"] = len(kept)
+            result["confluence_count"] = sum(1 for h in kept if h.get("is_confluence"))
+            result["dropped_no_trades"] = len(hits) - len(kept)
         return result
     except Exception as e:
         print(f"[OptionStealth] enrich_intraday failed: {e}")
