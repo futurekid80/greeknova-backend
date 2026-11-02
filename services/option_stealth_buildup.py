@@ -241,10 +241,31 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
             "new_premium": new_premium,
         })
 
+    # Nov 2 2026 (2nd pass): premium can move later in the day even when the OI jump was
+    # already there at the open (MCX 3350 PE: OI 10,800 -> 56,025 between Friday's last reading
+    # and today's first, then flat). Against a prior-session baseline, keep a hit only if at
+    # least 40% of the claimed OI addition happened TODAY (new_oi - today's first-snapshot OI).
+    dropped_stale_open = 0
+    if baseline_prior_session and hits:
+        try:
+            open_oi = _first_snapshot_oi(supabase, sorted({h["tradingsymbol"] for h in hits}), day_start_utc.isoformat(), ts_new)
+            kept = []
+            for h in hits:
+                o = open_oi.get(h["tradingsymbol"])
+                total_add = h["new_oi"] - h["old_oi"]
+                if o is not None and total_add > 0 and (h["new_oi"] - o) < 0.4 * total_add:
+                    dropped_stale_open += 1
+                    continue
+                kept.append(h)
+            hits = kept
+        except Exception as e:
+            print(f"[OptionStealth] open-OI check failed (hits kept): {e}")
+
     tier_rank = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
     hits.sort(key=lambda h: (not h["is_confluence"], tier_rank[h["tier"]], -h["oi_pct"]))
 
     return {
+        "dropped_stale_open": dropped_stale_open,
         "date": (date or (ts_new[:10] if ts_new else None)),
         "ts_new": ts_new,
         "ts_old": ts_old,
@@ -404,6 +425,24 @@ def _ist_day_start_utc(ts_new: str):
     start_ist = ist.replace(hour=0, minute=0, second=0, microsecond=0)
     return (start_ist - timedelta(hours=5, minutes=30)).astimezone(timezone.utc), dt
 
+
+
+def _first_snapshot_oi(supabase, symbols: list, day_start_iso: str, end_iso: str) -> dict:
+    """OI of each symbol at the first snapshot of today's session (empty dict if none)."""
+    first = supabase.from_("oi_snapshots").select("timestamp").gte("timestamp", day_start_iso) \
+        .lte("timestamp", end_iso).order("timestamp").limit(1).execute().data or []
+    if not first:
+        return {}
+    t0 = _parse_ts(first[0]["timestamp"])
+    t1 = (t0 + timedelta(minutes=3)).isoformat()
+    out: dict = {}
+    for i in range(0, len(symbols), 60):
+        rows = supabase.from_("oi_snapshots").select("tradingsymbol,timestamp,oi") \
+            .in_("tradingsymbol", symbols[i:i + 60]).gte("timestamp", t0.isoformat()).lte("timestamp", t1) \
+            .order("timestamp").execute().data or []
+        for r in rows:
+            out.setdefault(r["tradingsymbol"], r.get("oi"))
+    return out
 
 def _fetch_history(supabase, symbols: list, start_iso: str, end_iso: str) -> dict:
     from concurrent.futures import ThreadPoolExecutor
