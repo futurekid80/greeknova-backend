@@ -663,6 +663,18 @@ async def lifespan(app: FastAPI):
             print(f"[OptionStealth] tick job failed: {e}")
     scheduler.add_job(_run_option_stealth_job, "cron", hour="9-15", minute="*/5", second=45, timezone="Asia/Kolkata", id="option_stealth_tick", max_instances=1, coalesce=True)
 
+    def _run_war_zone_log_job():
+        """Every 30 min 9:30-15:30 IST (Nov 2 2026): record War Zone stocks (see services/war_zone_log.py)."""
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            if not is_trading_day(today_ist()):
+                return
+            from services.war_zone_log import log_war_zone
+            print(f"[WarZoneLog] {log_war_zone(get_supabase())}")
+        except Exception as e:
+            print(f"[WarZoneLog] job failed: {e}")
+    scheduler.add_job(_run_war_zone_log_job, "cron", hour="9-15", minute="30,0", timezone="Asia/Kolkata", id="war_zone_log", max_instances=1, coalesce=True)
+
     def _run_vix_daily_close_job():
         """Daily 15:40 IST: append today's INDIA VIX close to vix_daily_history.
         (Oct 14 2026) This table was only ever written by the one-off
