@@ -494,10 +494,8 @@ def _get_eod_pulse(supabase):
         oi_chg = fut_oi_chg if fut_oi_chg is not None else round(float(r.get("oi_chg_pct") or 0), 2)
         _next_raw = r.get("fut_oi_chg_pct_next")
         fut_oi_chg_next = round(float(_next_raw), 2) if _next_raw is not None else None
-        fut_oi_chg_combined = (
-            round(oi_chg + fut_oi_chg_next, 2)
-            if fut_oi_chg_next is not None else None
-        )
+        from utils.oi_math import combined_oi_pct
+        fut_oi_chg_combined = combined_oi_pct(r.get("fut_oi_close"), oi_chg, r.get("fut_oi_close_next"), fut_oi_chg_next)
         price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         ltp = cmp_map.get(sym, 0)
         is_index = sym in INDEX_NSE_MAP
@@ -765,10 +763,8 @@ def _compute_oi_pulse(supabase):
             fut_oi_next_close = fn_new
             if fn_old > 0:
                 fut_oi_chg_pct_next = round((fn_new - fn_old) / fn_old * 100, 2)
-        fut_oi_chg_pct_combined = (
-            round(display_oi_chg_pct + fut_oi_chg_pct_next, 2)
-            if fut_oi_chg_pct_next is not None else None
-        )
+        from utils.oi_math import combined_oi_pct
+        fut_oi_chg_pct_combined = combined_oi_pct(fut_oi_now, display_oi_chg_pct, fut_oi_next_close, fut_oi_chg_pct_next)
 
         items.append({
             "symbol":            sym,

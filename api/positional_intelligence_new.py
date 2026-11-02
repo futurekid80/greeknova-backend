@@ -545,11 +545,12 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                 # gap, which this bug broke on nearly any gap day.
                 _raw_price_chg = (today_data or {}).get("price_chg_pct")
                 today_price = float(_raw_price_chg) if _raw_price_chg is not None else 0.0
-            # Combined = near + next month OI change. Genuine rollover shows
-            # up as OI leaving near-month and arriving in next-month in
-            # roughly equal size, so it largely cancels out here -- what's
-            # left over is closer to real net positioning change.
-            today_oi_combined = round(today_oi + today_oi_next, 2) if today_oi_next is not None else None
+            # Combined = change in TOTAL (near + next month) OI, weighted by size
+            # (Nov 2 2026: was a sum of the two percentages). Rollover moves OI
+            # from near to next, so it largely cancels -- what's left is closer
+            # to real net positioning change.
+            from utils.oi_math import combined_oi_pct
+            today_oi_combined = combined_oi_pct(today_oi_abs, today_oi, today_oi_abs_next, today_oi_next)
             if today_oi > 0 and abs(today_price) <= 1.0:
                 if True:
                     if today_oi >= 2.0 and abs(today_price) <= 0.5:

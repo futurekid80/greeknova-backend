@@ -2,6 +2,7 @@
 eod_report.py - Premium EOD Intelligence Report
 Aggregates daily_oi_summary, iv_history, participant_flow for a given date.
 """
+from utils.oi_math import combined_oi_pct
 from datetime import datetime, timezone, timedelta
 
 def get_eod_report(supabase, date: str = None):
@@ -107,7 +108,7 @@ def get_eod_report(supabase, date: str = None):
             "symbol": r["symbol"],
             "fut_oi_chg_pct": round(oi, 2),
             "fut_oi_chg_pct_next": round(oi_next, 2) if oi_next is not None else None,
-            "fut_oi_chg_pct_combined": round(oi + oi_next, 2) if oi_next is not None else None,
+            "fut_oi_chg_pct_combined": combined_oi_pct(r.get("fut_oi_close"), oi, r.get("fut_oi_close_next"), oi_next),
             "fut_oi_close": r.get("fut_oi_close"),
             "fut_oi_close_next": r.get("fut_oi_close_next"),
             "price_chg_pct": round(price, 2),
@@ -334,7 +335,7 @@ def get_eod_report(supabase, date: str = None):
             "symbol": r.get("symbol"),
             "fut_oi_chg_pct": round(oi_now, 2),
             "fut_oi_chg_pct_next": round(oi_next, 2) if oi_next is not None else None,
-            "fut_oi_chg_pct_combined": round(oi_now + oi_next, 2) if oi_next is not None else None,
+            "fut_oi_chg_pct_combined": combined_oi_pct(r.get("fut_oi_close"), oi_now, r.get("fut_oi_close_next"), oi_next),
             "fut_oi_close": r.get("fut_oi_close"),
             "fut_oi_close_next": r.get("fut_oi_close_next"),
             "price_chg_pct": round(float(r.get("price_chg_pct") or 0), 2),
