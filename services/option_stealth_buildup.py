@@ -112,13 +112,13 @@ TIER_LABELS = {"ELITE": "Elite", "STRONG": "Strong", "WATCH": "Watch"}
 
 def _activity(opt_type: str, premium_pct: float):
     """Oct 31 2026: Writing vs Buying. OI up + premium down = sellers adding
-    (WRITING); OI up + premium up = buyers adding (BUYING); within +-0.5% is
+    (WRITING); OI up + premium up = buyers adding (BUYING); within +-1% is
     NEUTRAL (genuinely quiet). A CE writing is bearish-leaning, a PE writing
     bullish-leaning -- the label says WHO is adding, the user reads direction."""
     side = "Call" if opt_type == "CE" else "Put"
-    if premium_pct <= -0.5:
+    if premium_pct <= -1.0:   # Nov 2 2026: band widened from 0.5 -- a sub-1% move is noise, not a side
         return "WRITING", f"{side} Writing"
-    if premium_pct >= 0.5:
+    if premium_pct >= 1.0:
         return "BUYING", f"{side} Buying"
     return "NEUTRAL", f"{side} Quiet"
 
@@ -261,10 +261,19 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         except Exception as e:
             print(f"[OptionStealth] open-OI check failed (hits kept): {e}")
 
+    # Nov 2 2026: size floor for the EOD window. A big % on a tiny base (LICHSGFIN 475 CE:
+    # +7,000 OI, about Rs 2 lakh of premium) is noise. Money put in = OI added x premium.
+    dropped_small = 0
+    if window == "eod":
+        big = [h for h in hits if (h["new_oi"] - h["old_oi"]) * h["new_premium"] >= MIN_PREMIUM_VALUE_EOD]
+        dropped_small = len(hits) - len(big)
+        hits = big
+
     tier_rank = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
     hits.sort(key=lambda h: (not h["is_confluence"], tier_rank[h["tier"]], -h["oi_pct"]))
 
     return {
+        "dropped_small": dropped_small,
         "dropped_stale_open": dropped_stale_open,
         "date": (date or (ts_new[:10] if ts_new else None)),
         "ts_new": ts_new,
@@ -292,6 +301,7 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
 # stops qualifying simply stops being updated.
 from datetime import datetime, timezone, timedelta
 
+MIN_PREMIUM_VALUE_EOD = 500000   # Rs 5 lakh: OI added x premium, EOD window only
 PERSIST_ZONE = "5"          # same default the page shows; keeps volume sane
 FRESH_WINDOW_MIN = 7        # last_seen within this => still on the current tick
 TIER_RANK = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
