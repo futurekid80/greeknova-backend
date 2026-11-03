@@ -176,6 +176,32 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
     except Exception:
         baseline_prior_session = False
 
+    # Nov 3 2026: EOD window -- use the exchange's OFFICIAL previous close as the premium baseline and
+    # the underlying's previous close for an IV-based Writing/Buying read (see services/stealth_baseline.py).
+    # Any failure silently falls back to the old snapshot baseline + premium-% rule.
+    official_close: dict = {}
+    prev_spot: dict = {}
+    use_official = window == "eod" and baseline_prior_session
+    if use_official:
+        try:
+            from services.stealth_baseline import get_prev_option_closes, get_prev_spots
+            cand = []
+            for row in new_data:
+                if row.get("option_type") not in ("CE", "PE") or row.get("strike") is None or row["symbol"] not in index_map:
+                    continue
+                orow = old_map.get(f"{row['symbol']}_{row['tradingsymbol']}")
+                if not orow or (orow.get("oi") or 0) < min_old_oi or (row.get("oi") or 0) <= (orow.get("oi") or 0):
+                    continue
+                if not in_zone(strikes_away(row["symbol"], row["strike"], index_map), zone):
+                    continue
+                cand.append((row["symbol"], row["tradingsymbol"]))
+            day_key = (ts_new or "")[:10]
+            official_close = get_prev_option_closes(day_key, cand)
+            prev_spot = get_prev_spots(day_key, {c[0] for c in cand})
+            print(f"[OptionStealth] eod baseline: {len(official_close)}/{len(cand)} official closes, {len(prev_spot)} prev spots")
+        except Exception as e:
+            print(f"[OptionStealth] official baseline unavailable, using snapshots: {e}")
+
     hits = []
     for row in new_data:
         opt_type = row.get("option_type")
@@ -203,11 +229,15 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
             continue  # BUILD only -- an unwind isn't a "buildup" by definition
 
         old_premium = old_row.get("last_price") or 0
+        snap_old_premium = old_premium
+        oc = official_close.get(row.get("tradingsymbol"))
+        if oc and oc > 0:
+            old_premium = oc
         new_premium = row.get("last_price") or 0
         if old_premium <= 0:
             continue
         premium_pct = (new_premium - old_premium) / old_premium * 100
-        if baseline_prior_session and new_premium == old_premium:
+        if baseline_prior_session and new_premium == snap_old_premium:
             continue  # no trade since the previous session -> stale-baseline artifact
 
         tier, tier_label = _classify(oi_pct, premium_pct, tiers)
@@ -215,7 +245,20 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
             continue
 
         activity, activity_label = _activity(opt_type, premium_pct)
+        activity_basis = "premium"
+        if use_official and prev_spot.get(symbol) and cmp_map.get(symbol):
+            try:
+                from services.stealth_baseline import iv_change, activity_from_iv
+                ivs = iv_change(opt_type, strike, row.get("expiry"), prev_spot[symbol], old_premium, ts_old,
+                                float(cmp_map[symbol]), new_premium, ts_new)
+                if ivs:
+                    activity, activity_label = activity_from_iv(opt_type, ivs[0], ivs[1])
+                    activity_basis = "iv"
+            except Exception as e:
+                print(f"[OptionStealth] IV label failed for {row.get('tradingsymbol')}: {e}")
         hits.append({
+            "activity_basis": activity_basis,
+            "baseline_src": "official" if (oc and oc > 0) else "snapshot",
             "symbol": symbol,
             "tradingsymbol": row.get("tradingsymbol"),
             "activity": activity,
