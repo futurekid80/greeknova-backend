@@ -564,7 +564,9 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
             # roughly equal size, so it largely cancels out here -- what's
             # left over is closer to real net positioning change.
             today_oi_combined = round(today_oi + today_oi_next, 2) if today_oi_next is not None else None
-            if today_oi > 0 and abs(today_price) <= 1.0:
+            # Nov 3 2026: outer gate widened 1.0 -> 1.5 so the WATCH band (price up to 1.5%) is reachable; the old
+            # capped list / summary count below still only use |price| <= 1.0, so existing cards and counts don't change.
+            if today_oi > 0 and abs(today_price) <= 1.5:
                 if True:
                     if today_oi >= 2.0 and abs(today_price) <= 0.5:
                         tier, tier_label = "ELITE", "Elite"
@@ -690,7 +692,14 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
     # per-tier slots below guarantees STRONG/WATCH stay visible regardless
     # of how many ELITE signals exist that day.
     stealth_buildup.sort(key=lambda x: -abs(x.get("today_oi_chg", 0)))
-    _stealth_total_count = len(stealth_buildup)  # full qualifying count, pre-cap -- summary below must report this, not the capped list
+    # Nov 3 2026: full uncapped list for the 'wider net' Stealth view (?v=new on /positional): every tier, ranked
+    # strongest first. WATCH = close to the rule (OI a bit smaller, or price 1-1.5% instead of <= 1%).
+    _tier_rank = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
+    stealth_all = sorted(
+        ({**x, "near_miss": abs(x.get("price_chg", 0)) > 1.0} for x in stealth_buildup),
+        key=lambda x: (_tier_rank.get(x["tier"], 3), -abs(x.get("today_oi_chg", 0))),
+    )
+    _stealth_total_count = len([x for x in stealth_buildup if abs(x.get("price_chg", 0)) <= 1.0])  # same meaning as before the gate change
     # Oct 6 2026: display-only cap, requested by Manish to cut clutter --
     # top 5 ELITE + top 5 STRONG shown, WATCH tier dropped from the capped
     # display entirely (fewer, stronger candidates on screen). This does
@@ -709,6 +718,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
         "total_trading_days": max((p.get("total_days", 0) for p in pi_data.values()), default=0),
         "date": today_str,
         "active_conviction": active_conviction,
+        "stealth_all": stealth_all,
         "stealth_buildup": stealth_buildup,  # already tier-capped (12 ELITE + 8 STRONG + 5 WATCH) above
         "vol_breakout": vol_breakout[:10],
         "series_buildup": series_buildup[:15],
