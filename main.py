@@ -938,6 +938,23 @@ async def lifespan(app: FastAPI):
     print("📸 Full capture every 5 min during market hours")
     print("🔔 Alert engine: wired into capture cycle")
     print("🎯 ATM-centered strike selection: 25 above + 25 below for indices")
+    # Nov 3 2026: pre-fill the homepage caches right after a deploy/restart so the
+    # first visitor doesn't pay the 8-30s cold compute (see _short_cache).
+    def _warm_homepage_caches():
+        import time as _t
+        _t.sleep(20)  # let the app finish starting
+        for _w in list(_SHORT_CACHE_WARMERS):
+            try:
+                _w()
+            except Exception as _e:
+                print(f"[warmup] failed: {_e}")
+        try:
+            uoa()
+        except Exception as _e:
+            print(f"[warmup] uoa failed: {_e}")
+        print("[warmup] homepage caches warmed")
+    import threading as _th_warm
+    _th_warm.Thread(target=_warm_homepage_caches, daemon=True).start()
     yield
     scheduler.shutdown()
 
@@ -959,23 +976,55 @@ def _market_hours_now() -> bool:
     ist_now = datetime.now(pytz.timezone("Asia/Kolkata"))
     return is_trading_day(today_ist()) and (9, 15) <= (ist_now.hour, ist_now.minute) <= (15, 30)
 
-def _short_cache(ttl_market: int = 60, ttl_closed: int = 600):
-    """Per-process TTL cache for a zero-arg endpoint function. Mirrors the
-    cache already on /index-data: short TTL while the market is live,
-    much longer outside trading hours."""
+def _short_cache(ttl_market: int = 60, ttl_closed: int = 600, max_stale_market: int = 600):
+    """Per-process cache for a zero-arg endpoint function, with
+    stale-while-revalidate (Nov 3 2026). Before: when the 60s cache expired,
+    the ONE visitor who arrived next waited for the full recompute -- 8 to 30
+    seconds on /oi-pulse, /cpr-scanner, /52-week-high -- longer than the
+    homepage's 8s timeout, so the new Pulse page went blank for seconds
+    ("everything goes off and takes seconds to reappear"). Now an expired copy
+    is served instantly while a background thread refreshes it. A copy older
+    than max_stale_market during live trading is never served (recomputed
+    inline instead), so stale data can't linger. Outside market hours the
+    underlying data cannot have changed, so any age is fine."""
+    import threading
     def decorator(fn):
-        state = {"data": None, "time": 0.0}
+        state = {"data": None, "time": 0.0, "busy": False}
+        lock = threading.Lock()
+        def _refresh():
+            try:
+                result = fn()
+                state["data"] = result
+                state["time"] = time.time()
+            except Exception as e:
+                print(f"[short_cache] background refresh of {fn.__name__} failed: {e}")
+            finally:
+                state["busy"] = False
         def wrapped():
-            ttl = ttl_market if _market_hours_now() else ttl_closed
-            if state["data"] is not None and (time.time() - state["time"]) < ttl:
-                return state["data"]
-            result = fn()
-            state["data"] = result
-            state["time"] = time.time()
-            return result
+            live = _market_hours_now()
+            ttl = ttl_market if live else ttl_closed
+            age = time.time() - state["time"]
+            if state["data"] is not None:
+                if age < ttl:
+                    return state["data"]
+                if (not live) or age < max_stale_market:
+                    if not state["busy"]:
+                        state["busy"] = True
+                        threading.Thread(target=_refresh, daemon=True).start()
+                    return state["data"]
+            with lock:  # nothing usable cached: compute once, others wait for it
+                if state["data"] is not None and (time.time() - state["time"]) < ttl:
+                    return state["data"]
+                result = fn()
+                state["data"] = result
+                state["time"] = time.time()
+                return result
         wrapped.__name__ = fn.__name__
+        _SHORT_CACHE_WARMERS.append(lambda: (state.__setitem__("busy", True), _refresh()))
         return wrapped
     return decorator
+
+_SHORT_CACHE_WARMERS: list = []
 
 # Oct 31 2026: /stock-intel used to re-run three MARKET-WIDE scans (UOA, Options
 # Jungle, Max Pain) on every request just to pick out one symbol -- ~30s per call,
@@ -1982,8 +2031,10 @@ def admin_trigger_kite_login():
 
 @app.get("/uoa")
 def uoa(date: str = None, strike_zone: str = "all"):
+    # Nov 3 2026: was uncached and took 8-30s per call (homepage timeout is 8s);
+    # now served instantly from a stale-while-revalidate cache.
     from api.uoa import get_uoa
-    return get_uoa(date, strike_zone)
+    return _swr_cached(f"uoa|{date}|{strike_zone}", lambda: get_uoa(date, strike_zone), ttl_market=60, ttl_closed=600)
 
 @app.get("/gamma-squeeze")
 def gamma_squeeze(date: str = None):
