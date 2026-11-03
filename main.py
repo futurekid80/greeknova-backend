@@ -3386,7 +3386,21 @@ def stock_intel(symbol: str):
             # for older rows predating the fut_price_chg_pct column.
             _fut_pc = r.get("fut_price_chg_pct")
             _price_chg = float(_fut_pc) if _fut_pc is not None else float(r.get("price_chg_pct") or 0)
+            # Nov 3 2026: same Stealth test as api/positional_intelligence.py (EOD branch): futures OI up and the
+            # CASH price move within 1% -- keep these thresholds in sync with that file.
+            _oi_chg = float(r.get("fut_oi_chg_pct") or 0)
+            _cash_pc = float(r.get("price_chg_pct") or 0)
+            _stealth = None
+            if _oi_chg > 0 and abs(_cash_pc) <= 1.0:
+                if _oi_chg >= 2.0 and abs(_cash_pc) <= 0.5:
+                    _stealth = "ELITE"
+                elif _oi_chg >= 1.5:
+                    _stealth = "STRONG"
+                elif _oi_chg >= 1.0:
+                    _stealth = "WATCH"
             history.append({
+                "stealth": _stealth,
+                "cash_price_chg": round(_cash_pc, 2),
                 "date": r["trade_date"],
                 "signal": r.get("fut_signal") or "NEUTRAL",
                 "fut_oi_chg": round(float(r.get("fut_oi_chg_pct") or 0), 2),
