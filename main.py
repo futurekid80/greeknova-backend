@@ -429,6 +429,7 @@ async def lifespan(app: FastAPI):
     # 15:50 window. Self-healing regardless of deploy timing.
     def _wolves_cache_self_heal():
         try:
+            from utils.db import get_supabase  # local import: the enclosing function re-imports this name later, which made it an unbound free variable here
             from utils.market_calendar import today_ist, is_trading_day, get_prev_trading_day
             from datetime import datetime as _dt
             import pytz as _pytz
