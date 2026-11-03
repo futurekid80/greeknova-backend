@@ -435,6 +435,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
     # ── Build results ─────────────────────────────────────────────────────
     active_conviction = []
     stealth_buildup = []
+    stealth_other = []   # Nov 3 2026: everything else with futures OI up (outside the Stealth rule), for the 'Any' view
     vol_breakout = []
     series_buildup = []
 
@@ -593,6 +594,22 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                                 "delivery_pct": delivery_map.get(sym, None),
                                 "oi_history": [round(float(h.get("fut_oi_chg_pct") or 0), 2) for h in last_15],
                             })
+            if today_oi > 0 and not any(x["symbol"] == sym for x in stealth_buildup):
+                stealth_other.append({
+                    **base,
+                    "signal": "OTHER",
+                    "tier": "OTHER",
+                    "tier_label": "Outside rule",
+                    "rank": 0,
+                    "today_oi_chg": round(today_oi, 2),
+                    "next_month_oi_chg": round(today_oi_next, 2) if today_oi_next is not None else None,
+                    "combined_oi_chg": today_oi_combined,
+                    "today_oi_abs": today_oi_abs,
+                    "next_month_oi_abs": today_oi_abs_next,
+                    "price_chg": round(today_price, 2),
+                    "net_delta": net_delta_map.get(sym, None),
+                    "delivery_pct": delivery_map.get(sym, None),
+                })
 
         # ── Volume Breakout ───────────────────────────────────────────────
         vol_data = vol_sym_data.get(sym, [])
@@ -699,6 +716,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
         ({**x, "near_miss": abs(x.get("price_chg", 0)) > 1.0} for x in stealth_buildup),
         key=lambda x: (_tier_rank.get(x["tier"], 3), -abs(x.get("today_oi_chg", 0))),
     )
+    stealth_all += sorted(({**x, "near_miss": False} for x in stealth_other), key=lambda x: -abs(x.get("today_oi_chg", 0)))
     _stealth_total_count = len([x for x in stealth_buildup if abs(x.get("price_chg", 0)) <= 1.0])  # same meaning as before the gate change
     # Oct 6 2026: display-only cap, requested by Manish to cut clutter --
     # top 5 ELITE + top 5 STRONG shown, WATCH tier dropped from the capped
