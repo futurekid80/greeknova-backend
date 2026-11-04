@@ -362,6 +362,17 @@ def persist_scan_result(supabase, window: str, result: dict) -> int:
         return 0
     scan_date = ts_new[:10]
     seen_dt = _parse_ts(ts_new)
+    # Nov 4 2026: never persist a snapshot from an earlier day (the first tick
+    # of a new session can still see yesterday's last snapshot and would
+    # re-scan it with today's baseline, polluting yesterday's history).
+    try:
+        if seen_dt is not None:
+            snap_ist = (seen_dt + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+            today_ist_s = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).strftime("%Y-%m-%d")
+            if snap_ist != today_ist_s:
+                return 0
+    except Exception:
+        pass
 
     existing_rows = supabase.from_("option_stealth_events").select(
         "event_key, first_seen, last_seen, times_seen, best_tier, peak_oi_pct"
