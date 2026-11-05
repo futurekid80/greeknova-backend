@@ -2036,6 +2036,12 @@ def uoa(date: str = None, strike_zone: str = "all"):
     from api.uoa import get_uoa
     return _swr_cached(f"uoa|{date}|{strike_zone}", lambda: get_uoa(date, strike_zone), ttl_market=60, ttl_closed=600)
 
+@app.get("/oi-added-today")
+def oi_added_today(date: str = None):
+    """Nov 5 2026: biggest OI (money) added since the previous close -- shown on the UOA page."""
+    from services.oi_added_today import get_oi_added_today
+    return _swr_cached(f"oi_added|{date}", lambda: get_oi_added_today(get_supabase(), date), ttl_market=60, ttl_closed=600)
+
 @app.get("/gamma-squeeze")
 def gamma_squeeze(date: str = None):
     # Replaced the old single-strike OI-unwind heuristic with real Gamma
