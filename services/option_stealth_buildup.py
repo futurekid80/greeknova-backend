@@ -143,7 +143,7 @@ def _fut_stealth_symbols():
         return set()
 
 
-def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE, window: str = DEFAULT_WINDOW) -> dict:
+def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE, window: str = DEFAULT_WINDOW, adj: bool = False) -> dict:
     cfg = WINDOWS.get(window) or WINDOWS[DEFAULT_WINDOW]
 
     if cfg["lookback_minutes"] == 5:
@@ -240,6 +240,18 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         if baseline_prior_session and new_premium == snap_old_premium:
             continue  # no trade since the previous session -> stale-baseline artifact
 
+        # Nov 5 2026 (preview, adj=True only): judge 'quiet premium' after removing the market's own move.
+        premium_pct_raw = premium_pct
+        if adj and use_official and prev_spot.get(symbol) and cmp_map.get(symbol) and oc and oc > 0:
+            try:
+                from services.stealth_baseline import adj_premium_pct
+                a = adj_premium_pct(opt_type, strike, row.get("expiry"), prev_spot[symbol], old_premium, ts_old,
+                                    float(cmp_map[symbol]), new_premium, ts_new)
+                if a is not None:
+                    premium_pct = a
+            except Exception as e:
+                print(f"[OptionStealth] adj premium failed for {row.get('tradingsymbol')}: {e}")
+
         tier, tier_label = _classify(oi_pct, premium_pct, tiers)
         if not tier:
             continue
@@ -280,6 +292,7 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
             "old_oi": old_oi,
             "new_oi": new_oi,
             "premium_pct": round(premium_pct, 2),
+            "premium_pct_raw": round(premium_pct_raw, 2),
             "old_premium": old_premium,
             "new_premium": new_premium,
         })

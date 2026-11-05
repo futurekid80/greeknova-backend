@@ -3579,7 +3579,7 @@ _STEALTH_SCAN_CACHE: dict = {}
 _STEALTH_SCAN_LOCK = _threading.Lock()
 
 @app.get("/option-stealth-buildup")
-def option_stealth_buildup(date: str = None, zone: str = None, window: str = None):
+def option_stealth_buildup(date: str = None, zone: str = None, window: str = None, adj: int = 0):
     """(Oct 27 2026): Option Strike Stealth Buildup -- per-strike OI piling
     up hard while that strike's own premium stays quiet. `zone` is the same
     selectable ATM/+-1/+-2/+-5/+-10/All strike-zone filter already used on
@@ -3603,7 +3603,7 @@ def option_stealth_buildup(date: str = None, zone: str = None, window: str = Non
     # cache -- 60s while the market is live (data only changes every 5 min),
     # 15 min when closed -- plus a lock so concurrent callers share ONE scan
     # instead of each starting their own.
-    key = (date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW)
+    key = (date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW, bool(adj))
     ttl = 60 if _market_hours_now() else 900
     hit = _STEALTH_SCAN_CACHE.get(key)
     if hit and time.time() - hit[0] < ttl:
@@ -3612,7 +3612,7 @@ def option_stealth_buildup(date: str = None, zone: str = None, window: str = Non
         hit = _STEALTH_SCAN_CACHE.get(key)
         if hit and time.time() - hit[0] < ttl:
             return hit[1]
-        result = run_option_stealth_scan(get_supabase(), date, key[1], key[2])
+        result = run_option_stealth_scan(get_supabase(), date, key[1], key[2], adj=key[3])
         if key[2] == "eod" and isinstance(result, dict) and not result.get("error"):
             from services.option_stealth_buildup import enrich_intraday
             result = enrich_intraday(get_supabase(), result)

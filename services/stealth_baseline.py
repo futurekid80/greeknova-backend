@@ -160,3 +160,22 @@ def activity_from_iv(opt_type: str, iv_old: float, iv_new: float):
     if rel >= IV_REL_THRESHOLD:
         return "BUYING", f"{side} Buying"
     return "NEUTRAL", f"{side} Quiet"
+
+
+def adj_premium_pct(opt_type, strike, expiry, spot_old, prem_old, ts_old, spot_new, prem_new, ts_new):
+    """Spot-adjusted premium move, in the same % units as the plain premium rule (Nov 5 2026 preview).
+    Reprices the option at YESTERDAY's implied vol with TODAY's spot and time, and returns how far the
+    real premium sits from that, as a % of the old premium. A premium that fell only because the market
+    moved reads ~0; a premium that moved for other reasons (vol changing) still shows. None if unsolvable."""
+    try:
+        exp = _expiry_dt(expiry)
+        t_old = (exp - _ts(ts_old)).total_seconds() / (365 * 86400)
+        t_new = (exp - _ts(ts_new)).total_seconds() / (365 * 86400)
+        is_call = opt_type == "CE"
+        iv_o = implied_vol(prem_old, spot_old, float(strike), t_old, is_call)
+        if not iv_o or prem_old <= 0:
+            return None
+        expected = bs_price(spot_new, float(strike), t_new, iv_o, is_call)
+        return (prem_new - expected) / prem_old * 100.0
+    except Exception:
+        return None
