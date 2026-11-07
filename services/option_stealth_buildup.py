@@ -641,3 +641,67 @@ def enrich_intraday(supabase, result: dict) -> dict:
     except Exception as e:
         print(f"[OptionStealth] enrich_intraday failed: {e}")
         return result
+
+
+def intraday_for_events(supabase, date: str, tradingsymbols: list) -> dict:
+    """Nov 7 2026: day range + last-hour read for a SMALL set of saved EOD hits (the Buyer's shortlist),
+    computed at read time from the day's snapshots -- no database column needed. Returns
+    {tradingsymbol: {prem_low, prem_high, prem_range_pct, hr_oi_added, hr_oi_pct, hr_prem_pct, hr_share_pct,
+    hr_activity, hr_activity_label, activity_conflict}}. Best-effort: anything it cannot work out is omitted."""
+    try:
+        syms = sorted({t for t in (tradingsymbols or []) if t})[:60]
+        if not syms or not date:
+            return {}
+        ev = supabase.from_("option_stealth_events").select(
+            "tradingsymbol,option_type,old_oi,new_oi,old_premium,new_premium,activity"
+        ).eq("scan_date", date).eq("window", "eod").in_("tradingsymbol", syms).execute().data or []
+        if not ev:
+            return {}
+        last = supabase.from_("option_stealth_events").select("last_seen").eq("scan_date", date) \
+            .order("last_seen", desc=True).limit(1).execute().data
+        if not last:
+            return {}
+        ts_end = last[0]["last_seen"]
+        day_start, dt_end = _ist_day_start_utc(ts_end)
+        hist = _fetch_history(supabase, [e["tradingsymbol"] for e in ev], day_start.isoformat(), ts_end)
+        hr_cut = dt_end - timedelta(minutes=LAST_HOUR_MIN)
+        out = {}
+        for e in ev:
+            series = hist.get(e["tradingsymbol"]) or []
+            if len(series) < 3:
+                continue
+            res = {}
+            prices = [float(r["last_price"]) for r in series if r.get("last_price")]
+            if prices:
+                res["prem_low"], res["prem_high"] = min(prices), max(prices)
+                base = float(e.get("old_premium") or 0)
+                if base > 0:
+                    res["prem_range_pct"] = round((res["prem_high"] - res["prem_low"]) / base * 100, 1)
+            ref = None
+            for r in series:
+                if _parse_ts(r["timestamp"]) <= hr_cut:
+                    ref = r
+                else:
+                    break
+            if ref and ref.get("oi") and ref.get("last_price"):
+                new_oi = e.get("new_oi") or 0
+                hr_old_oi, hr_old_prem = ref["oi"], float(ref["last_price"])
+                hr_added = new_oi - hr_old_oi
+                day_added = new_oi - (e.get("old_oi") or 0)
+                res["hr_oi_added"] = hr_added
+                if hr_old_oi:
+                    res["hr_oi_pct"] = round(hr_added / hr_old_oi * 100, 1)
+                if day_added > 0:
+                    res["hr_share_pct"] = round(max(hr_added, 0) / day_added * 100)
+                if hr_old_prem > 0 and e.get("new_premium"):
+                    res["hr_prem_pct"] = round((float(e["new_premium"]) - hr_old_prem) / hr_old_prem * 100, 2)
+                    if hr_added > 0:
+                        act, label = _activity(e["option_type"], res["hr_prem_pct"])
+                        res["hr_activity"], res["hr_activity_label"] = act, label
+                        res["activity_conflict"] = bool(act != e.get("activity") and (res.get("hr_share_pct") or 0) >= CONFLICT_MIN_SHARE)
+            if res:
+                out[e["tradingsymbol"]] = res
+        return out
+    except Exception as ex:
+        print(f"[OptionStealth] intraday_for_events failed: {ex}")
+        return {}

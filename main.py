@@ -3634,6 +3634,13 @@ def option_stealth_buildup_saved(date: str = None, zone: str = None, window: str
     from services.option_stealth_buildup import get_saved_events, DEFAULT_ZONE, DEFAULT_WINDOW
     return get_saved_events(get_supabase(), date, window or DEFAULT_WINDOW, zone or DEFAULT_ZONE)
 
+@app.get("/option-stealth-buildup/intraday")
+def option_stealth_buildup_intraday(date: str = None, symbols: str = ""):
+    """(Nov 7 2026): day range + last-hour read for a few saved EOD hits (the Buyer's shortlist). Max 60 contracts."""
+    from services.option_stealth_buildup import intraday_for_events
+    syms = [x.strip() for x in (symbols or "").split(",") if x.strip()]
+    return {"date": date, "data": intraday_for_events(get_supabase(), date, syms)}
+
 @app.post("/option-stealth-buildup/run-now")
 def option_stealth_buildup_run_now():
     """Manual trigger of the same persist tick the cron runs (background
