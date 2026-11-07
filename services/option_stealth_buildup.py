@@ -653,7 +653,7 @@ def intraday_for_events(supabase, date: str, tradingsymbols: list) -> dict:
         if not syms or not date:
             return {}
         ev = supabase.from_("option_stealth_events").select(
-            "tradingsymbol,option_type,old_oi,new_oi,old_premium,new_premium,activity"
+            "tradingsymbol,option_type,old_oi,new_oi,old_premium,new_premium,activity,last_seen"
         ).eq("scan_date", date).eq("window", "eod").in_("tradingsymbol", syms).execute().data or []
         if not ev:
             return {}
@@ -664,12 +664,13 @@ def intraday_for_events(supabase, date: str, tradingsymbols: list) -> dict:
         ts_end = last[0]["last_seen"]
         day_start, dt_end = _ist_day_start_utc(ts_end)
         hist = _fetch_history(supabase, [e["tradingsymbol"] for e in ev], day_start.isoformat(), ts_end)
-        hr_cut = dt_end - timedelta(minutes=LAST_HOUR_MIN)
         out = {}
         for e in ev:
-            series = hist.get(e["tradingsymbol"]) or []
+            row_end = _parse_ts(e["last_seen"]) if e.get("last_seen") else dt_end
+            series = [r for r in (hist.get(e["tradingsymbol"]) or []) if _parse_ts(r["timestamp"]) <= row_end]
             if len(series) < 3:
                 continue
+            hr_cut = row_end - timedelta(minutes=LAST_HOUR_MIN)   # measured to when THIS row was last seen
             res = {}
             prices = [float(r["last_price"]) for r in series if r.get("last_price")]
             if prices:
