@@ -53,6 +53,7 @@ normal (non-expiry) session on each window, same as the 5-min tiers.
 from services.oi_diff import fetch_latest_oi_diff, fetch_oi_diff_window
 from services.strike_zones import build_strike_index_map, strikes_away, in_zone, ZONE_OPTIONS
 
+ADJ_MAX_RAW_RISE_PCT = 100.0  # adj view only: skip rows whose plain premium change is +100% or more
 CONFLUENCE_MAX_STRIKES_AWAY = 5  # Manish's Oct 25 call: ATM+-5 only for Confluence
 
 # (Oct 27 2026): a real-data sanity check (on NIFTY's own monthly expiry
@@ -242,6 +243,10 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
 
         # Nov 5 2026 (preview, adj=True only): judge 'quiet premium' after removing the market's own move.
         premium_pct_raw = premium_pct
+        # Nov 7 2026 (adj=True only): a premium that more than doubled is never 'quiet', however much of it
+        # the market's own move explains (ICICIBANK 1590 CE: Rs 3.25 -> 19.75 read as quiet). Plain view is unaffected.
+        if adj and premium_pct_raw >= ADJ_MAX_RAW_RISE_PCT:
+            continue
         if adj and use_official and prev_spot.get(symbol) and cmp_map.get(symbol) and oc and oc > 0:
             try:
                 from services.stealth_baseline import adj_premium_pct
