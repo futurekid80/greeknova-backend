@@ -374,6 +374,9 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
 from datetime import datetime, timezone, timedelta
 
 MIN_PREMIUM_VALUE_EOD = 500000   # Rs 5 lakh: OI added x premium, EOD window only
+# Nov 7 2026: chain_share_added for SAVED rows without a database column -- the persist tick remembers each
+# hit's value in memory and get_saved_events attaches it. Lost on a restart until the next 5-min tick.
+_CHAIN_SHARE: dict = {}
 PERSIST_ZONE = "5"          # same default the page shows; keeps volume sane
 FRESH_WINDOW_MIN = 7        # last_seen within this => still on the current tick
 TIER_RANK = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
@@ -413,6 +416,8 @@ def persist_scan_result(supabase, window: str, result: dict) -> int:
         if not h.get("tradingsymbol"):
             continue
         key = f"{scan_date}|{window}|{h['tradingsymbol']}"
+        if h.get("chain_share_added") is not None:
+            _CHAIN_SHARE[key] = h["chain_share_added"]
         prev = existing.get(key)
         if prev:
             prev_last = _parse_ts(prev["last_seen"])
@@ -490,6 +495,7 @@ def get_saved_events(supabase, date: str = None, window: str = DEFAULT_WINDOW, z
             r["freshness"] = "Fresh Now" if (r.get("times_seen") or 1) <= 1 else "Still Active"
         else:
             r["freshness"] = "Seen Earlier Today"
+        r["chain_share_added"] = _CHAIN_SHARE.get(r.get("event_key"))
         events.append(r)
     events.sort(key=lambda e: ({"Fresh Now": 0, "Still Active": 1, "Seen Earlier Today": 2}[e["freshness"]],
                                TIER_RANK.get(e["best_tier"], 3), -float(e["oi_pct"] or 0)))
