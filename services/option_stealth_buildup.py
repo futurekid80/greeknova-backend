@@ -203,6 +203,14 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         except Exception as e:
             print(f"[OptionStealth] official baseline unavailable, using snapshots: {e}")
 
+    # Nov 7 2026: chain totals (all strikes of the same stock / expiry / side at the baseline snapshot), so each
+    # hit can say how much of the WHOLE chain's open interest it added -- a % on a tiny base is not positioning.
+    chain_old_oi: dict = {}
+    for _r in old_map.values():
+        if _r.get("option_type") in ("CE", "PE"):
+            _k = (_r.get("symbol"), str(_r.get("expiry"))[:10], _r.get("option_type"))
+            chain_old_oi[_k] = chain_old_oi.get(_k, 0) + (_r.get("oi") or 0)
+
     hits = []
     for row in new_data:
         opt_type = row.get("option_type")
@@ -300,6 +308,9 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
             "premium_pct_raw": round(premium_pct_raw, 2),
             "old_premium": old_premium,
             "new_premium": new_premium,
+            "money_added": round(max(new_oi - old_oi, 0) * new_premium),   # Rs of premium put in (OI added x premium)
+            "chain_share_added": (round((new_oi - old_oi) / chain_old_oi[(symbol, str(row.get("expiry"))[:10], opt_type)] * 100, 2)
+                                  if chain_old_oi.get((symbol, str(row.get("expiry"))[:10], opt_type)) else None),
         })
 
     # Nov 2 2026 (2nd pass): premium can move later in the day even when the OI jump was
