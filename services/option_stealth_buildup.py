@@ -607,6 +607,7 @@ def enrich_intraday(supabase, result: dict) -> dict:
                 base = h.get("old_premium") or 0
                 if base > 0:
                     h["prem_range_pct"] = round((h["prem_high"] - h["prem_low"]) / base * 100, 1)
+            h.update(_build_window(series, h["option_type"], h["new_oi"] - h["old_oi"]))
             ref = None
             for r in series:
                 ts = datetime.fromisoformat(r["timestamp"].replace("Z", "+00:00"))
@@ -641,6 +642,39 @@ def enrich_intraday(supabase, result: dict) -> dict:
     except Exception as e:
         print(f"[OptionStealth] enrich_intraday failed: {e}")
         return result
+
+
+def _build_window(series: list, option_type: str, day_added: float) -> dict:
+    """Nov 7 2026: "while it was being built" -- the tightest stretch (up to 45 min) holding the biggest OI gain,
+    and what the premium did DURING it (not versus yesterday's close). Words are chosen in the dashboard."""
+    out: dict = {}
+    try:
+        pts = [(_parse_ts(r["timestamp"]), r.get("oi"), r.get("last_price")) for r in series if r.get("oi") and r.get("last_price")]
+        if len(pts) < 3 or day_added <= 0:
+            return out
+        best = None
+        j = 0
+        for i in range(len(pts)):
+            j = max(j, i)
+            while j + 1 < len(pts) and (pts[j + 1][0] - pts[i][0]).total_seconds() <= 45 * 60:
+                j += 1
+            gain = pts[j][1] - pts[i][1]
+            if best is None or gain > best[0]:
+                best = (gain, i, j)
+        if best and best[0] > 0:
+            gain, i, j = best
+            share = min(100, round(gain / day_added * 100))
+            p0, p1 = float(pts[i][2]), float(pts[j][2])
+            out["bw_share_pct"] = share
+            out["bw_start"], out["bw_end"] = pts[i][0].isoformat(), pts[j][0].isoformat()
+            if p0 > 0:
+                out["bw_prem_pct"] = round((p1 - p0) / p0 * 100, 2)
+                act, label = _activity(option_type, out["bw_prem_pct"])
+                out["bw_activity"], out["bw_activity_label"] = act, label
+            out["bw_spread"] = share < 35   # no single stretch carried the build
+    except Exception as ex:
+        print(f"[OptionStealth] build-window failed: {ex}")
+    return out
 
 
 def intraday_for_events(supabase, date: str, tradingsymbols: list) -> dict:
@@ -700,33 +734,7 @@ def intraday_for_events(supabase, date: str, tradingsymbols: list) -> dict:
                         act, label = _activity(e["option_type"], res["hr_prem_pct"])
                         res["hr_activity"], res["hr_activity_label"] = act, label
                         res["activity_conflict"] = bool(act != e.get("activity") and (res.get("hr_share_pct") or 0) >= CONFLICT_MIN_SHARE)
-            # Nov 7 2026: "while it was being built" -- the tightest stretch (up to 45 min) holding the biggest OI gain,
-            # and what the premium did DURING it (not versus yesterday's close).
-            try:
-                pts = [(_parse_ts(r["timestamp"]), r.get("oi"), r.get("last_price")) for r in series if r.get("oi") and r.get("last_price")]
-                best = None
-                j = 0
-                for i in range(len(pts)):
-                    j = max(j, i)
-                    while j + 1 < len(pts) and (pts[j + 1][0] - pts[i][0]).total_seconds() <= 45 * 60:
-                        j += 1
-                    gain = pts[j][1] - pts[i][1]
-                    if best is None or gain > best[0]:
-                        best = (gain, i, j)
-                day_added = (e.get("new_oi") or 0) - (e.get("old_oi") or 0)
-                if best and best[0] > 0 and day_added > 0:
-                    gain, i, j = best
-                    share = min(100, round(gain / day_added * 100))
-                    p0, p1 = float(pts[i][2]), float(pts[j][2])
-                    res["bw_share_pct"] = share
-                    res["bw_start"], res["bw_end"] = pts[i][0].isoformat(), pts[j][0].isoformat()
-                    if p0 > 0:
-                        res["bw_prem_pct"] = round((p1 - p0) / p0 * 100, 2)
-                        act, label = _activity(e["option_type"], res["bw_prem_pct"])
-                        res["bw_activity"], res["bw_activity_label"] = act, label
-                    res["bw_spread"] = share < 35   # no single stretch carried the build
-            except Exception as ex2:
-                print(f"[OptionStealth] build-window failed for {e.get('tradingsymbol')}: {ex2}")
+            res.update(_build_window(series, e["option_type"], (e.get("new_oi") or 0) - (e.get("old_oi") or 0)))
             if res:
                 out[e["tradingsymbol"]] = res
         return out
