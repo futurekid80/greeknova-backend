@@ -58,11 +58,12 @@ def run_full_capture():
     from datetime import datetime, timezone, timedelta
     ist = timezone(timedelta(hours=5, minutes=30))
     now = datetime.now(ist)
-    if now.weekday() >= 5: return
-    from utils.market_calendar import is_trading_day
-    if not is_trading_day(now.date()): return
-    if not (9 <= now.hour <= 15): return
-    if now.hour == 9 and now.minute < 15: return
+    from utils.market_calendar import is_trading_day, is_special_session
+    if not is_special_session(now):   # Nov 8 2026: Muhurat session is allowed through
+        if now.weekday() >= 5: return
+        if not is_trading_day(now.date()): return
+        if not (9 <= now.hour <= 15): return
+        if now.hour == 9 and now.minute < 15: return
     # BUG FIX (Aug 3 2026): SEBI's Closing Auction Session (CAS) goes live
     # today. F&O contracts (futures & options) now trade until 3:40 PM,
     # not 3:30 PM — this cutoff was silently dropping the last 10 minutes
@@ -650,14 +651,15 @@ async def lifespan(app: FastAPI):
         option_stealth_events. Fires 45s past each 5-min mark to give the
         snapshot capture time to land. Self-gates to trading days/hours."""
         try:
-            from utils.market_calendar import is_trading_day, today_ist
-            if not is_trading_day(today_ist()):
-                return
+            from utils.market_calendar import is_trading_day, is_special_session, today_ist
             from datetime import datetime as _dt
             import pytz as _pytz
             now = _dt.now(_pytz.timezone("Asia/Kolkata"))
-            if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
-                return
+            if not is_special_session(now):   # Nov 8 2026: Muhurat session
+                if not is_trading_day(today_ist()):
+                    return
+                if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
+                    return
             from services.option_stealth_buildup import run_persist_tick
             print(f"[OptionStealth] tick: {run_persist_tick(get_supabase())}")
         except Exception as e:

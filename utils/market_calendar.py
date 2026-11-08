@@ -39,6 +39,17 @@ def today_ist() -> date:
     return datetime.now(pytz.timezone("Asia/Kolkata")).date()
 
 
+# Nov 8 2026: special (Muhurat) sessions on days the normal calendar treats as closed. Capture and the
+# Stealth job use this so data still flows during the session. (start, end) are IST (hour, minute).
+SPECIAL_SESSIONS = {
+    date(2026, 11, 8): ((14, 10), (15, 40)),   # Diwali Laxmi Pujan, Muhurat trading
+}
+
+def is_special_session(now) -> bool:
+    """True if `now` (an IST datetime) falls inside a special session window."""
+    w = SPECIAL_SESSIONS.get(now.date())
+    return bool(w and w[0] <= (now.hour, now.minute) <= w[1])
+
 def is_trading_day(d: date = None) -> bool:
     if d is None:
         d = today_ist()
