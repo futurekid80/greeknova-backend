@@ -63,6 +63,13 @@ def is_market_ts(ts: str) -> bool:
 
 def is_market_hours() -> bool:
     now_utc = datetime.now(timezone.utc)
+    # Special sessions (e.g. Diwali Muhurat on a Sunday) count as live
+    try:
+        from utils.market_calendar import is_special_session
+        if is_special_session(now_utc + timedelta(hours=5, minutes=30)):
+            return True
+    except Exception:
+        pass
     if now_utc.weekday() >= 5:
         return False
     total = now_utc.hour * 60 + now_utc.minute
