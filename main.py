@@ -630,14 +630,15 @@ async def lifespan(app: FastAPI):
         since the cron fires a bit wider than that to keep the schedule
         simple."""
         try:
-            from utils.market_calendar import is_trading_day, today_ist
-            if not is_trading_day(today_ist()):
-                return
+            from utils.market_calendar import is_trading_day, today_ist, is_special_session
             from datetime import datetime as _dt
             import pytz as _pytz
             now = _dt.now(_pytz.timezone("Asia/Kolkata"))
-            if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
-                return
+            if not is_special_session(now):
+                if not is_trading_day(today_ist()):
+                    return
+                if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
+                    return
             from services.wolves_scanner import run_live_tick
             res = run_live_tick()
             print(f"[WOLVES] Live tick: {res}")
