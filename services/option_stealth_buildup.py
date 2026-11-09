@@ -473,6 +473,10 @@ def persist_scan_result(supabase, window: str, result: dict) -> int:
             "activity_v2": h.get("activity_v2"), "iv_rel_v2": h.get("iv_rel_v2"),
             "first_seen": first_seen, "last_seen": ts_new, "times_seen": times_seen,
         })
+        # Nov 9 2026: keep each strike's share of its chain in the database too, so a server restart does not
+        # change the Buyer's shortlist (it used to live only in memory). Left out when unknown so it never wipes a saved value.
+        if h.get("chain_share_added") is not None:
+            rows[-1]["chain_share_added"] = h["chain_share_added"]
     if rows:
         supabase.from_("option_stealth_events").upsert(rows, on_conflict="event_key").execute()
     return len(rows)
@@ -523,7 +527,7 @@ def get_saved_events(supabase, date: str = None, window: str = DEFAULT_WINDOW, z
             r["freshness"] = "Fresh Now" if (r.get("times_seen") or 1) <= 1 else "Still Active"
         else:
             r["freshness"] = "Seen Earlier Today"
-        r["chain_share_added"] = _CHAIN_SHARE.get(r.get("event_key"))
+        r["chain_share_added"] = _CHAIN_SHARE.get(r.get("event_key"), r.get("chain_share_added"))
         events.append(r)
     events.sort(key=lambda e: ({"Fresh Now": 0, "Still Active": 1, "Seen Earlier Today": 2}[e["freshness"]],
                                TIER_RANK.get(e["best_tier"], 3), -float(e["oi_pct"] or 0)))
