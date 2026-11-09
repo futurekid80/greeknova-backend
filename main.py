@@ -898,6 +898,13 @@ async def lifespan(app: FastAPI):
         "cron", hour=19, minute=30, timezone="Asia/Kolkata", id="participant_flow_fetch",
         misfire_grace_time=600
     )
+    # Nov 9 2026: end-of-day put/call OI per index+expiry (incl. monthly
+    # expiries the 5-min capture skips) -> pcr_daily. Not shown in the UI yet.
+    scheduler.add_job(
+        lambda: __import__('services.pcr_daily', fromlist=['run_pcr_daily']).run_pcr_daily(),
+        "cron", day_of_week="mon-fri", hour=15, minute=40, timezone="Asia/Kolkata", id="pcr_daily_eod",
+        misfire_grace_time=1800
+    )
     scheduler.add_job(
         watchdog_participant_flow,
         "cron", hour=20, minute=0, timezone="Asia/Kolkata", id="participant_flow_watchdog",
@@ -1630,6 +1637,15 @@ if __name__ == "__main__":
 def pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     from api.pcr_trend import get_pcr_trend
     return get_pcr_trend(symbol.upper(), expiry)
+
+@app.post("/pcr-daily/run-now")
+def pcr_daily_run_now():
+    # Manual trigger for the end-of-day PCR job (runs in the background).
+    import threading
+    from services.pcr_daily import run_pcr_daily
+    threading.Thread(target=run_pcr_daily, daemon=True).start()
+    return {"started": True}
+
 
 @app.get("/pcr-expiries/{symbol}")
 def pcr_expiries(symbol: str = "NIFTY"):
