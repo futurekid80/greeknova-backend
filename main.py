@@ -500,7 +500,11 @@ async def lifespan(app: FastAPI):
                 and is_trading_day(_now.date())
                 and (9*60+15) <= (_now.hour*60+_now.minute) <= (15*60+40)
             )
-            if not _is_mkt:
+            import services.gamma_exposure as _gx_mod
+            # Outside market hours we normally skip, but if the in-memory
+            # cache is empty (fresh deploy/restart after close) warm it once
+            # -- otherwise every /gamma-squeeze request computes inline (~80s).
+            if not _is_mkt and _gx_mod._gex_cache:
                 return
             from services.gamma_exposure import refresh_gamma_exposure_cache
             refresh_gamma_exposure_cache()
