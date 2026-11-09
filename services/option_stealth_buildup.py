@@ -211,6 +211,17 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
             _k = (_r.get("symbol"), str(_r.get("expiry"))[:10], _r.get("option_type"))
             chain_old_oi[_k] = chain_old_oi.get(_k, 0) + (_r.get("oi") or 0)
 
+    # Nov 9 2026: SHADOW v2 label (stored next to the live label, not shown to members). EOD window only.
+    fwd_new: dict = {}
+    fwd_old: dict = {}
+    if window == "eod":
+        try:
+            from services.stealth_baseline import forward_map
+            fwd_new = forward_map(new_data, cmp_map, ts_new)
+            fwd_old = forward_map(list(old_map.values()), (prev_spot or cmp_map), ts_old) if ts_old else {}
+        except Exception as e:
+            print(f"[OptionStealth] v2 forwards failed: {e}")
+
     hits = []
     for row in new_data:
         opt_type = row.get("option_type")
@@ -281,7 +292,23 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
                     activity_basis = "iv"
             except Exception as e:
                 print(f"[OptionStealth] IV label failed for {row.get('tradingsymbol')}: {e}")
+        activity_v2_key = None
+        iv_rel_v2 = None
+        if window == "eod" and fwd_new and fwd_old:
+            try:
+                from services.stealth_baseline import iv_change_fwd, activity_v2 as _act_v2
+                _exp = str(row.get("expiry"))[:10]
+                _fn, _fo = fwd_new.get((symbol, _exp)), fwd_old.get((symbol, _exp))
+                if _fn and _fo and snap_old_premium and snap_old_premium > 0 and new_premium > 0:
+                    _ivs = iv_change_fwd(opt_type, strike, _exp, _fo, snap_old_premium, ts_old, _fn, new_premium, ts_new)
+                    if _ivs:
+                        activity_v2_key, iv_rel_v2 = _act_v2(_ivs[0], _ivs[1], premium_pct)
+                        iv_rel_v2 = round(iv_rel_v2 * 100, 2)
+            except Exception as e:
+                print(f"[OptionStealth] v2 label failed for {row.get('tradingsymbol')}: {e}")
         hits.append({
+            "activity_v2": activity_v2_key,
+            "iv_rel_v2": iv_rel_v2,
             "activity_basis": activity_basis,
             "baseline_src": "official" if (oc and oc > 0) else "snapshot",
             "symbol": symbol,
@@ -443,6 +470,7 @@ def persist_scan_result(supabase, window: str, result: dict) -> int:
             "old_oi": h["old_oi"], "new_oi": h["new_oi"],
             "premium_pct": h["premium_pct"], "old_premium": h["old_premium"], "new_premium": h["new_premium"],
             "is_confluence": bool(h.get("is_confluence")),
+            "activity_v2": h.get("activity_v2"), "iv_rel_v2": h.get("iv_rel_v2"),
             "first_seen": first_seen, "last_seen": ts_new, "times_seen": times_seen,
         })
     if rows:

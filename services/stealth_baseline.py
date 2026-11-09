@@ -179,3 +179,99 @@ def adj_premium_pct(opt_type, strike, expiry, spot_old, prem_old, ts_old, spot_n
         return (prem_new - expected) / prem_old * 100.0
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------- Nov 9 2026: v2 label (SHADOW, not shown to members)
+# Why: judging IV from the underlying's last price breaks when the stock's price and the price the options trade off
+# drift apart (ICICIBANK 9 Nov: options priced ~Rs 7 below the stock-implied level all day, so puts read 'Buying' and
+# calls 'Writing' at the same strike). v2 takes the forward the OPTIONS imply (put-call parity on the strikes nearest
+# the money) and solves IV from that (Black-76), so a call and put at one strike read the same.
+V2_IV_REL = 0.05            # +-5% relative IV change to count as a side; inside that is Quiet
+
+
+def _years_to(expiry, ts) -> float:
+    return (_expiry_dt(expiry) - _ts(ts)).total_seconds() / (365 * 86400)
+
+
+def forward_map(rows, spot_map, ts, n=3) -> dict:
+    """{(symbol, expiry 'YYYY-MM-DD'): forward implied by call/put parity on the n strikes nearest spot}."""
+    by: dict = {}
+    for r in rows:
+        ot = r.get("option_type")
+        lp = r.get("last_price") or 0
+        if ot not in ("CE", "PE") or lp <= 0 or r.get("strike") is None:
+            continue
+        by.setdefault((r["symbol"], str(r.get("expiry"))[:10], float(r["strike"])), {})[ot] = float(lp)
+    cand: dict = {}
+    for (sym, exp, k), d in by.items():
+        if "CE" in d and "PE" in d:
+            cand.setdefault((sym, exp), []).append((k, d["CE"], d["PE"]))
+    out = {}
+    for (sym, exp), lst in cand.items():
+        spot = spot_map.get(sym)
+        if not spot:
+            continue
+        try:
+            t = _years_to(exp, ts)
+        except Exception:
+            continue
+        if t <= 0:
+            continue
+        lst.sort(key=lambda x: abs(x[0] - spot))
+        fs = [k + (c - p) * math.exp(RISK_FREE * t) for k, c, p in lst[:n]]
+        out[(sym, exp)] = sum(fs) / len(fs)
+    return out
+
+
+def _b76(f, k, t, sigma, is_call, r=RISK_FREE):
+    if t <= 0 or sigma <= 0:
+        return max(0.0, (f - k) if is_call else (k - f)) * math.exp(-r * max(t, 0))
+    sq = sigma * math.sqrt(t)
+    d1 = (math.log(f / k) + 0.5 * sigma * sigma * t) / sq
+    d2 = d1 - sq
+    df = math.exp(-r * t)
+    if is_call:
+        return df * (f * _ncdf(d1) - k * _ncdf(d2))
+    return df * (k * _ncdf(-d2) - f * _ncdf(-d1))
+
+
+def implied_vol_fwd(price, f, k, t, is_call):
+    try:
+        if price <= 0 or f <= 0 or k <= 0 or t <= 0:
+            return None
+        lo, hi = 0.01, 4.0
+        if price < _b76(f, k, t, lo, is_call) or price > _b76(f, k, t, hi, is_call):
+            return None
+        for _ in range(60):
+            mid = (lo + hi) / 2
+            if _b76(f, k, t, mid, is_call) > price:
+                hi = mid
+            else:
+                lo = mid
+        return (lo + hi) / 2
+    except Exception:
+        return None
+
+
+def iv_change_fwd(opt_type, strike, expiry, f_old, p_old, ts_old, f_new, p_new, ts_new):
+    """(iv_old, iv_new) from option-implied forwards, or None."""
+    try:
+        is_call = opt_type == "CE"
+        a = implied_vol_fwd(p_old, f_old, float(strike), _years_to(expiry, ts_old), is_call)
+        b = implied_vol_fwd(p_new, f_new, float(strike), _years_to(expiry, ts_new), is_call)
+        if a and b:
+            return a, b
+    except Exception:
+        pass
+    return None
+
+
+def activity_v2(iv_old, iv_new, premium_pct):
+    """BUYING / WRITING only when the IV move is clear AND the premium moved the same way; clear IV move against the
+    premium is MIXED; inside +-5% is NEUTRAL (Quiet). Returns (label_key, iv_rel)."""
+    rel = iv_new / iv_old - 1.0
+    if rel >= V2_IV_REL:
+        return ("BUYING" if premium_pct >= 1.0 else "MIXED"), rel
+    if rel <= -V2_IV_REL:
+        return ("WRITING" if premium_pct <= -1.0 else "MIXED"), rel
+    return "NEUTRAL", rel
