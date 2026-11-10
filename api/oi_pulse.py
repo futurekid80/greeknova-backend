@@ -72,6 +72,17 @@ def is_market_hours() -> bool:
         pass
     if now_utc.weekday() >= 5:
         return False
+    # Nov 10 2026: weekday NSE holidays (e.g. Diwali Balipratipada) used to
+    # count as live hours, so Pulse took the live path: live quotes equal the
+    # previous close (price change 0%) while OI still came from the last real
+    # session. Treat a holiday like the weekend so the screens show the last
+    # trading day's full EOD numbers instead.
+    try:
+        from utils.market_calendar import is_trading_day
+        if not is_trading_day((now_utc + timedelta(hours=5, minutes=30)).date()):
+            return False
+    except Exception:
+        pass
     total = now_utc.hour * 60 + now_utc.minute
     return MARKET_OPEN_UTC <= total <= MARKET_CLOSE_UTC
 
