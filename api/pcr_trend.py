@@ -1,8 +1,39 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
 
+def _whole_chain_trend(supabase, symbol: str, expiry: str = None):
+    """Nov 11 2026: today's whole-chain (every strike) PCR points from pcr_intraday, or None if there are none yet."""
+    try:
+        from datetime import timedelta
+        d = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+        q = supabase.from_("pcr_intraday").select("ts,expiry,ce_oi,pe_oi,ce_vol,pe_vol,pcr,vol_pcr,strikes") \
+            .eq("trade_date", d).eq("symbol", symbol).order("ts", desc=False).limit(5000)
+        rows = q.execute().data or []
+        if not rows:
+            return None
+        if not expiry:
+            expiry = sorted({r["expiry"] for r in rows})[0]
+        rows = [r for r in rows if r["expiry"] == expiry]
+        if not rows:
+            return None
+        points = []
+        for r in rows:
+            dt = datetime.fromisoformat(str(r["ts"]).replace("Z", "+00:00")) + timedelta(hours=5, minutes=30)
+            points.append({"timestamp": r["ts"], "time": dt.strftime("%H:%M"),
+                           "pcr": float(r["pcr"] or 0), "vol_pcr": float(r["vol_pcr"] or 0),
+                           "ce_oi": r["ce_oi"], "pe_oi": r["pe_oi"], "ce_vol": r["ce_vol"], "pe_vol": r["pe_vol"]})
+        return {"symbol": symbol, "points": points, "total_snapshots": len(points), "expiry": expiry,
+                "basis": "whole_chain", "strikes": rows[-1].get("strikes")}
+    except Exception as e:
+        print(f"[pcr_trend] whole-chain lookup failed, using nearby strikes: {e}")
+        return None
+
+
 def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
     supabase = get_supabase()
+    _wc = _whole_chain_trend(supabase, symbol, expiry)
+    if _wc:
+        return _wc
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
     today_str = date_type.today().isoformat()
 
@@ -128,4 +159,5 @@ def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
         "points":          points,
         "total_snapshots": len(points),
         "expiry":          expiry,
+        "basis":           "nearby_strikes",
     }

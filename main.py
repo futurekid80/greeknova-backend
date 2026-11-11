@@ -905,6 +905,12 @@ async def lifespan(app: FastAPI):
         "cron", day_of_week="mon-fri", hour=15, minute=40, timezone="Asia/Kolkata", id="pcr_daily_eod",
         misfire_grace_time=1800
     )
+    # Nov 11 2026: whole-chain PCR (every strike, nearest 3 expiries) every 10 minutes in market hours.
+    scheduler.add_job(
+        lambda: __import__('services.pcr_intraday', fromlist=['run_pcr_intraday']).run_pcr_intraday(),
+        "cron", day_of_week="mon-fri", hour="9-15", minute="1,11,21,31,41,51", timezone="Asia/Kolkata", id="pcr_intraday",
+        misfire_grace_time=120, max_instances=1, coalesce=True
+    )
     # Nov 11 2026: re-read saved EOD Stealth rows that froze before the close, against the closing data.
     scheduler.add_job(
         lambda: print(f"[OptionStealth] close refresh job: {__import__('services.option_stealth_buildup', fromlist=['refresh_frozen_at_close']).refresh_frozen_at_close(get_supabase())}"),
@@ -1650,6 +1656,14 @@ def pcr_daily_run_now():
     import threading
     from services.pcr_daily import run_pcr_daily
     threading.Thread(target=run_pcr_daily, daemon=True).start()
+    return {"started": True}
+
+
+@app.post("/pcr-intraday/run-now")
+def pcr_intraday_run_now():
+    import threading
+    from services.pcr_intraday import run_pcr_intraday
+    threading.Thread(target=run_pcr_intraday, daemon=True).start()
     return {"started": True}
 
 
