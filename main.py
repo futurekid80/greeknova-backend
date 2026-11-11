@@ -1288,7 +1288,7 @@ def force_login():
         return {"status": "error", "detail": str(e)}
 
 @app.get("/alerts")
-def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbol: str = None, date: str = None):
+def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbol: str = None, date: str = None, partial: bool = False):
     """(Aug 26 2026): serves real alert history from alert_log so the
     in-app Alerts panel can catch up on load, rather than depending
     entirely on the live SW->open-tab postMessage relay.
@@ -1332,7 +1332,14 @@ def get_alerts(limit: int = 100, since_id: int = None, signal: str = None, symbo
             # a busy morning (hundreds of OI_SPIKE alerts/hour) can push a
             # single symbol's earlier alerts out of a plain top-100 window
             # within minutes, so this bypasses that cap with its own limit.
-            q = q.eq("symbol", symbol.strip().upper())
+            # Nov 11 2026: partial names now match too ("KAL" finds KALYANKJIL); the box used to need the exact full symbol,
+            # so a partial search returned nothing for past days (the page only searches the full day by symbol).
+            import re as _re
+            _sym = _re.sub(r"[%_*,()\s]", "", symbol.strip().upper())
+            if partial and _sym:
+                q = q.ilike("symbol", f"%{_sym}%")
+            else:
+                q = q.eq("symbol", symbol.strip().upper())
             rows = q.limit(min(limit, 500)).execute().data or []
         else:
             rows = q.limit(min(limit, 200)).execute().data or []
