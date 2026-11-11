@@ -57,6 +57,15 @@ def is_trading_day(d: date = None) -> bool:
         return False
     return d not in NSE_HOLIDAYS_2026
 
+def is_nse_weekday_holiday_today() -> bool:
+    """Nov 11 2026: True on a weekday NSE holiday (e.g. Diwali Balipratipada). The weekday-only market-hours checks
+    used to treat these as live. Never raises: any failure returns False (old behaviour)."""
+    try:
+        d = today_ist()
+        return d.weekday() < 5 and d in NSE_HOLIDAYS_2026
+    except Exception:
+        return False
+
 def get_next_trading_day(from_date: date = None) -> date:
     if from_date is None:
         from_date = today_ist()

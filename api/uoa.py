@@ -46,12 +46,18 @@ def is_market_hours() -> bool:
     now_utc = datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
         return False
+    from utils.market_calendar import is_nse_weekday_holiday_today
+    if is_nse_weekday_holiday_today():
+        return False
     total = now_utc.hour * 60 + now_utc.minute
     return MARKET_OPEN_UTC <= total <= MARKET_CLOSE_UTC
 
 def is_post_market() -> bool:
     now_utc = datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
+        return True
+    from utils.market_calendar import is_nse_weekday_holiday_today
+    if is_nse_weekday_holiday_today():
         return True
     total = now_utc.hour * 60 + now_utc.minute
     return total > MARKET_CLOSE_UTC

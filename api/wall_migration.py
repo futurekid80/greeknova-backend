@@ -49,6 +49,9 @@ def is_market_hours() -> bool:
     now = datetime.now(IST)
     if now.weekday() >= 5:
         return False
+    from utils.market_calendar import is_nse_weekday_holiday_today
+    if is_nse_weekday_holiday_today():
+        return False
     total = now.hour * 60 + now.minute
     return (9 * 60 + 15) <= total <= (15 * 60 + 30)
 

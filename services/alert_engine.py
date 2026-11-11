@@ -111,6 +111,9 @@ def is_market_hours() -> bool:
     now   = datetime.now(IST)
     if now.weekday() >= 5:
         return False
+    from utils.market_calendar import is_nse_weekday_holiday_today
+    if is_nse_weekday_holiday_today():
+        return False
     total = now.hour * 60 + now.minute
     # BUG FIX (Aug 3 2026): was 15:30 — CAS goes live today, F&O trades
     # until 15:40 now. This gate controls whether alerts get generated

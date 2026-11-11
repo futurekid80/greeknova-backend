@@ -48,6 +48,9 @@ def is_market_hours():
     now = datetime.now(ist)
     if now.weekday() >= 5:
         return False
+    from utils.market_calendar import is_nse_weekday_holiday_today
+    if is_nse_weekday_holiday_today():
+        return False
     mins = now.hour * 60 + now.minute
     # BUG FIX (Aug 3 2026): was <= 930 (15:30) — CAS goes live today,
     # F&O trades until 15:40 (940 mins) now.

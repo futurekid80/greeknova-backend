@@ -53,6 +53,9 @@ def is_market_hours() -> bool:
     now_utc = datetime.now(timezone.utc)
     if now_utc.weekday() >= 5:
         return False
+    from utils.market_calendar import is_nse_weekday_holiday_today
+    if is_nse_weekday_holiday_today():
+        return False
     total = now_utc.hour * 60 + now_utc.minute
     # BUG FIX (Aug 3 2026): was 10:00 UTC (15:30 IST) — CAS goes live
     # today, F&O trades until 15:40 IST now.
