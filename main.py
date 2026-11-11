@@ -905,6 +905,12 @@ async def lifespan(app: FastAPI):
         "cron", day_of_week="mon-fri", hour=15, minute=40, timezone="Asia/Kolkata", id="pcr_daily_eod",
         misfire_grace_time=1800
     )
+    # Nov 11 2026: re-read saved EOD Stealth rows that froze before the close, against the closing data.
+    scheduler.add_job(
+        lambda: print(f"[OptionStealth] close refresh job: {__import__('services.option_stealth_buildup', fromlist=['refresh_frozen_at_close']).refresh_frozen_at_close(get_supabase())}"),
+        "cron", day_of_week="mon-fri", hour=15, minute=50, timezone="Asia/Kolkata", id="stealth_close_refresh",
+        misfire_grace_time=3600
+    )
     scheduler.add_job(
         watchdog_participant_flow,
         "cron", hour=20, minute=0, timezone="Asia/Kolkata", id="participant_flow_watchdog",
@@ -3675,6 +3681,19 @@ def option_stealth_buildup_run_now():
             print(f"[OptionStealth] manual tick: {run_persist_tick(get_supabase())}")
         except Exception as e:
             print(f"[OptionStealth] manual tick failed: {e}")
+    threading.Thread(target=_bg, daemon=True).start()
+    return {"status": "started"}
+
+@app.post("/option-stealth-buildup/close-refresh-now")
+def option_stealth_close_refresh_now():
+    """Manual trigger of the after-close re-read of frozen EOD rows (background)."""
+    import threading
+    def _bg():
+        try:
+            from services.option_stealth_buildup import refresh_frozen_at_close
+            print(f"[OptionStealth] manual close refresh: {refresh_frozen_at_close(get_supabase())}")
+        except Exception as e:
+            print(f"[OptionStealth] manual close refresh failed: {e}")
     threading.Thread(target=_bg, daemon=True).start()
     return {"status": "started"}
 

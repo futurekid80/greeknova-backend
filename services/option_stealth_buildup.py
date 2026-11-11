@@ -144,7 +144,9 @@ def _fut_stealth_symbols():
         return set()
 
 
-def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE, window: str = DEFAULT_WINDOW, adj: bool = False) -> dict:
+def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE, window: str = DEFAULT_WINDOW, adj: bool = False, refresh_keys=None) -> dict:
+    # Nov 11 2026: refresh_keys = set of tradingsymbols to RE-READ at the close even though they no longer meet a tier
+    # (see refresh_frozen_at_close). Normal callers leave it None and nothing changes.
     cfg = WINDOWS.get(window) or WINDOWS[DEFAULT_WINDOW]
 
     if cfg["lookback_minutes"] == 5:
@@ -231,6 +233,8 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
         strike = row.get("strike")
         if strike is None or symbol not in index_map:
             continue
+        if refresh_keys is not None and row.get("tradingsymbol") not in refresh_keys:
+            continue
 
         sa = strikes_away(symbol, strike, index_map)
         if not in_zone(sa, zone):
@@ -277,7 +281,7 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
                 print(f"[OptionStealth] adj premium failed for {row.get('tradingsymbol')}: {e}")
 
         tier, tier_label = _classify(oi_pct, premium_pct, tiers)
-        if not tier:
+        if not tier and refresh_keys is None:
             continue
 
         activity, activity_label = _activity(opt_type, premium_pct)
@@ -345,7 +349,7 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
     # and today's first, then flat). Against a prior-session baseline, keep a hit only if at
     # least 40% of the claimed OI addition happened TODAY (new_oi - today's first-snapshot OI).
     dropped_stale_open = 0
-    if baseline_prior_session and hits:
+    if baseline_prior_session and hits and refresh_keys is None:
         try:
             open_oi = _first_snapshot_oi(supabase, sorted({h["tradingsymbol"] for h in hits}), day_start_utc.isoformat(), ts_new)
             kept = []
@@ -363,13 +367,13 @@ def run_option_stealth_scan(supabase, date: str = None, zone: str = DEFAULT_ZONE
     # Nov 2 2026: size floor for the EOD window. A big % on a tiny base (LICHSGFIN 475 CE:
     # +7,000 OI, about Rs 2 lakh of premium) is noise. Money put in = OI added x premium.
     dropped_small = 0
-    if window == "eod":
+    if window == "eod" and refresh_keys is None:
         big = [h for h in hits if (h["new_oi"] - h["old_oi"]) * h["new_premium"] >= MIN_PREMIUM_VALUE_EOD]
         dropped_small = len(hits) - len(big)
         hits = big
 
     tier_rank = {"ELITE": 0, "STRONG": 1, "WATCH": 2}
-    hits.sort(key=lambda h: (not h["is_confluence"], tier_rank[h["tier"]], -h["oi_pct"]))
+    hits.sort(key=lambda h: (not h["is_confluence"], tier_rank.get(h["tier"], 3), -h["oi_pct"]))
 
     return {
         "dropped_small": dropped_small,
@@ -492,6 +496,55 @@ def run_persist_tick(supabase) -> dict:
         except Exception as e:
             print(f"[OptionStealth] persist tick failed for {window}: {e}")
             out[window] = f"error: {e}"
+    return out
+
+
+def refresh_frozen_at_close(supabase) -> dict:
+    """Nov 11 2026: a saved EOD row freezes at the last scan where its strike still met a tier, so by the close its
+    premium move and Buying/Writing label can be hours old (ICICIBANK 1650 PE: 'Put Writing' as of 11:25). After the
+    final snapshot, re-read every such row against the closing data -- same prev-close comparison the page promises --
+    and update its premium, OI and labels. Tier, first_seen and last_seen are left alone; close_refreshed_at marks it."""
+    now_ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+    today = now_ist.strftime("%Y-%m-%d")
+    try:
+        from utils.market_calendar import is_trading_day
+        if not is_trading_day(now_ist.date()):
+            return {"skipped": "not a trading day"}
+    except Exception:
+        pass
+    rows = supabase.from_("option_stealth_events").select("event_key,tradingsymbol,last_seen,close_refreshed_at") \
+        .eq("scan_date", today).eq("window", "eod").limit(5000).execute().data or []
+    if not rows:
+        return {"rows": 0}
+    res = run_option_stealth_scan(supabase, None, PERSIST_ZONE, "eod", refresh_keys={r["tradingsymbol"] for r in rows if r.get("tradingsymbol")})
+    ts_new = res.get("ts_new")
+    if res.get("error") or not ts_new:
+        return {"error": res.get("error") or "no snapshot"}
+    snap_ist = _parse_ts(ts_new) + timedelta(hours=5, minutes=30)
+    if snap_ist.strftime("%Y-%m-%d") != today or (snap_ist.hour, snap_ist.minute) < (15, 25):
+        return {"skipped": f"latest snapshot {snap_ist.strftime('%H:%M')} is not the close"}
+    by_sym = {h["tradingsymbol"]: h for h in (res.get("hits") or [])}
+    done = unchanged = missing = 0
+    for r in rows:
+        h = by_sym.get(r["tradingsymbol"])
+        if not h:
+            missing += 1   # OI no longer above yesterday's, or no trade: left exactly as it was
+            continue
+        last = _parse_ts(r["last_seen"])
+        if last and (_parse_ts(ts_new) - last) <= timedelta(minutes=FRESH_WINDOW_MIN):
+            unchanged += 1   # already read at the close
+            continue
+        upd = {
+            "cmp": h.get("cmp"), "activity": h.get("activity"), "activity_label": h.get("activity_label"),
+            "activity_v2": h.get("activity_v2"), "iv_rel_v2": h.get("iv_rel_v2"),
+            "oi_pct": h["oi_pct"], "new_oi": h["new_oi"],
+            "premium_pct": h["premium_pct"], "old_premium": h["old_premium"], "new_premium": h["new_premium"],
+            "close_refreshed_at": ts_new,
+        }
+        supabase.from_("option_stealth_events").update(upd).eq("event_key", r["event_key"]).execute()
+        done += 1
+    out = {"rows": len(rows), "refreshed": done, "already_at_close": unchanged, "left_as_is": missing, "snapshot": ts_new}
+    print(f"[OptionStealth] close refresh: {out}")
     return out
 
 
