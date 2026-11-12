@@ -181,8 +181,12 @@ def run_fut_history_backfill(supabase, symbols=None, start="2026-10-14", end=Non
                       f"fut_vol stored={have.get('fut_vol')} nse={new['fut_vol']} | close stored={have.get('close_price')} nse={new['close_price']} | "
                       f"oi_close stored={have.get('fut_oi_close')} nse={new['fut_oi_close']} | price_chg stored={have.get('price_chg_pct')} nse={new['price_chg_pct']}")
                 if have.get("price_chg_pct") is None and new["price_chg_pct"] is not None:
-                    fills.append((d.isoformat(), s, new["price_chg_pct"], new["fut_signal"]))
-                    print(f"[fut_backfill] FILL  {d} {s}: price_chg_pct null -> {new['price_chg_pct']}, signal {have.get('fut_signal')} -> {new['fut_signal']}")
+                    # Classify with the OI change we already STORE for this row (not NSE's), so the signal matches
+                    # the OI number shown beside it. Fall back to NSE's only if the stored value is missing.
+                    _stored_oi = _f(have.get("fut_oi_chg_pct"))
+                    _sig = _signal(_stored_oi if _stored_oi is not None else new["fut_oi_chg_pct"], new["price_chg_pct"])
+                    fills.append((d.isoformat(), s, new["price_chg_pct"], _sig))
+                    print(f"[fut_backfill] FILL  {d} {s}: price_chg_pct null -> {new['price_chg_pct']}, signal {have.get('fut_signal')} -> {_sig} (stored oi_chg {_stored_oi})")
             else:
                 row = dict(new)
                 row["trade_date"] = d.isoformat()
