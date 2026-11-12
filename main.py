@@ -573,6 +573,20 @@ async def lifespan(app: FastAPI):
             STOCK_NSE_MAP.update({s: f"NSE:{s}" for s in TOP30})
             new_set = set(TOP30)
             added, removed = new_set - old_set, old_set - new_set
+            # Nov 12 2026: remember the universe in the database so a restart/redeploy can't drop a new F&O stock
+            # (SYRMA, CUB and 4 others were missing 2-9 Nov after the in-memory list reset).
+            try:
+                from datetime import datetime, timezone, timedelta
+                from utils.db import get_supabase as _gs
+                _sb = _gs()
+                _today = datetime.now(timezone(timedelta(hours=5, minutes=30))).date().isoformat()
+                _rows = [{"symbol": x, "last_seen": _today} for x in TOP30]
+                for _i in range(0, len(_rows), 100):
+                    _sb.from_("fno_universe_state").upsert(_rows[_i:_i+100], on_conflict="symbol").execute()
+                if removed:
+                    _sb.from_("fno_universe_state").delete().in_("symbol", sorted(removed)).execute()
+            except Exception as _e:
+                print(f"[fno_universe] could not save universe: {_e}")
             print(f"[fno_universe] daily refresh: {len(TOP30)} stocks tracked "
                   f"(+{len(added)}/-{len(removed)})"
                   + (f" added={sorted(added)}" if added else "")
@@ -580,6 +594,41 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"[fno_universe] daily refresh job failed: {e}")
     scheduler.add_job(_run_fno_universe_refresh_job, "cron", hour=8, minute=35, timezone="Asia/Kolkata", id="fno_universe_refresh")
+
+    def _restore_saved_fno_universe():
+        # Nov 12 2026: add back any stock the daily refresh saw in the last 7 days but the startup list lacks.
+        try:
+            from datetime import datetime, timezone, timedelta
+            from utils.db import get_supabase as _gs
+            import api.iv_analysis as _iv
+            _cut = (datetime.now(timezone(timedelta(hours=5, minutes=30))).date() - timedelta(days=7)).isoformat()
+            _saved = _gs().from_("fno_universe_state").select("symbol").gte("last_seen", _cut).limit(1000).execute().data or []
+            _missing = sorted({r["symbol"] for r in _saved} - set(TOP30) - set(INDICES))
+            if _missing:
+                TOP30.extend(_missing)
+                _iv.SYMBOLS.extend([m for m in _missing if m not in _iv.SYMBOLS])
+                STOCK_NSE_MAP.update({m: f"NSE:{m}" for m in _missing})
+            print(f"[fno_universe] restored {len(_missing)} saved stocks at startup: {_missing}")
+        except Exception as _e:
+            print(f"[fno_universe] restore failed (using startup list): {_e}")
+    _restore_saved_fno_universe()
+
+    # Nov 12 2026: one-off history backfill for stocks that were missing days. Does nothing unless the
+    # FUT_BACKFILL variable is set: "dry" = log only, "write" = write. Remove the variable after use.
+    _fb_mode = os.getenv("FUT_BACKFILL", "").strip().lower()
+    if _fb_mode in ("dry", "write"):
+        def _run_fut_backfill():
+            try:
+                import time as _t
+                _t.sleep(90)
+                from services.fut_history_backfill import run_fut_history_backfill
+                from utils.db import get_supabase as _gs
+                run_fut_history_backfill(_gs(), dry_run=(_fb_mode != "write"))
+            except Exception as _e:
+                import traceback; traceback.print_exc()
+                print(f"[fut_backfill] failed: {_e}")
+        import threading as _th
+        _th.Thread(target=_run_fut_backfill, daemon=True).start()
 
     def _run_earnings_refresh_job():
         try:
@@ -3585,12 +3634,13 @@ def stock_signal_history(symbol: str, days: int = 20):
             # accumulated). Back to the cash close-to-close basis, which is
             # also what the dashboard card and fut_signal classification
             # now use again.
-            _price_chg = float(r.get("price_chg_pct") or 0)
+            # Nov 12 2026: no previous close on file (a stock's first tracked day) -> None, not a fake 0.00%
+            _price_chg = float(r["price_chg_pct"]) if r.get("price_chg_pct") is not None else None
             history.append({
                 "date":         r["trade_date"],
                 "signal":       r.get("fut_signal") or "NEUTRAL",
                 "fut_oi_chg":   round(float(r.get("fut_oi_chg_pct") or 0), 2),
-                "price_chg":    round(_price_chg, 2),
+                "price_chg":    round(_price_chg, 2) if _price_chg is not None else None,
                 "close_price":  round(float(r.get("close_price") or 0), 2),
                 "volume":       vol,
                 "vol_ratio":    vol_ratio,
