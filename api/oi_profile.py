@@ -231,6 +231,21 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, 
 
     # PCR: full option chain (nearest expiry) — realistic, matches NSE-style PCR
     pcr_value = round(total_pe / total_ce, 2) if total_ce > 0 else 0
+    pcr_basis = "stored_chain"
+    # Nov 12 2026: for a live (today, no time-travel) view use the whole-chain PCR
+    # from pcr_intraday (every strike, same as brokers/Sensibull). It never depends
+    # on the strike-zone selector. Falls back to the stored-chain figure above.
+    try:
+        _ist_today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+        if not at_time and date == _ist_today and active_expiry:
+            _pr = supabase.from_("pcr_intraday").select("pcr,strikes,ts") \
+                .eq("trade_date", _ist_today).eq("symbol", symbol).eq("expiry", active_expiry) \
+                .order("ts", desc=True).limit(1).execute().data or []
+            if _pr and _pr[0].get("pcr"):
+                pcr_value = round(float(_pr[0]["pcr"]), 2)
+                pcr_basis = "whole_chain"
+    except Exception as _e:
+        print(f"[oi_profile] whole-chain PCR lookup failed: {_e}")
 
     # Value area
     va_threshold = total_oi * 0.70
@@ -523,6 +538,7 @@ def get_oi_profile(symbol: str = "NIFTY", date: str = None, expiry: str = None, 
         "total_ce_oi":     total_ce,
         "total_pe_oi":     total_pe,
         "pcr":             pcr_value,
+        "pcr_basis":       pcr_basis,
         "profile":         profile,
         "wall_migration":  wall_migration,
         "vacuum_count":    sum(1 for p in profile if p["is_vacuum"]),
