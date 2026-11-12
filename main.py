@@ -623,7 +623,9 @@ async def lifespan(app: FastAPI):
                 _t.sleep(90)
                 from services.fut_history_backfill import run_fut_history_backfill
                 from utils.db import get_supabase as _gs
-                run_fut_history_backfill(_gs(), dry_run=(_fb_mode != "write"))
+                from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+                _today_ist = (_dt.now(_tz.utc) + _td(hours=5, minutes=30)).date().isoformat()
+                run_fut_history_backfill(_gs(), end=_today_ist, dry_run=(_fb_mode != "write"))
             except Exception as _e:
                 import traceback; traceback.print_exc()
                 print(f"[fut_backfill] failed: {_e}")

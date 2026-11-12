@@ -131,7 +131,8 @@ def _build(sym, fo, cash):
         "symbol": sym,
         "close_price": c["close"],
         "price_chg_pct": price_chg,
-        "fut_vol": int(_f(n0.get("TtlTradgVol")) or 0),
+        # NSE's volume is in contracts; our table stores shares, so multiply by the lot size in the same file.
+        "fut_vol": int((_f(n0.get("TtlTradgVol")) or 0) * (_f(n0.get("NewBrdLotQty")) or 0)),
         "fut_oi_chg_pct": oi_chg if oi_chg is not None else 0,
         "fut_oi_chg_pct_next": _oi_pct(n1) if n1 else None,
         "fut_oi_close": _f(n0.get("OpnIntrst")),
