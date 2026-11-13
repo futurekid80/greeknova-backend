@@ -1,0 +1,102 @@
+"""Nov 13 2026: replace the closing futures OI we stored from our live feed with NSE's final end-of-day OI.
+
+Why: the live feed's last reading of the day is not the exchange's final figure. The exchange revises OI
+overnight (DATAPATTNS 12 Nov: live 469,000 vs final 423,750; the first reading on 13 Nov matched NSE exactly).
+Across 222 stocks the stored 12 Nov closing OI differed from the final figure by >1% on 120 stocks.
+
+Source: NSE F&O bhavcopy (OpnIntrst = final OI, ChngInOpnIntrst = change vs previous day's final OI).
+Fields touched: fut_oi_close, fut_oi_chg_pct, fut_oi_close_next, fut_oi_chg_pct_next, fut_signal.
+The price move (price_chg_pct) is never touched; fut_signal is re-derived from the NEW OI change and the stored
+cash price move with the same rule the daily job uses.
+
+dry_run=True (default) writes nothing and logs what would change, including how many Stealth (watch band) and
+buildup tags would flip.
+"""
+import time
+from datetime import datetime, timedelta
+
+from services.fut_history_backfill import _fo_rows, _f, _oi_pct, _signal
+
+
+def _stealth(oi, price):
+    """Watch band of the Stealth tag: OI building at least 1.0% with a quiet cash price (|move| <= 1.0%)."""
+    return oi is not None and price is not None and oi >= 1.0 and abs(price) <= 1.0
+
+
+def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
+    from utils.market_calendar import is_trading_day
+    end_d = datetime.strptime(end, "%Y-%m-%d").date() if end else datetime.utcnow().date()
+    d = datetime.strptime(start, "%Y-%m-%d").date()
+    mode = "DRY RUN (nothing is written)" if dry_run else "WRITE"
+    print(f"[fut_oi_final] {mode}: {d} to {end_d}")
+    tot = {"rows": 0, "changed": 0, "gt1": 0, "gt3": 0, "gt10": 0, "sig_flips": 0, "stealth_in": 0, "stealth_out": 0}
+
+    while d <= end_d:
+        if d.weekday() >= 5 or not is_trading_day(d):
+            d += timedelta(days=1)
+            continue
+        fo = _fo_rows(d)
+        time.sleep(1)
+        if fo is None:
+            print(f"[fut_oi_final] {d}: NSE F&O file not available; skipped")
+            d += timedelta(days=1)
+            continue
+        rows, lo = [], 0
+        while True:
+            res = supabase.from_("daily_oi_summary").select(
+                "symbol,price_chg_pct,fut_oi_chg_pct,fut_oi_close,fut_oi_chg_pct_next,fut_oi_close_next,fut_signal"
+            ).eq("trade_date", d.isoformat()).range(lo, lo + 999).execute().data or []
+            rows += res
+            if len(res) < 1000:
+                break
+            lo += 1000
+        n = ch = g1 = g3 = g10 = flips = s_in = s_out = 0
+        examples, updates = [], []
+        for r in rows:
+            futs = fo.get(r["symbol"].upper()) or []
+            if not futs:
+                continue
+            n0, n1 = futs[0], (futs[1] if len(futs) > 1 else None)
+            new_close = _f(n0.get("OpnIntrst"))
+            new_chg = _oi_pct(n0)
+            if new_close is None or new_chg is None:
+                continue
+            old_close = _f(r.get("fut_oi_close"))
+            old_chg = _f(r.get("fut_oi_chg_pct"))
+            price = _f(r.get("price_chg_pct"))
+            n += 1
+            if old_close and old_close > 0:
+                gap = abs(new_close - old_close) / old_close * 100
+                if gap > 1: g1 += 1
+                if gap > 3: g3 += 1
+                if gap > 10: g10 += 1
+            new_sig = _signal(new_chg, price) if price is not None else r.get("fut_signal")
+            old_sig = r.get("fut_signal")
+            if new_sig != old_sig:
+                flips += 1
+                if len(examples) < 8:
+                    examples.append(f"{r['symbol']} oi {old_chg}->{new_chg} px {price} {old_sig}->{new_sig}")
+            if _stealth(new_chg, price) and not _stealth(old_chg, price): s_in += 1
+            if _stealth(old_chg, price) and not _stealth(new_chg, price): s_out += 1
+            if old_close != new_close or old_chg != new_chg:
+                ch += 1
+                upd = {"fut_oi_close": new_close, "fut_oi_chg_pct": new_chg, "fut_signal": new_sig}
+                if n1 is not None:
+                    upd["fut_oi_close_next"] = _f(n1.get("OpnIntrst"))
+                    nn = _oi_pct(n1)
+                    if nn is not None:
+                        upd["fut_oi_chg_pct_next"] = nn
+                updates.append((r["symbol"], upd))
+        print(f"[fut_oi_final] {d}: matched={n} changed={ch} oi>1%={g1} >3%={g3} >10%={g10} "
+              f"signal_flips={flips} stealth_in={s_in} stealth_out={s_out}")
+        for e in examples:
+            print(f"[fut_oi_final]    e.g. {e}")
+        for k, v in (("rows", n), ("changed", ch), ("gt1", g1), ("gt3", g3), ("gt10", g10),
+                     ("sig_flips", flips), ("stealth_in", s_in), ("stealth_out", s_out)):
+            tot[k] += v
+        if not dry_run:
+            for sym, upd in updates:
+                supabase.from_("daily_oi_summary").update(upd).eq("trade_date", d.isoformat()).eq("symbol", sym).execute()
+        d += timedelta(days=1)
+    print(f"[fut_oi_final] {mode} TOTAL: {tot}")
+    return tot

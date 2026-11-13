@@ -632,6 +632,23 @@ async def lifespan(app: FastAPI):
         import threading as _th
         _th.Thread(target=_run_fut_backfill, daemon=True).start()
 
+    # Nov 13 2026: replace live-feed closing futures OI with NSE's final figures. Inert unless FUT_OI_FINAL is
+    # "dry" (log only) or "write". Remove the variable after use.
+    _fo_mode = os.getenv("FUT_OI_FINAL", "").strip().lower()
+    if _fo_mode in ("dry", "write"):
+        def _run_fut_oi_final():
+            try:
+                import time as _t
+                _t.sleep(90)
+                from services.fut_oi_final import run_fut_oi_final
+                from utils.db import get_supabase as _gs2
+                run_fut_oi_final(_gs2(), start=os.getenv("FUT_OI_FINAL_START", "2026-10-14"), dry_run=(_fo_mode != "write"))
+            except Exception as _e:
+                import traceback; traceback.print_exc()
+                print(f"[fut_oi_final] failed: {_e}")
+        import threading as _th2
+        _th2.Thread(target=_run_fut_oi_final, daemon=True).start()
+
     def _run_earnings_refresh_job():
         try:
             from services.earnings_calendar import refresh_from_nse
