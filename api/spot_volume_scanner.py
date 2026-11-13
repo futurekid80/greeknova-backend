@@ -86,7 +86,7 @@ def backfill_spot_daily_bars(supabase, kite, symbols, days_back=180):
     symbol, needed to establish the 5/10/20-day volume baselines and find
     any already-in-progress burst/pause pattern. Safe to re-run — upserts
     on (symbol, trade_date)."""
-    all_symbols = list(symbols) + list(INDEX_TOKENS.keys())
+    all_symbols = list(dict.fromkeys(list(symbols) + list(INDEX_TOKENS.keys())))  # no repeats (upsert fails on duplicates)
     token_map = _get_instrument_tokens(kite, symbols)
 
     from_date = (_now_ist().date() - timedelta(days=days_back)).isoformat()
@@ -136,7 +136,7 @@ def append_todays_spot_bar(supabase, kite, symbols):
     """Daily EOD job — appends just today's now-completed daily bar for
     every symbol. Much lighter than a full backfill; meant to run once a
     day after market close so spot_daily_bars stays current going forward."""
-    all_symbols = list(symbols) + list(INDEX_TOKENS.keys())
+    all_symbols = list(dict.fromkeys(list(symbols) + list(INDEX_TOKENS.keys())))  # no repeats (upsert fails on duplicates)
     token_map = _get_instrument_tokens(kite, symbols)
     today = _now_ist().date().isoformat()
 
