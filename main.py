@@ -776,7 +776,15 @@ async def lifespan(app: FastAPI):
                 print("[spot_bars_heal] all symbols have enough history")
                 return
             print(f"[spot_bars_heal] backfilling {len(short)} symbols: {short[:15]}")
-            backfill_spot_daily_bars(sb, get_kite_client(), short, days_back=180)
+            # Nov 13 2026: history calls need the Trading Bot client; the main session key has no
+            # Historical Data permission ("Insufficient permission" every morning). Same as the EOD job.
+            try:
+                from services.kite_auth import get_historical_kite_client
+                _hk = get_historical_kite_client()
+            except Exception as _e:
+                print(f"[spot_bars_heal] historical client unavailable ({_e}); using main session")
+                _hk = get_kite_client()
+            backfill_spot_daily_bars(sb, _hk, short, days_back=180)
         except Exception as e:
             print(f"[spot_bars_heal] failed: {e}")
     scheduler.add_job(_run_spot_bars_heal_job, "cron", hour=8, minute=50, timezone="Asia/Kolkata", id="spot_bars_heal")
