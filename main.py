@@ -4382,13 +4382,22 @@ def week52_high():
     except Exception as e:
         return {"rows": [], "count": 0, "error": str(e)}
 
+def _hist_kite():
+    """Kite client for historical_data calls: Trading Bot app, falling back to the main session."""
+    try:
+        from services.kite_auth import get_historical_kite_client
+        return get_historical_kite_client()
+    except Exception:
+        from services.kite_auth import get_kite_client
+        return get_kite_client()
+
 @app.get("/spot-volume/backfill")
 def spot_volume_backfill(days_back: int = 180):
     from services.kite_auth import get_kite_client
     from api.spot_volume_scanner import backfill_spot_daily_bars
     from api.iv_analysis import SYMBOLS
     try:
-        result = backfill_spot_daily_bars(get_supabase(), get_kite_client(), SYMBOLS, days_back=days_back)
+        result = backfill_spot_daily_bars(get_supabase(), _hist_kite(), SYMBOLS, days_back=days_back)
         return result
     except Exception as e:
         return {"status": "error", "detail": str(e)}
@@ -4399,7 +4408,7 @@ def spot_volume_eod_append():
     from api.spot_volume_scanner import append_todays_spot_bar
     from api.iv_analysis import SYMBOLS
     try:
-        result = append_todays_spot_bar(get_supabase(), get_kite_client(), SYMBOLS)
+        result = append_todays_spot_bar(get_supabase(), _hist_kite(), SYMBOLS)
         return result
     except Exception as e:
         return {"status": "error", "detail": str(e)}
