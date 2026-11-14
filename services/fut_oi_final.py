@@ -116,15 +116,15 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
 
 
 def run_fut_oi_final_today(supabase):
-    """Nightly job: write NSE's final OI for today (IST). Returns True once today's NSE file was found."""
+    """Nightly job: write NSE's final OI for today (IST).
+    Returns today's date string once written, "" on a non-trading day, None if NSE's file is not out yet."""
     from datetime import timezone
-    today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+    today_d = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date()
     from utils.market_calendar import is_trading_day
-    if not is_trading_day(datetime.strptime(today, "%Y-%m-%d").date()):
-        return True
-    from services.fut_history_backfill import _fo_rows
-    if _fo_rows(datetime.strptime(today, "%Y-%m-%d").date()) is None:
-        print(f"[fut_oi_final] nightly: NSE file for {today} not out yet")
-        return False
-    run_fut_oi_final(supabase, start=today, end=today, dry_run=False)
-    return True
+    if not is_trading_day(today_d):
+        return ""
+    if _fo_rows(today_d) is None:
+        print(f"[fut_oi_final] nightly: NSE file for {today_d} not out yet")
+        return None
+    run_fut_oi_final(supabase, start=today_d.isoformat(), end=today_d.isoformat(), dry_run=False)
+    return today_d.isoformat()

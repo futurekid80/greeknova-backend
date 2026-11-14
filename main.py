@@ -856,7 +856,19 @@ async def lifespan(app: FastAPI):
         try:
             from services.fut_oi_final import run_fut_oi_final_today
             from utils.db import get_supabase as _gs3
-            if run_fut_oi_final_today(_gs3()):
+            from datetime import datetime as _d4, timezone as _tz4, timedelta as _td4
+            _t = (_d4.now(_tz4.utc) + _td4(hours=5, minutes=30)).date().isoformat()
+            try:
+                _r = _gs3().from_("job_status").select("detail").eq("job_name", "fut_oi_final").limit(1).execute().data or []
+                if _r and (_r[0].get("detail") or "")[:10] == _t:
+                    return  # already written tonight; the later retries are only a safety net
+            except Exception:
+                pass
+            _written = run_fut_oi_final_today(_gs3())
+            if _written:
+                # Marker read by /data-status so the page can say "Final" only when it is true.
+                _record_job_status(_gs3(), "fut_oi_final", "ok", detail=_written)
+            if _written is not None:
                 try:
                     from api.positional_intelligence import clear_positional_intelligence_cache
                     clear_positional_intelligence_cache()
@@ -3440,6 +3452,36 @@ def clear_radar_cache_endpoint():
 def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
+
+@app.get("/data-status")
+def data_status():
+    """Small status for the 'Live / Finalising / Final' tag next to MARKET CLOSED on the Pulse page.
+    state: live (market open), finalising (today closed, final figures not written yet),
+    final (final figures written for `for_date`), provisional (a past day that never got final figures)."""
+    import pytz
+    from datetime import datetime as _dtm
+    from utils.market_calendar import today_ist, is_trading_day, get_prev_trading_day
+    now = _dtm.now(pytz.timezone("Asia/Kolkata"))
+    today = today_ist()
+    mins = now.hour * 60 + now.minute
+    if is_trading_day(today) and 9 * 60 + 15 <= mins < 15 * 60 + 30:
+        return {"state": "live", "for_date": today.isoformat()}
+    if is_trading_day(today) and mins >= 15 * 60 + 30:
+        ref = today
+    else:
+        ref = get_prev_trading_day(today)
+    written = None
+    try:
+        r = get_supabase().from_("job_status").select("detail,last_run_at").eq("job_name", "fut_oi_final").limit(1).execute().data or []
+        if r:
+            written = (r[0].get("detail") or "")[:10]
+            at = r[0].get("last_run_at")
+    except Exception as e:
+        print(f"[data-status] read failed: {e}")
+    if written and written >= ref.isoformat():
+        return {"state": "final", "for_date": ref.isoformat()}
+    return {"state": "finalising" if ref == today else "provisional", "for_date": ref.isoformat()}
+
 
 @app.get("/market-status")
 def market_status():
