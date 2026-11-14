@@ -791,6 +791,7 @@ async def lifespan(app: FastAPI):
             short = [x for x in SYMBOLS if counts.get(x, 0) < 12]
             if not short:
                 print("[spot_bars_heal] all symbols have enough history")
+                _record_job_status(sb, "spot_bars_heal", "success", detail="all symbols have enough history")
                 return
             print(f"[spot_bars_heal] backfilling {len(short)} symbols: {short[:15]}")
             # Nov 13 2026: history calls need the Trading Bot client; the main session key has no
@@ -801,9 +802,16 @@ async def lifespan(app: FastAPI):
             except Exception as _e:
                 print(f"[spot_bars_heal] historical client unavailable ({_e}); using main session")
                 _hk = get_kite_client()
-            backfill_spot_daily_bars(sb, _hk, short, days_back=180)
+            _res = backfill_spot_daily_bars(sb, _hk, short, days_back=180)
+            _tb = (_res or {}).get("total_bars", 0)
+            _record_job_status(sb, "spot_bars_heal", "success" if _tb > 0 else "failed",
+                               detail=f"{len(short)} short symbols, {_tb} bars written", records_count=_tb)
         except Exception as e:
             print(f"[spot_bars_heal] failed: {e}")
+            try:
+                _record_job_status(get_supabase(), "spot_bars_heal", "failed", detail=str(e))
+            except Exception:
+                pass
     scheduler.add_job(_run_spot_bars_heal_job, "cron", hour=8, minute=50, timezone="Asia/Kolkata", id="spot_bars_heal")
 
     def _run_lot_size_refresh_job():
@@ -867,7 +875,7 @@ async def lifespan(app: FastAPI):
             _written = run_fut_oi_final_today(_gs3())
             if _written:
                 # Marker read by /data-status so the page can say "Final" only when it is true.
-                _record_job_status(_gs3(), "fut_oi_final", "ok", detail=_written)
+                _record_job_status(_gs3(), "fut_oi_final", "success", detail=_written)
             if _written:
                 from services.fut_oi_final import refresh_eod_caches
                 refresh_eod_caches(_gs3())
@@ -877,6 +885,17 @@ async def lifespan(app: FastAPI):
     for _h, _m, _id in ((19, 15, "fut_oi_final_1"), (20, 30, "fut_oi_final_2"), (22, 0, "fut_oi_final_3")):
         scheduler.add_job(_run_fut_oi_final_nightly, "cron", hour=_h, minute=_m, timezone="Asia/Kolkata",
                           id=_id, misfire_grace_time=900)
+
+    def _run_data_quality(kind):
+        try:
+            from services.data_quality import run_data_quality
+            from utils.db import get_supabase as _gs5
+            run_data_quality(_gs5(), kind=kind)
+        except Exception as e:
+            print(f"[data_quality] {kind} run failed: {e}")
+    for _k, _h, _m in (("evening", 20, 45), ("morning", 9, 5), ("live", 9, 45)):
+        scheduler.add_job(_run_data_quality, "cron", args=[_k], hour=_h, minute=_m, timezone="Asia/Kolkata",
+                          id=f"data_quality_{_k}", misfire_grace_time=900)
 
     def _run_sector_index_eod():
         try:
@@ -3449,6 +3468,14 @@ def clear_radar_cache_endpoint():
 def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
+
+@app.get("/admin/data-quality")
+def admin_data_quality(kind: str = "evening", notify: int = 0, force: int = 1):
+    """Run the daily data-quality checks on demand and return the results (no Telegram unless notify=1).
+    Without arguments it runs the evening checks against the last trading day."""
+    from services.data_quality import run_data_quality
+    return {"kind": kind, "results": run_data_quality(get_supabase(), kind=kind, notify=bool(notify), force=bool(force))}
+
 
 @app.get("/admin/refresh-eod-caches")
 def admin_refresh_eod_caches():
