@@ -3485,6 +3485,18 @@ def admin_bars_check(days: int = 5, symbols: str = "HINDALCO,RELIANCE,DATAPATTNS
     return {"results": run_bars_check(get_supabase(), days=min(days, 8), sample={x.strip().upper() for x in symbols.split(",") if x.strip()})}
 
 
+@app.get("/admin/bars-final")
+def admin_bars_final(start: str, end: str, mode: str = "dry", symbols: str = "HINDALCO,RELIANCE,DATAPATTNS"):
+    """Make spot_daily_bars match NSE's cash end-of-day file for start..end. mode=dry (default) only reports;
+    mode=write updates. Limited to 40 calendar days per call."""
+    from datetime import datetime as _d
+    if (_d.strptime(end, "%Y-%m-%d") - _d.strptime(start, "%Y-%m-%d")).days > 40:
+        return {"error": "range too long; max 40 days per call"}
+    from services.bars_final import run_bars_final
+    return run_bars_final(get_supabase(), start, end, dry_run=(mode != "write"),
+                          sample={x.strip().upper() for x in symbols.split(",") if x.strip()})
+
+
 @app.get("/admin/refresh-eod-caches")
 def admin_refresh_eod_caches():
     """Rebuild the saved/in-memory copies of end-of-day numbers (Positional, Radar, Delivery Confluence,
