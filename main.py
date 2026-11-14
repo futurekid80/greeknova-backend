@@ -868,7 +868,7 @@ async def lifespan(app: FastAPI):
             if _written:
                 # Marker read by /data-status so the page can say "Final" only when it is true.
                 _record_job_status(_gs3(), "fut_oi_final", "ok", detail=_written)
-            if _written is not None:
+            if _written:
                 from services.fut_oi_final import refresh_eod_caches
                 refresh_eod_caches(_gs3())
         except Exception as e:
