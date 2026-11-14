@@ -18,6 +18,9 @@ from datetime import datetime, timedelta
 from services.fut_history_backfill import _fo_rows, _f, _oi_pct, _signal
 
 
+ROLLOVER_DAYS = 6  # calendar days before near-month expiry (expiry Tuesday: Wed..Tue sessions)
+
+
 def _stealth(oi, price):
     """Watch band of the Stealth tag: OI building at least 1.0% with a quiet cash price (|move| <= 1.0%)."""
     return oi is not None and price is not None and oi >= 1.0 and abs(price) <= 1.0
@@ -41,6 +44,16 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
             print(f"[fut_oi_final] {d}: NSE F&O file not available; skipped")
             d += timedelta(days=1)
             continue
+        # Rollover week: near-month OI drains as traders roll into the next series. NSE's day-over-day change then
+        # reads as 'unwinding/covering', which is rollover, not conviction. Leave those days as stored.
+        try:
+            _exp = min(datetime.strptime(v[0].get("XpryDt", "")[:10], "%Y-%m-%d").date() for v in fo.values() if v)
+            if (_exp - d).days <= ROLLOVER_DAYS:
+                print(f"[fut_oi_final] {d}: rollover week (near expiry {_exp}); left as stored")
+                d += timedelta(days=1)
+                continue
+        except Exception as _e:
+            print(f"[fut_oi_final] {d}: could not read expiry ({_e}); continuing")
         rows, lo = [], 0
         while True:
             res = supabase.from_("daily_oi_summary").select(
@@ -100,3 +113,18 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
         d += timedelta(days=1)
     print(f"[fut_oi_final] {mode} TOTAL: {tot}")
     return tot
+
+
+def run_fut_oi_final_today(supabase):
+    """Nightly job: write NSE's final OI for today (IST). Returns True once today's NSE file was found."""
+    from datetime import timezone
+    today = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
+    from utils.market_calendar import is_trading_day
+    if not is_trading_day(datetime.strptime(today, "%Y-%m-%d").date()):
+        return True
+    from services.fut_history_backfill import _fo_rows
+    if _fo_rows(datetime.strptime(today, "%Y-%m-%d").date()) is None:
+        print(f"[fut_oi_final] nightly: NSE file for {today} not out yet")
+        return False
+    run_fut_oi_final(supabase, start=today, end=today, dry_run=False)
+    return True

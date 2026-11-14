@@ -852,6 +852,23 @@ async def lifespan(app: FastAPI):
         id="spot_volume_eod", misfire_grace_time=600
     )
 
+    def _run_fut_oi_final_nightly():
+        try:
+            from services.fut_oi_final import run_fut_oi_final_today
+            from utils.db import get_supabase as _gs3
+            if run_fut_oi_final_today(_gs3()):
+                try:
+                    from api.positional_intelligence import clear_positional_intelligence_cache
+                    clear_positional_intelligence_cache()
+                except Exception as _ce:
+                    print(f"[fut_oi_final] cache clear failed: {_ce}")
+        except Exception as e:
+            print(f"[fut_oi_final] nightly job failed: {e}")
+    # NSE publishes the F&O file in the evening; try three times so a late file is still picked up.
+    for _h, _m, _id in ((19, 15, "fut_oi_final_1"), (20, 30, "fut_oi_final_2"), (22, 0, "fut_oi_final_3")):
+        scheduler.add_job(_run_fut_oi_final_nightly, "cron", hour=_h, minute=_m, timezone="Asia/Kolkata",
+                          id=_id, misfire_grace_time=900)
+
     def _run_sector_index_eod():
         try:
             from utils.db import get_supabase
