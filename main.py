@@ -3478,6 +3478,13 @@ def admin_data_quality(kind: str = "evening", notify: int = 0, force: int = 1):
     return {"kind": kind, "results": run_data_quality(get_supabase(), kind=kind, notify=bool(notify), force=bool(force))}
 
 
+@app.get("/admin/bars-check")
+def admin_bars_check(days: int = 5, symbols: str = "HINDALCO,RELIANCE,DATAPATTNS"):
+    """Read-only: compare spot_daily_bars with NSE's cash end-of-day file for the last `days` sessions."""
+    from services.bars_check import run_bars_check
+    return {"results": run_bars_check(get_supabase(), days=min(days, 8), sample={x.strip().upper() for x in symbols.split(",") if x.strip()})}
+
+
 @app.get("/admin/refresh-eod-caches")
 def admin_refresh_eod_caches():
     """Rebuild the saved/in-memory copies of end-of-day numbers (Positional, Radar, Delivery Confluence,
