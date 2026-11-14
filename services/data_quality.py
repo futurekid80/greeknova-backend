@@ -143,7 +143,16 @@ def _check_bars(sb, today):
             if abs(float(c) - float(s)) / float(s) * 100 > 0.5:
                 off += 1
     st = OK if (n == 0 or off / n <= 0.4) else WARN
-    return st, f"{len(bars)} bars today; {off} of {n} closes differ from stored close by >0.5% (known issue under review)"
+    return st, f"{len(bars)} bars today; {off} of {n} closes differ from stored close by >0.5%"
+
+
+def _check_bars_final(sb, today):
+    r = sb.from_("job_status").select("detail").eq("job_name", "bars_final").limit(1).execute().data or []
+    got = (r[0].get("detail") or "")[:10] if r else ""
+    if got >= today.isoformat():
+        return OK, f"bars matched to NSE cash file for {today}"
+    late = _ist_now().hour < 22
+    return (WARN if late else FAIL), f"bars NOT matched to NSE cash file for {today} (last: {got or 'never'})"
 
 
 def _check_pcr_daily(sb, today):
@@ -164,7 +173,7 @@ def _check_snapshot_close(sb, today):
 
 
 EVENING = [("final_oi_written", _check_final_oi_written), ("oi_matches_nse", _check_oi_matches_nse),
-           ("summary_rows", _check_summary_rows), ("symbol_gaps", _check_symbol_gaps), ("bars", _check_bars),
+           ("summary_rows", _check_summary_rows), ("symbol_gaps", _check_symbol_gaps), ("bars", _check_bars), ("bars_final", _check_bars_final),
            ("pcr_daily", _check_pcr_daily), ("snapshot_close", _check_snapshot_close)]
 
 

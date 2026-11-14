@@ -886,6 +886,28 @@ async def lifespan(app: FastAPI):
         scheduler.add_job(_run_fut_oi_final_nightly, "cron", hour=_h, minute=_m, timezone="Asia/Kolkata",
                           id=_id, misfire_grace_time=900)
 
+    def _run_bars_final_nightly():
+        try:
+            from services.bars_final import run_bars_final_today
+            from utils.db import get_supabase as _gs6
+            from datetime import datetime as _d6, timezone as _tz6, timedelta as _td6
+            _t = (_d6.now(_tz6.utc) + _td6(hours=5, minutes=30)).date().isoformat()
+            try:
+                _r = _gs6().from_("job_status").select("detail").eq("job_name", "bars_final").limit(1).execute().data or []
+                if _r and (_r[0].get("detail") or "")[:10] == _t:
+                    return  # already done tonight; later tries are a safety net
+            except Exception:
+                pass
+            _w = run_bars_final_today(_gs6())
+            if _w:
+                _record_job_status(_gs6(), "bars_final", "success", detail=_w)
+        except Exception as e:
+            print(f"[bars_final] nightly job failed: {e}")
+    # NSE's cash file is out by evening; two tries so a late file is still picked up.
+    for _h, _m, _id in ((19, 30, "bars_final_1"), (21, 30, "bars_final_2")):
+        scheduler.add_job(_run_bars_final_nightly, "cron", hour=_h, minute=_m, timezone="Asia/Kolkata",
+                          id=_id, misfire_grace_time=900)
+
     def _run_data_quality(kind):
         try:
             from services.data_quality import run_data_quality
