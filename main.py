@@ -3508,10 +3508,14 @@ def admin_bars_check(days: int = 5, symbols: str = "HINDALCO,RELIANCE,DATAPATTNS
 
 
 @app.get("/admin/bars-final")
-def admin_bars_final(start: str, end: str, mode: str = "dry", symbols: str = "HINDALCO,RELIANCE,DATAPATTNS"):
+def admin_bars_final(start: str, end: str, mode: str = "dry", symbols: str = "HINDALCO,RELIANCE,DATAPATTNS", background: int = 0):
     """Make spot_daily_bars match NSE's cash end-of-day file for start..end. mode=dry (default) only reports;
     mode=write updates. Limited to 40 calendar days per call."""
     from datetime import datetime as _d
+    if background and mode == "write":
+        from services.bars_final import run_bars_history_background
+        run_bars_history_background(get_supabase(), start, end)
+        return {"started": True, "watch": "job_status bars_final_history"}
     if (_d.strptime(end, "%Y-%m-%d") - _d.strptime(start, "%Y-%m-%d")).days > 40:
         return {"error": "range too long; max 40 days per call"}
     from services.bars_final import run_bars_final
