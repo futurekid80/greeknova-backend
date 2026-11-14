@@ -128,3 +128,44 @@ def run_fut_oi_final_today(supabase):
         return None
     run_fut_oi_final(supabase, start=today_d.isoformat(), end=today_d.isoformat(), dry_run=False)
     return today_d.isoformat()
+
+
+def refresh_eod_caches(supabase):
+    """After final OI is written, drop every saved or in-memory copy of the old numbers so screens rebuild from the
+    corrected daily_oi_summary rows. Each step is independent; one failing never blocks the others."""
+    import pytz
+    done = {}
+    try:
+        from api.positional_intelligence import clear_positional_intelligence_cache
+        clear_positional_intelligence_cache(); done["positional_intelligence"] = "cleared"
+    except Exception as e:
+        done["positional_intelligence"] = f"error: {e}"
+    try:
+        from api.positional_radar import clear_radar_cache
+        clear_radar_cache(); done["radar"] = "cleared"
+    except Exception as e:
+        done["radar"] = f"error: {e}"
+    try:
+        import api.delivery_confluence as dc
+        dc._confluence_cache = {}; dc._confluence_cache_time = 0
+        done["delivery_confluence"] = "cleared"
+    except Exception as e:
+        done["delivery_confluence"] = f"error: {e}"
+    try:
+        # Vol+OI Breakout saves its closing snapshot to the database after the first request post-close, so it
+        # would keep the provisional numbers. Rebuild it from the corrected rows and save over the old snapshot.
+        import api.vol_oi_breakout as vb
+        now_ist = datetime.now(pytz.timezone("Asia/Kolkata"))
+        vb._breakout_cache = {}; vb._breakout_cache_time = 0.0
+        fresh = vb._get_eod_from_summary(supabase, now_ist)
+        if fresh.get("signals") is not None and fresh.get("date") == vb._resolve_eod_trade_date(now_ist):
+            vb._save_to_supabase(supabase, fresh["signals"], fresh["total"], fresh["date"])
+            vb._breakout_cache = fresh
+            vb._breakout_cache_time = __import__("time").time()
+            done["vol_oi_breakout"] = f"rebuilt {fresh['total']} signals for {fresh['date']}"
+        else:
+            done["vol_oi_breakout"] = "skipped (date mismatch)"
+    except Exception as e:
+        done["vol_oi_breakout"] = f"error: {e}"
+    print(f"[fut_oi_final] cache refresh: {done}")
+    return done

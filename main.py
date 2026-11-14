@@ -869,11 +869,8 @@ async def lifespan(app: FastAPI):
                 # Marker read by /data-status so the page can say "Final" only when it is true.
                 _record_job_status(_gs3(), "fut_oi_final", "ok", detail=_written)
             if _written is not None:
-                try:
-                    from api.positional_intelligence import clear_positional_intelligence_cache
-                    clear_positional_intelligence_cache()
-                except Exception as _ce:
-                    print(f"[fut_oi_final] cache clear failed: {_ce}")
+                from services.fut_oi_final import refresh_eod_caches
+                refresh_eod_caches(_gs3())
         except Exception as e:
             print(f"[fut_oi_final] nightly job failed: {e}")
     # NSE publishes the F&O file in the evening; try three times so a late file is still picked up.
@@ -3452,6 +3449,14 @@ def clear_radar_cache_endpoint():
 def positional_radar(min_consec: int = 0):
     from api.positional_radar import get_positional_radar
     return get_positional_radar(min_consec=min_consec)
+
+@app.get("/admin/refresh-eod-caches")
+def admin_refresh_eod_caches():
+    """Rebuild the saved/in-memory copies of end-of-day numbers (Positional, Radar, Delivery Confluence,
+    Vol+OI Breakout). The nightly final-OI job calls this itself; this is for a manual run."""
+    from services.fut_oi_final import refresh_eod_caches
+    return refresh_eod_caches(get_supabase())
+
 
 @app.get("/data-status")
 def data_status():
