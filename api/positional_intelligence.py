@@ -619,7 +619,10 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                 # Stealth Buildup fix, this must NOT `continue` the outer
                 # per-symbol loop -- Series Buildup below still needs to run
                 # for this symbol even when Volume Breakout has no FUT price.
-                _raw_fut_price_chg = today_vol_row.get("fut_price_chg_pct")
+                # Nov 14 2026: back to the CASH close-to-close move (price_chg_pct), the basis every other tag uses
+                # (Oct 18 2026 decision). The futures open->close move hid overnight gaps: LTF 5 Nov was +5.65% on
+                # cash but +0.14% open->close, so a clear short covering never showed.
+                _raw_fut_price_chg = today_vol_row.get("price_chg_pct")
                 if vol_ratio >= 1.5 and _raw_fut_price_chg is not None:
                     fut_oi = float(today_vol_row.get("fut_oi_chg_pct") or 0)
                     price_chg = float(_raw_fut_price_chg)

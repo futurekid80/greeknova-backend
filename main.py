@@ -1678,7 +1678,8 @@ def writer_buyer_score(symbol: str):
     directions = []
     for r in hist_rows:
         fut_chg = float(r.get("fut_oi_chg_pct") or 0)
-        _raw_fut_price_chg = r.get("fut_price_chg_pct")
+        # Nov 14 2026: cash close-to-close move, like every other tag (futures open->close hid overnight gaps).
+        _raw_fut_price_chg = r.get("price_chg_pct")
         if _raw_fut_price_chg is None:
             continue
         price_chg = float(_raw_fut_price_chg)
