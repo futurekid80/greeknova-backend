@@ -283,17 +283,7 @@ def fetch_latest_oi_diff(supabase, date: str = None):
         return list(latest_by_key.values())
 
     new_data_raw = fetch_snapshot(ts_new)
-    # Nov 16 2026: for the since-previous-close window the baseline snapshot is yesterday's final
-    # capture and never changes during the day, so read it once, not on every scan.
-    if lookback_minutes is None:
-        old_data_raw = _OLD_SNAPSHOT_CACHE.get(ts_old)
-        if old_data_raw is None:
-            old_data_raw = fetch_snapshot(ts_old)
-            if old_data_raw:
-                _OLD_SNAPSHOT_CACHE.clear()
-                _OLD_SNAPSHOT_CACHE[ts_old] = old_data_raw
-    else:
-        old_data_raw = fetch_snapshot(ts_old)
+    old_data_raw = fetch_snapshot(ts_old)
 
     today_str = date_type.today().isoformat()
     nearest_expiry_map: dict = {}
