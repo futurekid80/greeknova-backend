@@ -2750,6 +2750,15 @@ def auth_kite_login(body: KiteLoginRequest):
     beta_row = None
     try:
         by_email = admin.from_("beta_users").select("email,kite_client_id").eq("email", kite_email).execute().data
+        if not by_email and kite_email:
+            # Nov 16 2026: a member who logs in with a second Zerodha account
+            # (e.g. their own account after first being matched on a family
+            # member's) already has that Kite email recorded in
+            # linked_kite_email. The access gate honours it, but this login
+            # check did not, so they were wrongly started on a trial and
+            # Manish got an "unrecognized login" alert. Check it here too.
+            by_email = admin.from_("beta_users").select("email,kite_client_id") \
+                .ilike("linked_kite_email", kite_email.strip()).limit(1).execute().data
         if by_email:
             beta_row = by_email[0]
         else:
