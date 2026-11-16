@@ -19,6 +19,9 @@ this file and options_jungle.py's fetch_snapshot() for drift.
 from datetime import datetime, timezone, timedelta, date as date_type
 
 
+_OLD_SNAPSHOT_CACHE: dict = {}   # ts_old -> raw rows of the baseline snapshot (previous close only)
+
+
 def _prev_close_ts(supabase, ts_new: str):
     """Last NIFTY snapshot timestamp strictly before ts_new's UTC calendar
     day, i.e. the previous trading session's final capture. NSE hours
@@ -138,7 +141,17 @@ def fetch_oi_diff_window(supabase, date: str = None, lookback_minutes=5):
         return list(latest_by_key.values())
 
     new_data_raw = fetch_snapshot(ts_new)
-    old_data_raw = fetch_snapshot(ts_old)
+    # Nov 16 2026: for the since-previous-close window the baseline snapshot is yesterday's final
+    # capture and never changes during the day, so read it once, not on every scan.
+    if lookback_minutes is None:
+        old_data_raw = _OLD_SNAPSHOT_CACHE.get(ts_old)
+        if old_data_raw is None:
+            old_data_raw = fetch_snapshot(ts_old)
+            if old_data_raw:
+                _OLD_SNAPSHOT_CACHE.clear()
+                _OLD_SNAPSHOT_CACHE[ts_old] = old_data_raw
+    else:
+        old_data_raw = fetch_snapshot(ts_old)
 
     today_str = date_type.today().isoformat()
     nearest_expiry_map: dict = {}
@@ -270,7 +283,17 @@ def fetch_latest_oi_diff(supabase, date: str = None):
         return list(latest_by_key.values())
 
     new_data_raw = fetch_snapshot(ts_new)
-    old_data_raw = fetch_snapshot(ts_old)
+    # Nov 16 2026: for the since-previous-close window the baseline snapshot is yesterday's final
+    # capture and never changes during the day, so read it once, not on every scan.
+    if lookback_minutes is None:
+        old_data_raw = _OLD_SNAPSHOT_CACHE.get(ts_old)
+        if old_data_raw is None:
+            old_data_raw = fetch_snapshot(ts_old)
+            if old_data_raw:
+                _OLD_SNAPSHOT_CACHE.clear()
+                _OLD_SNAPSHOT_CACHE[ts_old] = old_data_raw
+    else:
+        old_data_raw = fetch_snapshot(ts_old)
 
     today_str = date_type.today().isoformat()
     nearest_expiry_map: dict = {}

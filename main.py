@@ -3874,21 +3874,54 @@ def option_stealth_buildup(date: str = None, zone: str = None, window: str = Non
     # 15 min when closed -- plus a lock so concurrent callers share ONE scan
     # instead of each starting their own.
     key = (date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW, bool(adj))
-    ttl = 60 if _market_hours_now() else 900
+    live = _market_hours_now()
+    ttl = 60 if live else 900
     hit = _STEALTH_SCAN_CACHE.get(key)
-    if hit and time.time() - hit[0] < ttl:
-        return hit[1]
+    if hit:
+        age = time.time() - hit[0]
+        if age < ttl:
+            return hit[1]
+        # Nov 16 2026: stale-while-revalidate. A full scan takes 15-20s, longer than the page's
+        # patience at the open, so the page showed "Failed to load". While the market is live we
+        # hand back the last good result at once (it carries its own ts_new, so the page shows the
+        # data time) and refresh in the background.
+        if live and age < 1800:
+            _stealth_bg_refresh(key)
+            return hit[1]
     with _STEALTH_SCAN_LOCK:
         hit = _STEALTH_SCAN_CACHE.get(key)
         if hit and time.time() - hit[0] < ttl:
             return hit[1]
-        result = run_option_stealth_scan(get_supabase(), date, key[1], key[2], adj=key[3])
-        if key[2] == "eod" and isinstance(result, dict) and not result.get("error"):
-            from services.option_stealth_buildup import enrich_intraday
-            result = enrich_intraday(get_supabase(), result)
-        if not (isinstance(result, dict) and result.get("error")):
-            _STEALTH_SCAN_CACHE[key] = (time.time(), result)
-        return result
+        return _stealth_compute_and_cache(key)
+
+_STEALTH_BG_LOCK = _threading.Lock()
+_STEALTH_REFRESHING: set = set()
+
+def _stealth_compute_and_cache(key):
+    from services.option_stealth_buildup import run_option_stealth_scan
+    result = run_option_stealth_scan(get_supabase(), key[0], key[1], key[2], adj=key[3])
+    if key[2] == "eod" and isinstance(result, dict) and not result.get("error"):
+        from services.option_stealth_buildup import enrich_intraday
+        result = enrich_intraday(get_supabase(), result)
+    if not (isinstance(result, dict) and result.get("error")):
+        _STEALTH_SCAN_CACHE[key] = (time.time(), result)
+    return result
+
+def _stealth_bg_refresh(key):
+    with _STEALTH_BG_LOCK:
+        if key in _STEALTH_REFRESHING:
+            return
+        _STEALTH_REFRESHING.add(key)
+    def _run():
+        try:
+            with _STEALTH_SCAN_LOCK:
+                _stealth_compute_and_cache(key)
+        except Exception as e:
+            print(f"[OptionStealth] background refresh failed: {e}")
+        finally:
+            with _STEALTH_BG_LOCK:
+                _STEALTH_REFRESHING.discard(key)
+    _threading.Thread(target=_run, daemon=True).start()
 
 @app.get("/option-stealth-buildup/saved")
 def option_stealth_buildup_saved(date: str = None, zone: str = None, window: str = None):
