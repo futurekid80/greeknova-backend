@@ -2284,6 +2284,14 @@ def wolves_fresh_events():
     return get_todays_fresh_events()
 
 
+@app.get("/wolves/history/{symbol}")
+def wolves_symbol_history(symbol: str, days: int = 60):
+    # Nov 16 2026: stored Wolves signals for one stock (stock page). Cheap
+    # Supabase read of the same rows the Wolves page wrote, no recalculation.
+    from services.wolves_scanner import get_symbol_history
+    return get_symbol_history(symbol, days)
+
+
 @app.get("/wolves/watchlist")
 def wolves_watchlist():
     # Decision Watchlist -- Rank (A+/A/B/C), Confidence, Decision Score,

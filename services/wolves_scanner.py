@@ -1097,6 +1097,70 @@ def get_todays_fresh_events() -> dict:
     return {"date": query_date, "is_fallback": query_date != today_ist, "events": rows}
 
 
+def get_symbol_history(symbol: str, days: int = 60) -> dict:
+    """Nov 16 2026: read-only signal history for ONE stock, for the stock page.
+    Reads the rows the Wolves page itself already stored (wolves_signal_log and
+    wolves_fresh_events) and returns them as they were written, so the stock page
+    can never disagree with the Wolves page. Nothing is recalculated and no
+    after-the-signal results are computed -- members compare against the price
+    chart themselves. Internal scores are deliberately not returned."""
+    supabase = get_supabase()
+    symbol = symbol.upper()
+    since = (datetime.now(IST).date() - timedelta(days=max(1, min(days, 120)))).isoformat()
+    out = []
+    try:
+        rows = supabase.from_("wolves_signal_log") \
+            .select("scan_date,scan_time,direction,wolf_tier,trigger_timeframe,close,adx,hourly_rsi,meaning") \
+            .eq("symbol", symbol).gte("scan_date", since) \
+            .order("scan_date", desc=True).order("scan_time", desc=True).limit(500).execute().data or []
+        for r in rows:
+            out.append({"date": r["scan_date"], "time": r.get("scan_time"), "kind": "wolf",
+                        "direction": r.get("direction"), "label": r.get("wolf_tier"),
+                        "timeframe": r.get("trigger_timeframe"), "price": r.get("close"),
+                        "adx": r.get("adx"), "rsi": r.get("hourly_rsi"), "meaning": r.get("meaning")})
+    except Exception as e:
+        print(f"[Wolves] history (log) {symbol}: {e}")
+    try:
+        rows = supabase.from_("wolves_fresh_events") \
+            .select("scan_date,scan_time,direction,event_type,timeframe,close,adx,rsi,meaning") \
+            .eq("symbol", symbol).gte("scan_date", since) \
+            .order("scan_date", desc=True).order("scan_time", desc=True).limit(1000).execute().data or []
+        for r in rows:
+            out.append({"date": r["scan_date"], "time": r.get("scan_time"), "kind": "event",
+                        "direction": r.get("direction"), "label": r.get("event_type"),
+                        "timeframe": r.get("timeframe"), "price": r.get("close"),
+                        "adx": r.get("adx"), "rsi": r.get("rsi"), "meaning": r.get("meaning")})
+    except Exception as e:
+        print(f"[Wolves] history (events) {symbol}: {e}")
+    # The scanner re-logs a still-active signal on every scan day. Collapse a run of the same
+    # signal on consecutive trading days into one row: the day it FIRST appeared (with the price
+    # then) and how many days it kept showing. Rows are otherwise exactly as stored.
+    out.sort(key=lambda x: (str(x["date"]), str(x.get("time") or "")))
+    runs: list = []
+    last_run: dict = {}
+    for r in out:
+        k = (r["kind"], r["direction"], r["label"], r["timeframe"])
+        d = datetime.strptime(str(r["date"])[:10], "%Y-%m-%d").date()
+        prev = last_run.get(k)
+        if prev is not None and prev["_last"] == d:
+            continue                                   # same day, duplicate scan row
+        if prev is not None and 0 < (d - prev["_last"]).days <= 4:
+            prev["_last"] = d                          # still showing (4 days spans a weekend)
+            prev["days_seen"] += 1
+            prev["last_date"] = str(d)
+            continue
+        row = dict(r)
+        row["_last"] = d
+        row["days_seen"] = 1
+        row["last_date"] = str(d)
+        runs.append(row)
+        last_run[k] = row
+    for row in runs:
+        row.pop("_last", None)
+    runs.sort(key=lambda x: (str(x["date"]), str(x.get("time") or "")), reverse=True)
+    return {"symbol": symbol, "since": since, "history_from": "2026-10-16", "signals": runs}
+
+
 def get_todays_watchlist() -> dict:
     """Read-only -- today's Decision Watchlist (Rank/Confidence/Decision
     Score/Sector Tailwind per symbol+direction), falling back to the last
