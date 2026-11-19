@@ -2849,13 +2849,28 @@ def auth_kite_login(body: KiteLoginRequest):
                 # actually work (legacy Telegram Markdown has no \-escapes),
                 # so this kept silently 400-ing on names/emails with an odd
                 # number of _ * ` [ characters.
+                # Nov 19 2026: a returning user whose trial already ran (an old early-access user, say)
+                # does NOT get a new trial -- the gate shows "trial has ended, upgrade". Say so, instead of
+                # claiming a new 7-day trial started.
+                _old_trial = None
+                try:
+                    _tr = admin.from_("trial_users").select("trial_expires_date,converted").eq("email", kite_email).limit(1).execute().data
+                    _old_trial = _tr[0] if _tr else None
+                except Exception:
+                    _old_trial = None
+                if _old_trial:
+                    _tail = (f"Returning trial user: their trial ended on {_old_trial.get('trial_expires_date')}, so they are "
+                             f"asked to subscribe (no new trial). If this is a paid customer, add their Client ID "
+                             f"and this Kite email (as linked_kite_email) to their beta_users row.")
+                else:
+                    _tail = ("Started on a 7-day trial. If this is a paid customer, "
+                             "add their Client ID to their beta_users row to upgrade them.")
                 send_telegram(
                     f"\U0001F514 GreekNova: unrecognized Zerodha login\n"
                     f"Name: {kite_user_name or '-'}\n"
                     f"Kite email: {kite_email or '-'}\n"
                     f"Client ID: {kite_user_id or '-'}\n"
-                    f"Started on a 7-day trial. If this is a paid customer, "
-                    f"add their Client ID to their beta_users row to upgrade them.",
+                    + _tail,
                     markdown=False,
                 )
             except Exception as e:
