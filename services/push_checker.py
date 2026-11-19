@@ -454,6 +454,7 @@ def _check_technical_levels(supabase):
 PCR_CROSS_SYMBOLS = ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"]
 PCR_CROSS_BAND = 0.03        # |vol_pcr - oi_pcr| must exceed this to count as a side
 PCR_CROSS_COOLDOWN_MIN = 30  # at most one alert per symbol per this many minutes
+PCR_CROSS_START_IST = "09:30"  # no crossover alerts on readings before this IST time (opening-minute noise)
 _pcr_side: dict = {}         # symbol -> "above" | "below" (day state, reset daily)
 _pcr_last_fire: dict = {}    # symbol -> epoch seconds
 _pcr_day: str = ""
@@ -471,13 +472,25 @@ def _check_pcr_crossover(supabase):
 
     for sym in PCR_CROSS_SYMBOLS:
         try:
-            pts = get_pcr_trend(sym).get("points") or []
+            trend = get_pcr_trend(sym)
         except Exception as e:
             print(f"[PCRCross] {sym} fetch failed: {e}")
             continue
-        if not pts:
+        # Nov 19 2026: only trust the whole-chain series (the same one the PCR
+        # page plots). Before the first whole-chain reading exists the trend
+        # falls back to a different, nearby-strikes basis, and switching
+        # between the two bases looked like a "crossover" (reported 17 Nov,
+        # NIFTY/FINNIFTY at 09:26). The first minutes after the open are also
+        # noisy (OI still catching up, tiny volume), so stay quiet until the
+        # opening settles and always need at least two readings on the chart.
+        if trend.get("basis") != "whole_chain":
+            continue
+        pts = trend.get("points") or []
+        if len(pts) < 2:
             continue
         last = pts[-1]
+        if str(last.get("time") or "") < PCR_CROSS_START_IST:
+            continue
         oi_pcr, vol_pcr = last.get("pcr"), last.get("vol_pcr")
         if not oi_pcr or not vol_pcr:
             continue
