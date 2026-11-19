@@ -734,7 +734,7 @@ async def lifespan(app: FastAPI):
                 if not ((9, 15) <= (now.hour, now.minute) <= (15, 35)):
                     return
             from services.option_stealth_buildup import run_persist_tick
-            print(f"[OptionStealth] tick: {run_persist_tick(get_supabase())}")
+            print(f"[OptionStealth] tick: {run_persist_tick(get_supabase(), on_full=_stealth_store_full)}")
         except Exception as e:
             print(f"[OptionStealth] tick job failed: {e}")
     scheduler.add_job(_run_option_stealth_job, "cron", hour="9-15", minute="*/5", second=45, timezone="Asia/Kolkata", id="option_stealth_tick", max_instances=1, coalesce=True)
@@ -3890,26 +3890,49 @@ def option_stealth_buildup(date: str = None, zone: str = None, window: str = Non
     # cache -- 60s while the market is live (data only changes every 5 min),
     # 15 min when closed -- plus a lock so concurrent callers share ONE scan
     # instead of each starting their own.
-    key = (date, zone or DEFAULT_ZONE, window or DEFAULT_WINDOW, bool(adj))
+    # Nov 19 2026: ONE whole-market scan per (date, window, adj) answers every zone -- the zone is only a
+    # filter on each hit's distance from ATM. The 5-min background job keeps it warm, so a click on ATM / +-5 /
+    # +-10 / All is instant instead of starting its own 1-2 minute scan (the page gave up at 20s: "Failed to load").
+    want_zone = zone or DEFAULT_ZONE
+    key = (date, "all", window or DEFAULT_WINDOW, bool(adj))
     live = _market_hours_now()
-    ttl = 60 if live else 900
+    ttl = 330 if live else 900   # the background job refreshes every 5 min
     hit = _STEALTH_SCAN_CACHE.get(key)
     if hit:
         age = time.time() - hit[0]
         if age < ttl:
-            return hit[1]
+            return _stealth_zone_view(hit[1], want_zone)
         # Nov 16 2026: stale-while-revalidate. A full scan takes 15-20s, longer than the page's
         # patience at the open, so the page showed "Failed to load". While the market is live we
         # hand back the last good result at once (it carries its own ts_new, so the page shows the
         # data time) and refresh in the background.
         if live and age < 1800:
             _stealth_bg_refresh(key)
-            return hit[1]
+            return _stealth_zone_view(hit[1], want_zone)
     with _STEALTH_SCAN_LOCK:
         hit = _STEALTH_SCAN_CACHE.get(key)
         if hit and time.time() - hit[0] < ttl:
-            return hit[1]
-        return _stealth_compute_and_cache(key)
+            return _stealth_zone_view(hit[1], want_zone)
+        return _stealth_zone_view(_stealth_compute_and_cache(key), want_zone)
+
+def _stealth_zone_view(result, zone):
+    from services.option_stealth_buildup import filter_result_zone
+    return filter_result_zone(result, zone)
+
+def _stealth_store_full(window, full):
+    """Called by the 5-min background job with the whole-market result of each window. EOD is enriched first
+    (day range / last-hour read), in a side thread so the job itself is never held up; the cache only ever
+    receives the finished, enriched result."""
+    def _run():
+        try:
+            res = full
+            if window == "eod":
+                from services.option_stealth_buildup import enrich_intraday
+                res = enrich_intraday(get_supabase(), full)
+            _STEALTH_SCAN_CACHE[(None, "all", window, False)] = (time.time(), res)
+        except Exception as e:
+            print(f"[OptionStealth] cache warm failed for {window}: {e}")
+    _threading.Thread(target=_run, daemon=True).start()
 
 _STEALTH_BG_LOCK = _threading.Lock()
 _STEALTH_REFRESHING: set = set()
@@ -3963,7 +3986,7 @@ def option_stealth_buildup_run_now():
     def _bg():
         try:
             from services.option_stealth_buildup import run_persist_tick
-            print(f"[OptionStealth] manual tick: {run_persist_tick(get_supabase())}")
+            print(f"[OptionStealth] manual tick: {run_persist_tick(get_supabase(), on_full=_stealth_store_full)}")
         except Exception as e:
             print(f"[OptionStealth] manual tick failed: {e}")
     threading.Thread(target=_bg, daemon=True).start()

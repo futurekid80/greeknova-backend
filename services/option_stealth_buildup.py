@@ -486,16 +486,49 @@ def persist_scan_result(supabase, window: str, result: dict) -> int:
     return len(rows)
 
 
-def run_persist_tick(supabase) -> dict:
-    """Run all three windows once and persist hits. Safe to call repeatedly."""
+def filter_result_zone(result: dict, zone) -> dict:
+    """Nov 19 2026: cut a zone="all" scan result down to one strike zone. The zone is only a filter on each
+    hit's strikes_away (the scan applies the very same in_zone test per hit), so a zone="all" result filtered
+    here is identical to scanning that zone directly -- without paying for another full scan."""
+    if not isinstance(result, dict) or result.get("error") or not zone or zone == "all":
+        return result
+    hits = [h for h in (result.get("hits") or []) if in_zone(h.get("strikes_away"), zone)]
+    out = dict(result)
+    out["hits"] = hits
+    out["total"] = len(hits)
+    out["confluence_count"] = sum(1 for h in hits if h.get("is_confluence"))
+    out["zone"] = zone
+    return out
+
+
+def run_persist_tick(supabase, on_full=None) -> dict:
+    """Run all three windows once and persist hits. Safe to call repeatedly.
+
+    Nov 19 2026: each window is scanned ONCE for the whole market (zone "all"); the saved rows are that result
+    cut to PERSIST_ZONE (same rows as before) and the full result is handed to on_full(window, result) so the
+    page can answer any zone from it instantly instead of starting its own 1-2 minute scan. If anything in the
+    new path fails, the window falls back to the old single-zone scan."""
+    import time as _time
     out = {}
     for window in WINDOWS:
+        t0 = _time.time()
         try:
-            res = run_option_stealth_scan(supabase, None, PERSIST_ZONE, window)
+            try:
+                full = run_option_stealth_scan(supabase, None, "all", window)
+                res = filter_result_zone(full, PERSIST_ZONE)
+                if on_full and not full.get("error"):
+                    try:
+                        on_full(window, full)
+                    except Exception as e:
+                        print(f"[OptionStealth] on_full hook failed for {window}: {e}")
+            except Exception as e:
+                print(f"[OptionStealth] full-market scan failed for {window}, using saved zone only: {e}")
+                res = run_option_stealth_scan(supabase, None, PERSIST_ZONE, window)
             out[window] = persist_scan_result(supabase, window, res) if not res.get("error") else res["error"]
         except Exception as e:
             print(f"[OptionStealth] persist tick failed for {window}: {e}")
             out[window] = f"error: {e}"
+        print(f"[OptionStealth] {window} scan+persist took {_time.time() - t0:.1f}s")
     return out
 
 
