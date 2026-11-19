@@ -2798,6 +2798,17 @@ def auth_kite_login(body: KiteLoginRequest):
                 )
         except Exception as e:
             print(f"[KiteLogin] paid-login telegram notify skipped: {e}")
+        # Nov 19 2026: record the member's Zerodha ID / email the first time, and alert (never block) if the same
+        # member later logs in with a different Zerodha ID or email. See services/member_identity.py.
+        try:
+            from services.member_identity import record_member_identity
+            from services.alert_engine import send_telegram as _tg
+            _did = record_member_identity(admin, beta_row["email"], kite_email, kite_user_id, kite_user_name,
+                                          notify=lambda m: _tg(m, markdown=False))
+            if _did:
+                print(f"[KiteLogin] member identity: {beta_row['email']} {_did}")
+        except Exception as e:
+            print(f"[KiteLogin] member identity record skipped: {e}")
         try:
             if beta_row["email"] == kite_email:
                 admin.from_("beta_users").upsert({"email": kite_email, "name": kite_user_name or kite_email}).execute()
