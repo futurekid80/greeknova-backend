@@ -346,6 +346,57 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             if open_oi > 0:
                 fut_oi_chg_map_next[sym] = round((close_oi - open_oi) / open_oi * 100, 2)
 
+        # ── Nov 19 2026: measure OI change from YESTERDAY'S CLOSE, not from today's first reading ─────────
+        # The 09:15 reading is often incomplete, so open->close inflated the change (IDEA showed +62.9% where
+        # the true day-over-day change was +19%; MYFNO and brokers use previous close -> latest close).
+        # Baseline = previous trading day's stored closing OI for the same contract. If yesterday's near-month
+        # contract expired, yesterday's next-month contract is today's near month (and the next month falls back
+        # to the open reading). Anything missing falls back to the old open->close figure.
+        try:
+            from utils.market_calendar import get_prev_trading_day
+            from utils.oi_math import pct_vs_base, prev_close_baselines
+            _td = datetime.strptime(trade_date, "%Y-%m-%d").date()
+            _prev = get_prev_trading_day(_td).isoformat()
+            _prev_rows = {}
+            _lo = 0
+            while True:
+                _pr = supabase.from_("daily_oi_summary")\
+                    .select("symbol, fut_oi_close, fut_oi_close_next")\
+                    .eq("trade_date", _prev).range(_lo, _lo + 999).execute().data or []
+                for _r in _pr:
+                    _prev_rows[_r["symbol"]] = _r
+                if len(_pr) < 1000:
+                    break
+                _lo += 1000
+            _prev_exp_res = supabase.from_("oi_snapshots")\
+                .select("symbol, expiry")\
+                .eq("option_type", "FUT")\
+                .gte("timestamp", f"{_prev}T09:50:00+00:00")\
+                .lte("timestamp", f"{_prev}T10:05:00+00:00")\
+                .limit(1000).execute()
+            _prev_near_exp = {}
+            for _r in (_prev_exp_res.data or []):
+                _e = str(_r.get("expiry") or "")
+                if _e and (_r["symbol"] not in _prev_near_exp or _e < _prev_near_exp[_r["symbol"]]):
+                    _prev_near_exp[_r["symbol"]] = _e
+            _n_fix = 0
+            for _sym in list(fut_close_oi_map.keys()):
+                _pe = _prev_near_exp.get(_sym)
+                _rolled = bool(_pe) and _pe != fut_nearest_expiry.get(_sym)
+                if not _pe:
+                    continue  # cannot tell which contract yesterday's figure was; keep open->close
+                _nb, _xb = prev_close_baselines(_prev_rows.get(_sym), _rolled)
+                _v = pct_vs_base(fut_close_oi_map.get(_sym), _nb)
+                if _v is not None:
+                    fut_oi_chg_map[_sym] = _v
+                    _n_fix += 1
+                _vx = pct_vs_base(fut_close_oi_map_next.get(_sym), _xb)
+                if _vx is not None:
+                    fut_oi_chg_map_next[_sym] = _vx
+            print(f"[DAILY_OI_SUMMARY] OI change measured from previous close ({_prev}) for {_n_fix} symbols")
+        except Exception as _e:
+            print(f"[DAILY_OI_SUMMARY] previous-close baseline failed, keeping open->close: {_e}")
+
         # ── Add fut_vol, fut_oi_chg_pct (+next), fut_oi_close (+next), fut_signal ───
         # BUG FIX (Oct 9 2026): this loop used to run unconditionally and
         # always set row["fut_price_chg_pct"] etc, even when fut_open_res/
@@ -410,13 +461,25 @@ def compute_daily_summary(supabase, trade_date: str = None) -> dict:
             row["fut_oi_close"] = fut_close_oi_map.get(sym, None)
             row["fut_oi_close_next"] = fut_close_oi_map_next.get(sym, None)
             # Classify FUT signal — same logic as OI Buildup chart
-            if fut_oi >= 2.0 and price >= 0.3:
+            # Nov 19 2026: in rollover week (near expiry within 6 days) the near-month figure is mostly positions
+            # moving to the next series, so classify on near+next combined instead.
+            sig_oi = fut_oi
+            try:
+                _ne = fut_nearest_expiry.get(sym)
+                if _ne and (datetime.strptime(_ne, "%Y-%m-%d").date() - datetime.strptime(trade_date, "%Y-%m-%d").date()).days <= 6:
+                    from utils.oi_math import combined_oi_pct
+                    _c = combined_oi_pct(fut_close_oi_map.get(sym), fut_oi, fut_close_oi_map_next.get(sym), fut_oi_chg_map_next.get(sym))
+                    if _c is not None:
+                        sig_oi = _c
+            except Exception:
+                pass
+            if sig_oi >= 2.0 and price >= 0.3:
                 row["fut_signal"] = "LONG_BUILDUP"
-            elif fut_oi >= 2.0 and price <= -0.3:
+            elif sig_oi >= 2.0 and price <= -0.3:
                 row["fut_signal"] = "SHORT_BUILDUP"
-            elif fut_oi <= -2.0 and price >= 0.3:
+            elif sig_oi <= -2.0 and price >= 0.3:
                 row["fut_signal"] = "SHORT_COVERING"
-            elif fut_oi <= -2.0 and price <= -0.3:
+            elif sig_oi <= -2.0 and price <= -0.3:
                 row["fut_signal"] = "LONG_UNWINDING"
             else:
                 row["fut_signal"] = "NEUTRAL"

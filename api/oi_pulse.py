@@ -517,7 +517,12 @@ def _get_eod_pulse(supabase):
         price_chg = round(float(r.get("price_chg_pct") or 0), 2)
         ltp = cmp_map.get(sym, 0)
         is_index = sym in INDEX_NSE_MAP
-        signal, label, color, bg, border = classify(oi_chg, price_chg)
+        # Nov 19 2026: when the near month is being drained by rollover and the two months combined point the other
+        # way, label the stock by the combined direction (near month alone would call it unwinding).
+        _sig_oi = oi_chg
+        if fut_oi_chg_combined is not None and (oi_chg > 0) != (fut_oi_chg_combined > 0):
+            _sig_oi = fut_oi_chg_combined
+        signal, label, color, bg, border = classify(_sig_oi, price_chg)
         today_vol = int(r.get("fut_vol") or 0)
         avg_vol = avg_vol_map.get(sym, 0)
         vol_ratio = round(today_vol / avg_vol, 2) if avg_vol > 0 else None

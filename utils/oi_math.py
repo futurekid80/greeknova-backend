@@ -22,3 +22,26 @@ def combined_oi_pct(now_near, pct_near, now_next, pct_next):
         return round((now_near + now_next) / prev * 100 - 100, 2)
     except Exception:
         return None
+
+
+def pct_vs_base(now, base):
+    """% change of `now` against `base`; None when either is missing or base is not positive."""
+    try:
+        if now is None or base is None or float(base) <= 0:
+            return None
+        return round((float(now) - float(base)) / float(base) * 100, 2)
+    except Exception:
+        return None
+
+
+def prev_close_baselines(prev_row, rolled):
+    """(near_base, next_base) = yesterday's closing OI for the series that is the near / next month TODAY.
+    prev_row: yesterday's daily_oi_summary row (fut_oi_close, fut_oi_close_next) or None.
+    rolled: True when yesterday's near-month contract expired, so yesterday's next-month contract is today's
+    near month and today's next month has no stored baseline (returns None for it)."""
+    if not prev_row:
+        return None, None
+    near, nxt = prev_row.get("fut_oi_close"), prev_row.get("fut_oi_close_next")
+    if rolled:
+        return nxt, None
+    return near, nxt

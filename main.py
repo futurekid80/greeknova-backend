@@ -3667,7 +3667,8 @@ def stock_intel(symbol: str):
             _next_raw = _fut_row.get("fut_oi_chg_pct_next")
             _oi_next = float(_next_raw) if _next_raw is not None else None
             _oi_now = float(_fut_row.get("fut_oi_chg_pct") or 0)
-            _fut_row["fut_oi_chg_pct_combined"] = round(_oi_now + _oi_next, 2) if _oi_next is not None else None
+            from utils.oi_math import combined_oi_pct
+            _fut_row["fut_oi_chg_pct_combined"] = combined_oi_pct(_fut_row.get("fut_oi_close"), _oi_now, _fut_row.get("fut_oi_close_next"), _oi_next)
         result["fut_signal"] = _fut_row
     except:
         result["fut_signal"] = None
