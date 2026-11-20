@@ -643,6 +643,10 @@ async def lifespan(app: FastAPI):
                 from services.fut_oi_final import run_fut_oi_final
                 from utils.db import get_supabase as _gs2
                 run_fut_oi_final(_gs2(), start=os.getenv("FUT_OI_FINAL_START", "2026-10-14"), dry_run=(_fo_mode != "write"))
+                if _fo_mode == "write":
+                    # Nov 20 2026: drop every saved/in-memory copy of the old numbers so screens rebuild from the corrected rows.
+                    from services.fut_oi_final import refresh_eod_caches
+                    refresh_eod_caches(_gs2())
             except Exception as _e:
                 import traceback; traceback.print_exc()
                 print(f"[fut_oi_final] failed: {_e}")
