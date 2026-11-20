@@ -566,13 +566,22 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
             today_oi_combined = round(today_oi + today_oi_next, 2) if today_oi_next is not None else None
             # Nov 3 2026: outer gate widened 1.0 -> 1.5 so the WATCH band (price up to 1.5%) is reachable; the old
             # capped list / summary count below still only use |price| <= 1.0, so existing cards and counts don't change.
-            if today_oi > 0 and abs(today_price) <= 1.5:
+            # Nov 20 2026: rollover week. Near-month OI drains into next month, so with NSE's final figures the near
+            # month alone is negative for almost every stock and nothing could qualify. When the near month is
+            # draining hard (-5% or worse), judge on the OI-weighted near + next month change instead.
+            _gate_oi = today_oi
+            if today_oi <= -5 and today_oi_next is not None:
+                from utils.oi_math import combined_oi_pct
+                _c = combined_oi_pct(today_oi_abs, today_oi, today_oi_abs_next, today_oi_next)
+                if _c is not None:
+                    _gate_oi = _c
+            if _gate_oi > 0 and abs(today_price) <= 1.5:
                 if True:
-                    if today_oi >= 2.0 and abs(today_price) <= 0.5:
+                    if _gate_oi >= 2.0 and abs(today_price) <= 0.5:
                         tier, tier_label = "ELITE", "Elite"
-                    elif today_oi >= 1.5 and abs(today_price) <= 1.0:
+                    elif _gate_oi >= 1.5 and abs(today_price) <= 1.0:
                         tier, tier_label = "STRONG", "Strong"
-                    elif today_oi >= 1.0 and abs(today_price) <= 1.5:
+                    elif _gate_oi >= 1.0 and abs(today_price) <= 1.5:
                         tier, tier_label = "WATCH", "Watch"
                     else:
                         tier, tier_label = None, None
@@ -583,7 +592,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                                 "tier": tier,
                                 "tier_label": tier_label,
                                 "rank": 0,
-                                "today_oi_chg": round(today_oi, 2),
+                                "today_oi_chg": round(_gate_oi, 2),
                                 "next_month_oi_chg": round(today_oi_next, 2) if today_oi_next is not None else None,
                                 "combined_oi_chg": today_oi_combined,
                                 "today_oi_abs": today_oi_abs,
