@@ -480,11 +480,25 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                 avg_5d_ctx = sum(hist_vols_ctx) / len(hist_vols_ctx) if hist_vols_ctx else 0
                 vol_ratio_ctx = round(today_vol_amt / avg_5d_ctx, 2) if avg_5d_ctx > 0 else None
 
+        # Nov 20 2026: rollover week. Show the near + next month OI change (what the buildup tag is judged on) when the
+        # near month alone is draining hard, so the number matches the tag.
+        _show_oi = float(pi.get("latest_fut_oi_chg") or 0)
+        if _show_oi <= -5 and history:
+            try:
+                from utils.oi_math import combined_oi_pct
+                _h = history[-1]
+                _c = combined_oi_pct(_h.get("fut_oi_close"), _h.get("fut_oi_chg_pct"),
+                                     _h.get("fut_oi_close_next"), _h.get("fut_oi_chg_pct_next"))
+                if _c is not None:
+                    _show_oi = _c
+            except Exception:
+                pass
+
         base = {
             "symbol": sym,
             "cmp": round(cmp, 2),
             "latest_signal": latest_signal,
-            "latest_fut_oi_chg": round(float(pi.get("latest_fut_oi_chg") or 0), 2),
+            "latest_fut_oi_chg": round(_show_oi, 2),
             "latest_price_chg": round(float(pi.get("latest_price_chg") or 0), 2),
             "cpr_position": cpr_position,
             "cpr_width_label": cpr.get("width_label"),
