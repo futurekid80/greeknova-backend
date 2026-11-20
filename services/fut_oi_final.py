@@ -15,7 +15,10 @@ buildup tags would flip.
 import time
 from datetime import datetime, timedelta
 
+import os
+
 from services.fut_history_backfill import _fo_rows, _f, _oi_pct, _signal
+from utils.oi_math import combined_oi_pct
 
 
 ROLLOVER_DAYS = 6  # calendar days before near-month expiry (expiry Tuesday: Wed..Tue sessions)
@@ -46,14 +49,23 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
             continue
         # Rollover week: near-month OI drains as traders roll into the next series. NSE's day-over-day change then
         # reads as 'unwinding/covering', which is rollover, not conviction. Leave those days as stored.
+        # Nov 20 2026: FUT_OI_FINAL_ROLLOVER = "dry" (log only) or "write" also brings NSE's final near and next-month
+        # OI into rollover-week days (our last live reading differs from MYFNO / NSE there). The buildup label is then
+        # worked out on near + next month combined, never on the near month alone. Unset = old behaviour (skip).
+        _roll_mode = os.getenv("FUT_OI_FINAL_ROLLOVER", "").strip().lower()
+        _rollover_day = False
         try:
             _exp = min(datetime.strptime(v[0].get("XpryDt", "")[:10], "%Y-%m-%d").date() for v in fo.values() if v)
             if (_exp - d).days <= ROLLOVER_DAYS:
-                print(f"[fut_oi_final] {d}: rollover week (near expiry {_exp}); left as stored")
-                d += timedelta(days=1)
-                continue
+                if _roll_mode not in ("dry", "write"):
+                    print(f"[fut_oi_final] {d}: rollover week (near expiry {_exp}); left as stored")
+                    d += timedelta(days=1)
+                    continue
+                _rollover_day = True
+                print(f"[fut_oi_final] {d}: rollover week (near expiry {_exp}); final-OI mode={_roll_mode}")
         except Exception as _e:
             print(f"[fut_oi_final] {d}: could not read expiry ({_e}); continuing")
+        _day_dry = dry_run or (_rollover_day and _roll_mode != "write")
         rows, lo = [], 0
         while True:
             res = supabase.from_("daily_oi_summary").select(
@@ -64,7 +76,7 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
                 break
             lo += 1000
         n = ch = g1 = g3 = g10 = flips = s_in = s_out = 0
-        examples, updates = [], []
+        examples, updates, comb_gaps = [], [], []
         for r in rows:
             futs = fo.get(r["symbol"].upper()) or []
             if not futs:
@@ -83,7 +95,16 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
                 if gap > 1: g1 += 1
                 if gap > 3: g3 += 1
                 if gap > 10: g10 += 1
-            new_sig = _signal(new_chg, price) if price is not None else r.get("fut_signal")
+            if _rollover_day:
+                _nn = _oi_pct(n1) if n1 is not None else None
+                _n1c = _f(n1.get("OpnIntrst")) if n1 is not None else None
+                new_comb = combined_oi_pct(new_close, new_chg, _n1c, _nn)
+                old_comb = combined_oi_pct(old_close, old_chg, _f(r.get("fut_oi_close_next")), _f(r.get("fut_oi_chg_pct_next")))
+                if new_comb is not None and old_comb is not None:
+                    comb_gaps.append((abs(new_comb - old_comb), r["symbol"], old_comb, new_comb))
+                new_sig = _signal(new_comb, price) if (new_comb is not None and price is not None) else r.get("fut_signal")
+            else:
+                new_sig = _signal(new_chg, price) if price is not None else r.get("fut_signal")
             old_sig = r.get("fut_signal")
             if new_sig != old_sig:
                 flips += 1
@@ -104,10 +125,17 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
               f"signal_flips={flips} stealth_in={s_in} stealth_out={s_out}")
         for e in examples:
             print(f"[fut_oi_final]    e.g. {e}")
+        if _rollover_day and comb_gaps:
+            comb_gaps.sort(reverse=True)
+            print(f"[fut_oi_final] {d}: combined OI change, stored vs NSE final: {sum(1 for g in comb_gaps if g[0] > 2)} of "
+                  f"{len(comb_gaps)} stocks differ by more than 2 points; median gap "
+                  f"{sorted(g[0] for g in comb_gaps)[len(comb_gaps)//2]:.1f}")
+            for g in comb_gaps[:12]:
+                print(f"[fut_oi_final]    gap {g[1]}: stored {g[2]}% -> final {g[3]}%")
         for k, v in (("rows", n), ("changed", ch), ("gt1", g1), ("gt3", g3), ("gt10", g10),
                      ("sig_flips", flips), ("stealth_in", s_in), ("stealth_out", s_out)):
             tot[k] += v
-        if not dry_run:
+        if not _day_dry:
             for sym, upd in updates:
                 supabase.from_("daily_oi_summary").update(upd).eq("trade_date", d.isoformat()).eq("symbol", sym).execute()
         d += timedelta(days=1)
