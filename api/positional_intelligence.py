@@ -439,6 +439,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
     series_buildup = []
 
     SYMBOLS = list(pi_data.keys()) if pi_data else list(sym_history.keys())
+    _roll_n = 0  # stocks whose near month is draining hard (rollover week marker)
 
     for sym in SYMBOLS:
         pi = pi_data.get(sym, {})
@@ -484,6 +485,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
         # near month alone is draining hard, so the number matches the tag.
         _show_oi = float(pi.get("latest_fut_oi_chg") or 0)
         if _show_oi <= -5 and history:
+            _roll_n += 1
             try:
                 from utils.oi_math import combined_oi_pct
                 _h = history[-1]
@@ -743,6 +745,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
         "series_start": series_start,
         "total_trading_days": max((p.get("total_days", 0) for p in pi_data.values()), default=0),
         "date": today_str,
+        "rollover_week": _roll_n >= max(20, int(0.15 * max(len(SYMBOLS), 1))),
         "active_conviction": active_conviction,
         "stealth_all": stealth_all,
         "stealth_buildup": stealth_buildup,  # already tier-capped (12 ELITE + 8 STRONG + 5 WATCH) above
