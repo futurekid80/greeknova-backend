@@ -608,7 +608,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                                 "rank": 0,
                                 "today_oi_chg": round(_gate_oi, 2),
                                 "next_month_oi_chg": round(today_oi_next, 2) if today_oi_next is not None else None,
-                                "combined_oi_chg": today_oi_combined,
+                                "combined_oi_chg": round(_gate_oi, 2) if _gate_oi != today_oi else today_oi_combined,
                                 "today_oi_abs": today_oi_abs,
                                 "next_month_oi_abs": today_oi_abs_next,
                                 "price_chg": round(today_price, 2),
