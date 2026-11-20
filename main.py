@@ -988,6 +988,23 @@ async def lifespan(app: FastAPI):
         replace_existing=True
     )
 
+    def _run_sector_daily_job():
+        # Nov 20 2026: nightly sector snapshot (history only, not shown to members). Failure-safe.
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            d = today_ist()
+            if not is_trading_day(d):
+                return
+            from services.sector_daily import run_sector_daily
+            run_sector_daily(get_supabase(), d.isoformat())
+        except Exception as e:
+            print(f"[SectorDaily] failed: {e}")
+
+    scheduler.add_job(
+        _run_sector_daily_job, "cron", hour=17, minute=5, timezone="Asia/Kolkata",
+        id="sector_daily", misfire_grace_time=900, replace_existing=True, max_instances=1, coalesce=True
+    )
+
     scheduler.add_job(
         save_eod_signal_log,
         "cron", hour=15, minute=35, timezone="Asia/Kolkata", id="eod_signal_save",
@@ -1261,6 +1278,25 @@ def health(): return {"status": "ok"}
 # TEMP DEBUG (Sep 17 2026) -- audit endpoint to dump the true live F&O
 # universe for reconciling it against the frontend/sector-map lists.
 # Safe to delete after the audit is done.
+@app.get("/admin/sector-daily/backfill")
+def admin_sector_daily_backfill(start: str = "2026-10-30", end: str = None):
+    """One-off: build sector_daily rows for past trading days (Strike Stealth history starts 30 Oct 2026)."""
+    from datetime import datetime as _d, timedelta as _td
+    from utils.market_calendar import is_trading_day, today_ist
+    from services.sector_daily import run_sector_daily
+    d = _d.strptime(start, "%Y-%m-%d").date()
+    e = _d.strptime(end, "%Y-%m-%d").date() if end else today_ist()
+    done = []
+    while d <= e:
+        if d.weekday() < 5 and is_trading_day(d):
+            try:
+                done.append({"date": d.isoformat(), "rows": run_sector_daily(get_supabase(), d.isoformat())})
+            except Exception as ex:
+                done.append({"date": d.isoformat(), "error": str(ex)})
+        d += _td(days=1)
+    return {"days": done}
+
+
 @app.get("/admin/live-symbols-debug")
 def live_symbols_debug():
     from api.iv_analysis import SYMBOLS
@@ -1797,9 +1833,9 @@ if __name__ == "__main__":
     uvicorn.run("backend.main:app", host="0.0.0.0", port=8000, reload=False)
 
 @app.get("/pcr-trend/{symbol}")
-def pcr_trend(symbol: str = "NIFTY", expiry: str = None):
+def pcr_trend(symbol: str = "NIFTY", expiry: str = None, last_session: int = 0):
     from api.pcr_trend import get_pcr_trend
-    return get_pcr_trend(symbol.upper(), expiry)
+    return get_pcr_trend(symbol.upper(), expiry, bool(last_session))
 
 @app.post("/pcr-daily/run-now")
 def pcr_daily_run_now():

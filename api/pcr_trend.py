@@ -1,18 +1,36 @@
 from utils.db import get_supabase
 from datetime import datetime, timezone, date as date_type
 
-def _whole_chain_trend(supabase, symbol: str, expiry: str = None):
-    """Nov 11 2026: today's whole-chain (every strike) PCR points from pcr_intraday, or None if there are none yet."""
+def _whole_chain_trend(supabase, symbol: str, expiry: str = None, last_session: bool = False):
+    """Nov 11 2026: today's whole-chain (every strike) PCR points from pcr_intraday, or None if there are none yet.
+    Nov 20 2026: with last_session=True, when today has no points yet (before the open, weekends, holidays) use the
+    most recent session's points instead, so the Pulse card keeps showing the same whole-chain figure as the
+    evening before rather than dropping to the narrower near-ATM figure."""
     try:
         from datetime import timedelta
         d = (datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)).date().isoformat()
-        q = supabase.from_("pcr_intraday").select("ts,expiry,ce_oi,pe_oi,ce_vol,pe_vol,pcr,vol_pcr,strikes") \
-            .eq("trade_date", d).eq("symbol", symbol).order("ts", desc=False).limit(5000)
-        rows = q.execute().data or []
+        def _day_rows(day):
+            return supabase.from_("pcr_intraday").select("ts,expiry,ce_oi,pe_oi,ce_vol,pe_vol,pcr,vol_pcr,strikes") \
+                .eq("trade_date", day).eq("symbol", symbol).order("ts", desc=False).limit(5000).execute().data or []
+        _today = d
+        _used_last = False
+        rows = _day_rows(d)
+        if not rows and last_session:
+            last = supabase.from_("pcr_intraday").select("trade_date").eq("symbol", symbol) \
+                .lt("trade_date", d).order("trade_date", desc=True).limit(1).execute().data or []
+            if last:
+                d = last[0]["trade_date"]
+                rows = _day_rows(d)
+                _used_last = True
         if not rows:
             return None
         if not expiry:
-            expiry = sorted({r["expiry"] for r in rows})[0]
+            _exps = sorted({r["expiry"] for r in rows})
+            if _used_last:
+                # the nearest expiry from a past session may have expired since; use the nearest one still live
+                _live = [e for e in _exps if str(e) >= _today]
+                _exps = _live or _exps
+            expiry = _exps[0]
         rows = [r for r in rows if r["expiry"] == expiry]
         if not rows:
             return None
@@ -29,9 +47,9 @@ def _whole_chain_trend(supabase, symbol: str, expiry: str = None):
         return None
 
 
-def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None):
+def get_pcr_trend(symbol: str = "NIFTY", expiry: str = None, last_session: bool = False):
     supabase = get_supabase()
-    _wc = _whole_chain_trend(supabase, symbol, expiry)
+    _wc = _whole_chain_trend(supabase, symbol, expiry, last_session)
     if _wc:
         return _wc
     today = datetime.now(timezone.utc).strftime('%Y-%m-%d')
