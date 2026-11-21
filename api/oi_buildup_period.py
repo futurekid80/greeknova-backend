@@ -159,8 +159,20 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     except Exception as e:
         print(f"[OIBuildup] Rollover check failed (non-fatal, near-month basis used): {e}")
 
-    if period == "monthly" and series_start:
+    # Nov 22 2026: first days of a new series. Right after expiry the new series has too few trading days for
+    # these views, so they would be blank for days. In that window the view bridges across the expiry using
+    # near + next month combined (rollover-neutral), so fetch a normal look-back instead of series-start only.
+    recent_series = False
+    try:
+        recent_series = bool(series_start) and 0 <= (today - datetime.strptime(series_start, "%Y-%m-%d").date()).days <= 10
+    except Exception:
+        recent_series = False
+    any_bridge = False
+
+    if period == "monthly" and series_start and not recent_series:
         lookback_start = series_start
+    elif period == "monthly" and recent_series:
+        lookback_start = (today - timedelta(days=32)).isoformat()  # ~21 trading days, stays under the row limit
     else:
         lookback_start = (today - timedelta(days=int(days * 4.4) + 7)).isoformat()
 
@@ -213,8 +225,15 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
             # two different contracts.
             window = same_series_rows[-days:]
             min_days = 2
+        bridged = False
         if len(window) < min_days:
-            continue
+            if not recent_series:
+                continue
+            window = rows_sorted[-(PERIOD_DAYS["monthly"] if period == "monthly" else days):]
+            if len(window) < min_days:
+                continue
+            bridged = True
+            any_bridge = True
 
         # BUG FIX (Oct 18 2026): reverting the Oct 15 2026 change above.
         # fut_price_chg_pct is each day's FUT open->close move only, so
@@ -239,7 +258,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         cumulative_oi_pct = round((oi_factor - 1) * 100, 2)
         cumulative_price_pct = round((price_factor - 1) * 100, 2)
 
-        if rollover:
+        if rollover or bridged:
             # Change in TOTAL (near + next) closing OI: end of the window vs the day before it. When the window
             # starts on the first day of the series, the day before belongs to the expired contract, so that
             # first day's own close is the baseline and the price move is counted from the day after it.
@@ -262,7 +281,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
                     return None
 
             first_idx = rows_sorted.index(window[0])
-            if first_idx > 0 and (not series_start or rows_sorted[first_idx - 1]["trade_date"] >= series_start):
+            if first_idx > 0 and (bridged or not series_start or rows_sorted[first_idx - 1]["trade_date"] >= series_start):
                 base_row, calc_rows = rows_sorted[first_idx - 1], window
             else:
                 base_row, calc_rows = window[0], window[1:]
@@ -336,6 +355,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         "trading_days": days,
         "total": len(results),
         "rollover_week": rollover,
+        "series_bridge": any_bridge,
         "results": results[:30],
         "long_bias": sum(1 for r in results if r["signal_type"] == "LONG_BUILDUP"),
         "short_bias": sum(1 for r in results if r["signal_type"] == "SHORT_BUILDUP"),
