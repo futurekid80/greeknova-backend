@@ -240,9 +240,9 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         cumulative_price_pct = round((price_factor - 1) * 100, 2)
 
         if rollover:
-            # Total (near + next) closing OI at the end of the window vs the day before the window. When the
-            # window starts on the first day of the series, the day before belongs to the expired contract, so
-            # the first day's own close is the baseline and the price move is counted from the day after it.
+            # Change in TOTAL (near + next) closing OI: end of the window vs the day before it. When the window
+            # starts on the first day of the series, the day before belongs to the expired contract, so that
+            # first day's own close is the baseline and the price move is counted from the day after it.
             def _tot(row):
                 n, x = row.get("fut_oi_close"), row.get("fut_oi_close_next")
                 if n is None or x is None:
@@ -250,15 +250,39 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
                 n, x = float(n), float(x)
                 return n + x if n > 0 and x > 0 else None
 
+            def _implied_prev(row):
+                # yesterday's total OI as implied by today's own close and % changes
+                try:
+                    n, x = float(row["fut_oi_close"]), float(row["fut_oi_close_next"])
+                    pn, px = float(row["fut_oi_chg_pct"]), float(row["fut_oi_chg_pct_next"])
+                    if n <= 0 or x <= 0 or pn <= -100 or px <= -100:
+                        return None
+                    return n / (1 + pn / 100) + x / (1 + px / 100)
+                except Exception:
+                    return None
+
             first_idx = rows_sorted.index(window[0])
-            prev_row = rows_sorted[first_idx - 1] if first_idx > 0 else None
-            if prev_row is not None and (not series_start or prev_row["trade_date"] >= series_start):
-                base_row, calc_rows = prev_row, window
+            if first_idx > 0 and (not series_start or rows_sorted[first_idx - 1]["trade_date"] >= series_start):
+                base_row, calc_rows = rows_sorted[first_idx - 1], window
             else:
                 base_row, calc_rows = window[0], window[1:]
-            base_tot, end_tot = _tot(base_row), _tot(window[-1])
-            if not base_tot or not end_tot or not calc_rows:
+            if not calc_rows:
                 continue
+            base_tot, end_tot = _tot(base_row), _tot(window[-1])
+            if not end_tot:
+                continue
+            # Guard against a single bad stored close (IDEA 13 Nov held ~1.7B instead of ~6B, which showed a
+            # fake +189%): if the baseline disagrees with what the next day's own % change implies by more
+            # than 25%, trust the implied figure; if the last close disagrees with the day before it, skip.
+            imp = _implied_prev(calc_rows[0])
+            if imp and (not base_tot or abs(base_tot / imp - 1) > 0.25):
+                base_tot = imp
+            if not base_tot:
+                continue
+            if len(window) >= 2:
+                prev_tot, last_imp = _tot(window[-2]), _implied_prev(window[-1])
+                if prev_tot and last_imp and abs(prev_tot / last_imp - 1) > 0.25 and abs(end_tot / last_imp - 1) > 0.25:
+                    continue
             cumulative_oi_pct = round((end_tot / base_tot - 1) * 100, 2)
             price_factor = 1.0
             for r in calc_rows:
