@@ -146,6 +146,19 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
     except Exception as e:
         print(f"[OIBuildup] Series start lookup failed, falling back to rolling window: {e}")
 
+    # Nov 21 2026: rollover week. In the last days before near-month expiry, near-month OI drains into the
+    # next month, so a near-only cumulative OI change reads as huge unwinding / short covering on almost every
+    # stock (seen live: 84% short covering, 1 short buildup). The honest measure then is the change in near +
+    # next month OI together. Outside rollover week nothing changes.
+    rollover = False
+    try:
+        from services.fut_oi_final import ROLLOVER_DAYS
+        from api.positional_radar import get_current_expiry as _gce
+        _exp = datetime.strptime(_gce(today), "%Y-%m-%d").date()
+        rollover = 0 <= (_exp - today).days <= ROLLOVER_DAYS
+    except Exception as e:
+        print(f"[OIBuildup] Rollover check failed (non-fatal, near-month basis used): {e}")
+
     if period == "monthly" and series_start:
         lookback_start = series_start
     else:
@@ -153,7 +166,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
 
     try:
         rows_res = supabase.from_("daily_oi_summary") \
-            .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price, fut_vol") \
+            .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price, fut_vol, fut_oi_close, fut_oi_close_next") \
             .gte("trade_date", lookback_start) \
             .order("trade_date", desc=False) \
             .limit(10000).execute()
@@ -226,6 +239,32 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         cumulative_oi_pct = round((oi_factor - 1) * 100, 2)
         cumulative_price_pct = round((price_factor - 1) * 100, 2)
 
+        if rollover:
+            # Total (near + next) closing OI at the end of the window vs the day before the window. When the
+            # window starts on the first day of the series, the day before belongs to the expired contract, so
+            # the first day's own close is the baseline and the price move is counted from the day after it.
+            def _tot(row):
+                n, x = row.get("fut_oi_close"), row.get("fut_oi_close_next")
+                if n is None or x is None:
+                    return None
+                n, x = float(n), float(x)
+                return n + x if n > 0 and x > 0 else None
+
+            first_idx = rows_sorted.index(window[0])
+            prev_row = rows_sorted[first_idx - 1] if first_idx > 0 else None
+            if prev_row is not None and (not series_start or prev_row["trade_date"] >= series_start):
+                base_row, calc_rows = prev_row, window
+            else:
+                base_row, calc_rows = window[0], window[1:]
+            base_tot, end_tot = _tot(base_row), _tot(window[-1])
+            if not base_tot or not end_tot or not calc_rows:
+                continue
+            cumulative_oi_pct = round((end_tot / base_tot - 1) * 100, 2)
+            price_factor = 1.0
+            for r in calc_rows:
+                price_factor *= (1 + float(r.get("price_chg_pct") or 0) / 100)
+            cumulative_price_pct = round((price_factor - 1) * 100, 2)
+
         if abs(cumulative_oi_pct) < 2.0:
             continue
 
@@ -272,6 +311,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
         "period": period,
         "trading_days": days,
         "total": len(results),
+        "rollover_week": rollover,
         "results": results[:30],
         "long_bias": sum(1 for r in results if r["signal_type"] == "LONG_BUILDUP"),
         "short_bias": sum(1 for r in results if r["signal_type"] == "SHORT_BUILDUP"),
