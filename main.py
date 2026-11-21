@@ -977,6 +977,15 @@ async def lifespan(app: FastAPI):
         # depends on), but nothing was clearing Positional Intelligence's
         # 1-hour post-market cache afterward -- so Volume could show
         # missing for up to an hour even after the real data existed.
+        # Nov 21 2026: only on trading days. On a weekend or holiday this cron used to recompute the LAST session from
+        # raw snapshots and overwrite the corrected NSE final-OI rows that the nightly job had written.
+        try:
+            from utils.market_calendar import is_trading_day, today_ist
+            if not is_trading_day(today_ist()):
+                print("[DAILY_OI_SUMMARY] not a trading day; skipped (keeps the final-OI rows)")
+                return
+        except Exception as e:
+            print(f"[DAILY_OI_SUMMARY] calendar check failed ({e}); continuing")
         compute_daily_summary(get_supabase())
         try:
             from api.positional_intelligence import clear_positional_intelligence_cache
