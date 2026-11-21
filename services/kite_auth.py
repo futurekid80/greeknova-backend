@@ -196,12 +196,22 @@ def _do_login(api_key: str = None, api_secret: str = None, label: str = "main") 
     return kite
 
 
+def scripted_login_enabled() -> bool:
+    """Nov 21 2026: the scripted password+TOTP login is switched OFF unless KITE_SCRIPTED_LOGIN=1 on the server.
+    Zerodha answers it with a CAPTCHA ("Invalid CAPTCHA values"), so every attempt failed and only added pointless,
+    repeated hits on Zerodha's login. Logging in through app.greeknova.com (the real Zerodha login) is the way."""
+    return os.getenv("KITE_SCRIPTED_LOGIN", "").strip() == "1"
+
+
 def auto_login(max_retries: int = 3, retry_delay: int = 30) -> object:
     """
     Fully automated login with retry logic.
     Retries up to max_retries times with retry_delay seconds between attempts.
     This makes startup login bulletproof against transient network issues.
     """
+    if not scripted_login_enabled():
+        raise Exception("Scripted Zerodha login is switched off; log in through app.greeknova.com")
+
     last_error = None
 
     for attempt in range(1, max_retries + 1):

@@ -548,6 +548,8 @@ async def lifespan(app: FastAPI):
             print(f"[Push] Scheduled check failed: {e}")
     scheduler.add_job(_run_push_checks_job, "interval", minutes=5, id="push_checks")
     scheduler.add_job(auto_refresh_token, "cron", hour=8, minute=30, timezone="Asia/Kolkata", id="token_refresh")
+    scheduler.add_job(kite_login_reminder, "cron", hour=8, minute=15, timezone="Asia/Kolkata", id="kite_login_reminder", max_instances=1, coalesce=True)
+    scheduler.add_job(kite_login_missed_alert, "cron", hour=8, minute=45, timezone="Asia/Kolkata", id="kite_login_missed_alert", max_instances=1, coalesce=True)
     scheduler.add_job(kite_login_nudge, "cron", hour=9, minute=5, timezone="Asia/Kolkata", id="kite_login_nudge", max_instances=1, coalesce=True)
 
     def _run_fno_universe_refresh_job():
@@ -2166,6 +2168,10 @@ def auto_refresh_token():
     if now.weekday() >= 5: return
     from utils.market_calendar import is_trading_day
     if not is_trading_day(now.date()): return
+    from services.kite_auth import scripted_login_enabled
+    if not scripted_login_enabled():
+        print("🔐 Railway auto-login skipped: scripted login is switched off (log in via app.greeknova.com)")
+        return
     print(f"🔐 Railway auto-login at {now.strftime('%H:%M IST')}...")
     try:
         from services.kite_auth import auto_login, get_token_from_supabase
@@ -2211,6 +2217,44 @@ def kite_login_nudge():
         print("[KiteNudge] Telegram sent")
     except Exception as e:
         print(f"[KiteNudge] failed: {e}")
+
+_KITE_ALERT_SENT = {}
+
+def _kite_token_alert(kind: str, text: str):
+    """Nov 21 2026: Telegram reminders at 8:15 and 8:45 IST on trading days, only if no Kite data token is saved yet
+    today (once per kind per day). The 9:05 nudge above stays as the last call."""
+    from datetime import datetime
+    import pytz
+    now = datetime.now(pytz.timezone('Asia/Kolkata'))
+    if now.weekday() >= 5: return
+    from utils.market_calendar import is_trading_day
+    if not is_trading_day(now.date()): return
+    if _KITE_ALERT_SENT.get(kind) == now.date(): return
+    try:
+        from services.kite_auth import get_token_from_supabase
+        if get_token_from_supabase():
+            print(f"[KiteAlert:{kind}] token present, no message")
+            return
+        from services.alert_engine import send_telegram
+        if send_telegram(text, markdown=False):
+            _KITE_ALERT_SENT[kind] = now.date()
+            print(f"[KiteAlert:{kind}] Telegram sent")
+    except Exception as e:
+        print(f"[KiteAlert:{kind}] failed: {e}")
+
+def kite_login_reminder():
+    _kite_token_alert(
+        "reminder",
+        "Good morning. Please log in with Zerodha so today's data is ready before the open:\n"
+        "https://app.greeknova.com/login (tap Login with Zerodha)."
+    )
+
+def kite_login_missed_alert():
+    _kite_token_alert(
+        "missed",
+        "GreekNova: data session is still NOT connected. Market opens in 30 minutes.\n"
+        "Please log in now: https://app.greeknova.com/login (tap Login with Zerodha)."
+    )
 
 @app.get("/admin/complete-kite-login")
 def admin_complete_kite_login(request_token: str):
