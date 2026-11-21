@@ -166,6 +166,10 @@ def _resolve_eod_trade_date(now_ist):
             check -= timedelta(days=1)
             while check.weekday() >= 5:
                 check -= timedelta(days=1)
+    # Nov 21 2026: a Saturday/Sunday is never a session. After 3:40 PM on a weekend this used to resolve to the weekend
+    # date itself, which saved an empty snapshot over Friday's signals.
+    while check.weekday() >= 5:
+        check -= timedelta(days=1)
     return check.isoformat()
 
 def _get_eod_from_summary(supabase, now_ist):
