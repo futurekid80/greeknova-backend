@@ -5052,6 +5052,15 @@ def admin_members_overview(request: Request):
         return JSONResponse({"error": "Not authorized"}, status_code=403)
     return members_overview(get_supabase())
 
+@app.get("/admin/sector-intel")
+def admin_sector_intel(request: Request, refresh: int = 0):
+    # Nov 22 2026 experiment: admin-only sector accumulation / turning read. Not linked for members.
+    from services.admin_members import verify_admin
+    if not verify_admin(request.headers.get("authorization", "")):
+        return JSONResponse({"error": "Not authorized"}, status_code=403)
+    from services.sector_intel import compute
+    return compute(get_supabase(), force=bool(refresh))
+
 @app.post("/waitlist-join")
 async def waitlist_join(request: Request):
     body = await request.json()
