@@ -204,7 +204,9 @@ def compute(supabase, force=False):
         stock_rows = []
         for d in recent["detail"]:
             w20 = _window(smap[d["symbol"]], last, 20)
-            stock_rows.append({**d, "px20": round(w20[1], 1) if w20 else None})
+            stock_rows.append({**d, "px20": round(w20[1], 1) if w20 else None,
+                               "oi20": round(w20[0], 1) if w20 else None,
+                               "state20": _classify(w20[0], w20[1]) if w20 else None})
         sectors.append({
             "sector": sec, "stocks": len(members), "label": label,
             "recent_score": recent["score"], "prior_score": prior["score"] if prior else None,
