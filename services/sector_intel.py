@@ -33,6 +33,7 @@ T_WEAK = -15.0      # "was weak"
 T_UP = 10.0         # "now improving"
 T_JUMP = 25.0       # minimum improvement versus the prior window
 T_ACC = 20.0        # accumulating / distributing level
+WAVE_MIN = 4       # this many sectors flipping the same way on the same day = market-wide move
 T_BREADTH = 55.0    # % of stocks up over the recent window for "turning up" (and 45 for "turning down")
 
 _cache = {"t": 0.0, "data": None}
@@ -235,10 +236,22 @@ def compute(supabase, force=False):
                      "n10": s["n10"], "excess_10d_pct": round(s["x10"] / s["n10"], 2) if s["n10"] else None,
                      "beat_market_10d_pct": round(s["h10"] / s["n10"] * 100) if s["n10"] else None})
 
+    # a market-wide bounce (several sectors flipping together) says little about any one sector
+    n_up = sum(1 for x in sectors if x["label"] == "Turning up")
+    n_down = sum(1 for x in sectors if x["label"] == "Turning down")
+    for x in sectors:
+        if x["label"] == "Turning up":
+            x["flip_kind"] = "market-wide" if n_up >= WAVE_MIN else "sector-only"
+        elif x["label"] == "Turning down":
+            x["flip_kind"] = "market-wide" if n_down >= WAVE_MIN else "sector-only"
+        else:
+            x["flip_kind"] = None
+
     order = {"Turning up": 0, "Accumulating": 1, "Mixed": 2, "Distributing": 3, "Turning down": 4}
     sectors.sort(key=lambda x: (order.get(x["label"], 5), -x["recent_score"]))
     data = {
         "as_of": dates[-1], "history_days": len(dates), "window_recent": RECENT, "window_prior": PRIOR,
+        "turning_up_count": n_up, "turning_down_count": n_down, "wave_min": WAVE_MIN,
         "sectors": sectors, "history_check": hist,
         "note": "Experiment, admin only. A clue from futures OI and price, not a prediction.",
     }
