@@ -200,6 +200,11 @@ def compute(supabase, force=False):
         if not recent:
             continue
         det = sorted(recent["detail"], key=lambda d: (WEIGHT[d["state"]], d["oi_pct"]), reverse=True)
+        smap = dict(members)
+        stock_rows = []
+        for d in recent["detail"]:
+            w20 = _window(smap[d["symbol"]], last, 20)
+            stock_rows.append({**d, "px20": round(w20[1], 1) if w20 else None})
         sectors.append({
             "sector": sec, "stocks": len(members), "label": label,
             "recent_score": recent["score"], "prior_score": prior["score"] if prior else None,
@@ -207,6 +212,7 @@ def compute(supabase, force=False):
             "breadth_pct": recent["breadth"], "avg_px_5d": recent["avg_px"],
             "avg_px_prior": prior["avg_px"] if prior else None,
             "counts": recent["counts"],
+            "stock_rows": stock_rows,
             "leaders": [d for d in det if WEIGHT[d["state"]] > 0][:4],
             "weak": [d for d in det[::-1] if WEIGHT[d["state"]] < 0][:4],
         })
