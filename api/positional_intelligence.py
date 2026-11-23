@@ -604,6 +604,21 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                 _c = combined_oi_pct(today_oi_abs, today_oi, today_oi_abs_next, today_oi_next)
                 if _c is not None:
                     _gate_oi = _c
+            # Nov 23 2026: expiry day -> judge the stealth test on the real day-over-day change in total (near + next
+            # month) OI, the same figure the stored signal uses. INFY showed "Stealth" at +3.1% while total OI fell 14%.
+            if not (is_market and sym in live_oi_map) and today_data is not None:
+                try:
+                    from datetime import datetime as _dtz
+                    from utils.oi_math import is_real_expiry_day, totals_change_pct
+                    _td = str(today_data.get("trade_date"))[:10]
+                    if is_real_expiry_day(_dtz.strptime(_td, "%Y-%m-%d").date()):
+                        _prev = [h for h in history if str(h.get("trade_date"))[:10] < _td]
+                        if _prev:
+                            _t2 = totals_change_pct(today_data, _prev[-1])
+                            if _t2 is not None:
+                                _gate_oi = _t2
+                except Exception:
+                    pass
             if _gate_oi > 0 and abs(today_price) <= 1.5:
                 if True:
                     if _gate_oi >= 2.0 and abs(today_price) <= 0.5:
