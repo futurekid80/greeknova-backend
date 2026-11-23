@@ -297,7 +297,7 @@ def get_rollover(supabase):
                 roll_color  = "red"
             else:
                 roll_signal = "ROLLING"
-                roll_label  = "Rolling"
+                roll_label  = "Flat Roll"
                 roll_color  = "amber"
         elif curr_oi > 0 and next_oi < curr_oi * 0.1:
             roll_signal = "SQUARING"
