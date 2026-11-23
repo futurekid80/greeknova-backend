@@ -3945,7 +3945,7 @@ def stock_signal_history(symbol: str, days: int = 20):
         # Nov 23 2026: rollover week. Near-month OI drains into the next month, so the near-month change alone reads
         # as a big fall (INFY on expiry day: -28% and 'Short Covering' while near + next month was UP). The stored
         # signal is already judged on near + next month combined on those days, so show the same combined change here.
-        def _rollover_oi_chg(r):
+        def _rollover_oi_chg(r, prev=None):
             try:
                 from datetime import datetime as _dt
                 from api.positional_radar import get_current_expiry
@@ -3955,6 +3955,13 @@ def stock_signal_history(symbol: str, days: int = 20):
                 exp = _dt.strptime(get_current_expiry(d), "%Y-%m-%d").date()
                 if not (0 <= (exp - d).days <= ROLLOVER_DAYS):
                     return None
+                # Nov 23 2026: on the expiry day itself use the real day-over-day change in total (near + next) OI,
+                # the same basis the stored signal now uses.
+                if d == exp and prev:
+                    _cn, _cx = r.get("fut_oi_close"), r.get("fut_oi_close_next")
+                    _pn, _px = prev.get("fut_oi_close"), prev.get("fut_oi_close_next")
+                    if _cn and _cx and _pn and _px and float(_pn) > 0 and float(_px) > 0:
+                        return round((float(_cn) + float(_cx)) / (float(_pn) + float(_px)) * 100 - 100, 2)
                 return combined_oi_pct(r.get("fut_oi_close"), r.get("fut_oi_chg_pct"),
                                        r.get("fut_oi_close_next"), r.get("fut_oi_chg_pct_next"))
             except Exception:
@@ -3965,7 +3972,7 @@ def stock_signal_history(symbol: str, days: int = 20):
         avg_vol = sum(vols[1:6]) / len(vols[1:6]) if len(vols) > 1 else 0
 
         history = []
-        for r in rows:
+        for _i, r in enumerate(rows):
             vol = int(r.get("fut_vol") or 0)
             vol_ratio = round(vol / avg_vol, 2) if avg_vol > 0 else None
             # BUG FIX (Oct 18 2026): reverting the Oct 16 2026 change above.
@@ -3980,7 +3987,7 @@ def stock_signal_history(symbol: str, days: int = 20):
             # now use again.
             # Nov 12 2026: no previous close on file (a stock's first tracked day) -> None, not a fake 0.00%
             _price_chg = float(r["price_chg_pct"]) if r.get("price_chg_pct") is not None else None
-            _roll = _rollover_oi_chg(r)
+            _roll = _rollover_oi_chg(r, rows[_i + 1] if _i + 1 < len(rows) else None)
             history.append({
                 "date":         r["trade_date"],
                 "signal":       r.get("fut_signal") or "NEUTRAL",

@@ -54,6 +54,7 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
         # worked out on near + next month combined, never on the near month alone. Unset = old behaviour (skip).
         _roll_mode = os.getenv("FUT_OI_FINAL_ROLLOVER", "").strip().lower()
         _rollover_day = False
+        _exp = None
         try:
             _exp = min(datetime.strptime(v[0].get("XpryDt", "")[:10], "%Y-%m-%d").date() for v in fo.values() if v)
             if (_exp - d).days <= ROLLOVER_DAYS:
@@ -75,6 +76,29 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
             if len(res) < 1000:
                 break
             lo += 1000
+        # Nov 23 2026: on the expiry day itself NSE's own "change" for the expiring contract does not line up with
+        # the previous day (152 of 221 stocks read differently from the actual day-over-day OI, while 17-20 Nov
+        # matched). Cross-checked against our live feed: stored totals within 10% for 204 of 220 stocks. So on the
+        # expiry day only, the combined change is taken from yesterday's stored near + next month totals.
+        _prev_tot = {}
+        if _rollover_day and _exp is not None and d == _exp:
+            try:
+                from utils.market_calendar import get_prev_trading_day
+                _pd = get_prev_trading_day(d).isoformat()
+                _lo = 0
+                while True:
+                    _pr = supabase.from_("daily_oi_summary").select("symbol,fut_oi_close,fut_oi_close_next") \
+                        .eq("trade_date", _pd).range(_lo, _lo + 999).execute().data or []
+                    for _x in _pr:
+                        _a, _b = _f(_x.get("fut_oi_close")), _f(_x.get("fut_oi_close_next"))
+                        if _a and _a > 0 and _b and _b > 0:
+                            _prev_tot[_x["symbol"]] = _a + _b
+                    if len(_pr) < 1000:
+                        break
+                    _lo += 1000
+                print(f"[fut_oi_final] {d}: expiry day, using day-over-day totals vs {_pd} for {len(_prev_tot)} stocks")
+            except Exception as _e:
+                print(f"[fut_oi_final] {d}: expiry-day totals unavailable ({_e}); using NSE change field")
         n = ch = g1 = g3 = g10 = flips = s_in = s_out = 0
         examples, updates, comb_gaps = [], [], []
         for r in rows:
@@ -99,6 +123,9 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
                 _nn = _oi_pct(n1) if n1 is not None else None
                 _n1c = _f(n1.get("OpnIntrst")) if n1 is not None else None
                 new_comb = combined_oi_pct(new_close, new_chg, _n1c, _nn)
+                _pt = _prev_tot.get(r["symbol"])
+                if _pt and _n1c and _n1c > 0 and r["symbol"] != "IDEA":
+                    new_comb = round((new_close + _n1c) / _pt * 100 - 100, 2)
                 old_comb = combined_oi_pct(old_close, old_chg, _f(r.get("fut_oi_close_next")), _f(r.get("fut_oi_chg_pct_next")))
                 if new_comb is not None and old_comb is not None:
                     comb_gaps.append((abs(new_comb - old_comb), r["symbol"], old_comb, new_comb))
