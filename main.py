@@ -3932,7 +3932,7 @@ def stock_signal_history(symbol: str, days: int = 20):
         start = (datetime.now(ist).date() - timedelta(days=60)).isoformat()
 
         result = supabase.from_("daily_oi_summary") \
-            .select("trade_date, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, fut_signal, close_price, fut_vol") \
+            .select("trade_date, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, fut_signal, close_price, fut_vol, fut_oi_close, fut_oi_close_next, fut_oi_chg_pct_next") \
             .eq("symbol", symbol.upper()) \
             .gte("trade_date", start) \
             .lte("trade_date", today) \
@@ -3941,6 +3941,24 @@ def stock_signal_history(symbol: str, days: int = 20):
             .execute()
 
         rows = result.data or []
+
+        # Nov 23 2026: rollover week. Near-month OI drains into the next month, so the near-month change alone reads
+        # as a big fall (INFY on expiry day: -28% and 'Short Covering' while near + next month was UP). The stored
+        # signal is already judged on near + next month combined on those days, so show the same combined change here.
+        def _rollover_oi_chg(r):
+            try:
+                from datetime import datetime as _dt
+                from api.positional_radar import get_current_expiry
+                from services.fut_oi_final import ROLLOVER_DAYS
+                from utils.oi_math import combined_oi_pct
+                d = _dt.strptime(str(r["trade_date"])[:10], "%Y-%m-%d").date()
+                exp = _dt.strptime(get_current_expiry(d), "%Y-%m-%d").date()
+                if not (0 <= (exp - d).days <= ROLLOVER_DAYS):
+                    return None
+                return combined_oi_pct(r.get("fut_oi_close"), r.get("fut_oi_chg_pct"),
+                                       r.get("fut_oi_close_next"), r.get("fut_oi_chg_pct_next"))
+            except Exception:
+                return None
 
         # Compute 5-day avg volume for context (is today's volume high or low vs recent norm)
         vols = [int(r.get("fut_vol") or 0) for r in rows if r.get("fut_vol")]
@@ -3962,10 +3980,12 @@ def stock_signal_history(symbol: str, days: int = 20):
             # now use again.
             # Nov 12 2026: no previous close on file (a stock's first tracked day) -> None, not a fake 0.00%
             _price_chg = float(r["price_chg_pct"]) if r.get("price_chg_pct") is not None else None
+            _roll = _rollover_oi_chg(r)
             history.append({
                 "date":         r["trade_date"],
                 "signal":       r.get("fut_signal") or "NEUTRAL",
-                "fut_oi_chg":   round(float(r.get("fut_oi_chg_pct") or 0), 2),
+                "fut_oi_chg":   round(_roll if _roll is not None else float(r.get("fut_oi_chg_pct") or 0), 2),
+                "oi_basis":     "near+next" if _roll is not None else "near",
                 "price_chg":    round(_price_chg, 2) if _price_chg is not None else None,
                 "close_price":  round(float(r.get("close_price") or 0), 2),
                 "volume":       vol,
