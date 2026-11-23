@@ -3957,7 +3957,17 @@ def stock_signal_history(symbol: str, days: int = 20):
                     return None
                 # Nov 23 2026: on the expiry day itself use the real day-over-day change in total (near + next) OI,
                 # the same basis the stored signal now uses.
-                if d == exp and prev:
+                # The calendar "last Tuesday" can be a trading holiday (Tue 24 Nov 2026); the real expiry is then the
+                # previous trading day (Mon 23 Nov).
+                try:
+                    from datetime import timedelta as _td
+                    from utils.market_calendar import is_trading_day as _itd
+                    _real_exp = exp
+                    while not _itd(_real_exp):
+                        _real_exp -= _td(days=1)
+                except Exception:
+                    _real_exp = exp
+                if d == _real_exp and prev:
                     _cn, _cx = r.get("fut_oi_close"), r.get("fut_oi_close_next")
                     _pn, _px = prev.get("fut_oi_close"), prev.get("fut_oi_close_next")
                     if _cn and _cx and _pn and _px and float(_pn) > 0 and float(_px) > 0:
