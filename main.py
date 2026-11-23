@@ -3787,6 +3787,21 @@ def stock_intel(symbol: str):
             _oi_now = float(_fut_row.get("fut_oi_chg_pct") or 0)
             from utils.oi_math import combined_oi_pct
             _fut_row["fut_oi_chg_pct_combined"] = combined_oi_pct(_fut_row.get("fut_oi_close"), _oi_now, _fut_row.get("fut_oi_close_next"), _oi_next)
+            # Nov 23 2026: expiry day -> real day-over-day change in total (near + next) OI, matching the stored signal
+            try:
+                from datetime import datetime as _dty
+                from utils.oi_math import is_real_expiry_day, totals_change_pct
+                _dd = _dty.strptime(str(_fut_row["trade_date"])[:10], "%Y-%m-%d").date()
+                if is_real_expiry_day(_dd):
+                    _pv = supabase.from_("daily_oi_summary").select("fut_oi_close, fut_oi_close_next") \
+                        .eq("symbol", sym).lt("trade_date", str(_fut_row["trade_date"])[:10]) \
+                        .order("trade_date", desc=True).limit(1).execute().data
+                    if _pv:
+                        _tc = totals_change_pct(_fut_row, _pv[0])
+                        if _tc is not None:
+                            _fut_row["fut_oi_chg_pct_combined"] = _tc
+            except Exception:
+                pass
         result["fut_signal"] = _fut_row
     except:
         result["fut_signal"] = None

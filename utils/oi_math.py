@@ -45,3 +45,35 @@ def prev_close_baselines(prev_row, rolled):
     if rolled:
         return nxt, None
     return near, nxt
+
+
+def is_real_expiry_day(d):
+    """True when d is the real monthly near-month expiry day: the last Tuesday of d's month, moved back to the
+    previous trading day when that Tuesday is a trading holiday (Tue 24 Nov 2026 -> Mon 23 Nov)."""
+    try:
+        import calendar
+        from datetime import date, timedelta
+        from utils.market_calendar import is_trading_day
+        exp = date(d.year, d.month, calendar.monthrange(d.year, d.month)[1])
+        while exp.weekday() != 1:
+            exp -= timedelta(days=1)
+        while not is_trading_day(exp):
+            exp -= timedelta(days=1)
+        return d == exp
+    except Exception:
+        return False
+
+
+def totals_change_pct(cur_row, prev_row):
+    """Day-over-day % change in total (near + next month) OI from two stored daily rows; None if not computable."""
+    try:
+        a, b = cur_row.get("fut_oi_close"), cur_row.get("fut_oi_close_next")
+        c, d = prev_row.get("fut_oi_close"), prev_row.get("fut_oi_close_next")
+        if not (a and b and c and d):
+            return None
+        a, b, c, d = float(a), float(b), float(c), float(d)
+        if a <= 0 or b <= 0 or c <= 0 or d <= 0:
+            return None
+        return round((a + b) / (c + d) * 100 - 100, 2)
+    except Exception:
+        return None

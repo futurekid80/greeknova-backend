@@ -495,6 +495,19 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                     _show_oi = _c
             except Exception:
                 pass
+        # Nov 23 2026: on the expiry day itself NSE's change field for the expiring contract is unreliable, so show the
+        # real day-over-day change in total (near + next month) OI, the same figure the stored signal now uses.
+        if len(history) >= 2:
+            try:
+                from datetime import datetime as _dtx
+                from utils.oi_math import is_real_expiry_day, totals_change_pct
+                _d = _dtx.strptime(str(history[-1]["trade_date"])[:10], "%Y-%m-%d").date()
+                if is_real_expiry_day(_d):
+                    _t = totals_change_pct(history[-1], history[-2])
+                    if _t is not None:
+                        _show_oi = _t
+            except Exception:
+                pass
 
         base = {
             "symbol": sym,
