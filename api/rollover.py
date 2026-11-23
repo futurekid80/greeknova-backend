@@ -177,52 +177,70 @@ def get_rollover(supabase):
             sym_next[sym] = {"oi": oi, "price": price}
             seen_next.add(sym)
 
-    # ── 2. Previous series benchmark OI ───────────────────────────────────────
+    # ── 1b. Prefer FINAL end-of-day OI once the day is done ────────────────────
+    # Nov 23 2026 audit: the last intraday snapshot understated rollover
+    # (84.6% live vs 94.0% final NSE close) because expiry-day OI keeps
+    # moving until the close. daily_oi_summary holds the final per-stock
+    # near/next OI, so use it when the session is over (or the date is past)
+    # and it has next-month data for most symbols.
+    eod_used = False
     try:
-        # Get one snapshot from prev bench date
-        prev_ts_res = supabase.from_("oi_snapshots_archive")\
-            .select("timestamp")\
-            .eq("option_type", "FUT")\
-            .eq("symbol", "NIFTY")\
-            .in_("expiry", [prev_curr_expiry, prev_next_expiry])\
-            .gte("timestamp", f"{prev_bench_date}T03:45:00+00:00")\
-            .lt("timestamp",  f"{prev_bench_date}T12:00:00+00:00")\
-            .order("timestamp", desc=True)\
-            .limit(1)\
-            .execute()
-        prev_ts = prev_ts_res.data[0]["timestamp"] if prev_ts_res.data else None
-
-        if not prev_ts:
-            prev_rows = []
-        else:
-            prev_res = supabase.from_("oi_snapshots_archive")\
-                .select("symbol, expiry, oi")\
-                .eq("option_type", "FUT")\
-                .in_("expiry", [prev_curr_expiry, prev_next_expiry])\
-                .eq("timestamp", prev_ts)\
+        now_ist = datetime.now(ist)
+        session_over = (last_trading_date < today) or (now_ist.hour * 60 + now_ist.minute >= 16 * 60)
+        if session_over:
+            eod = supabase.from_("daily_oi_summary")\
+                .select("symbol, fut_oi_close, fut_oi_close_next, close_price")\
+                .eq("trade_date", last_trading_date)\
                 .limit(1000)\
-                .execute()
-            prev_rows = prev_res.data or []
-            print(f"[ROLLOVER] Prev rows: {len(prev_rows)} at {prev_ts}")
+                .execute().data or []
+            usable = [r for r in eod if (r.get("fut_oi_close") or 0) > 0 and (r.get("fut_oi_close_next") or 0) > 0]
+            if len(usable) >= 100:
+                sym_curr, sym_next = {}, {}
+                for r in usable:
+                    px = float(r.get("close_price") or 0)
+                    sym_curr[r["symbol"]] = {"oi": int(r["fut_oi_close"]), "price": px}
+                    sym_next[r["symbol"]] = {"oi": int(r["fut_oi_close_next"]), "price": px}
+                eod_used = True
+                print(f"[ROLLOVER] Using final EOD OI from daily_oi_summary: {len(usable)} symbols")
     except Exception as e:
-        print(f"[ROLLOVER] Prev fetch failed: {e}")
-        prev_rows = []
+        print(f"[ROLLOVER] EOD override failed, keeping snapshot data: {e}")
 
+    # ── 2. Previous series benchmark OI (same days-to-expiry, final EOD) ──────
+    # Nov 23 2026 audit: the old archive lookup used the calendar "last
+    # Tuesday" (Nov 24) as the prev series' next expiry -- the real one is Nov
+    # 23 -- and the archive table is too big to query reliably, so every
+    # symbol showed a 0% benchmark ("Faster than last series" for all).
+    # daily_oi_summary has final near/next OI per day: pick the date with the
+    # same number of trading days before the previous expiry.
     prev_curr = {}
     prev_next = {}
-    seen_pc = set()
-    seen_pn = set()
-
-    for r in prev_rows:
-        sym = r["symbol"]
-        exp = r.get("expiry")
-        oi  = int(r.get("oi") or 0)
-        if exp == prev_curr_expiry and sym not in seen_pc:
-            prev_curr[sym] = oi
-            seen_pc.add(sym)
-        elif exp == prev_next_expiry and sym not in seen_pn:
-            prev_next[sym] = oi
-            seen_pn.add(sym)
+    try:
+        from datetime import date as _date
+        _dte = max((_date.fromisoformat(curr_expiry) - datetime.now(ist).date()).days, 0)
+        d_res = supabase.from_("daily_oi_summary")\
+            .select("trade_date")\
+            .eq("symbol", "NIFTY")\
+            .lte("trade_date", prev_curr_expiry)\
+            .order("trade_date", desc=True)\
+            .limit(40)\
+            .execute()
+        dates = [str(r["trade_date"])[:10] for r in (d_res.data or [])]
+        if dates:
+            # trading days to expiry ~ calendar DTE; step back that many rows
+            bench_idx = min(_dte, len(dates) - 1)
+            prev_bench_date = dates[bench_idx]
+            pr = supabase.from_("daily_oi_summary")\
+                .select("symbol, fut_oi_close, fut_oi_close_next")\
+                .eq("trade_date", prev_bench_date)\
+                .limit(1000)\
+                .execute().data or []
+            for r in pr:
+                if (r.get("fut_oi_close") or 0) > 0 and (r.get("fut_oi_close_next") or 0) > 0:
+                    prev_curr[r["symbol"]] = int(r["fut_oi_close"])
+                    prev_next[r["symbol"]] = int(r["fut_oi_close_next"])
+            print(f"[ROLLOVER] Benchmark {prev_bench_date}: {len(prev_curr)} symbols")
+    except Exception as e:
+        print(f"[ROLLOVER] Benchmark fetch failed: {e}")
 
     # ── 3. Daily OI summary for price change (signal direction) ───────────────
     try:
