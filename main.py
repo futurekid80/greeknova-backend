@@ -3118,16 +3118,17 @@ def me_trial_status(request: Request):
         raise HTTPException(status_code=401, detail="Sign in required")
 
     status = _access_status(email)
-    result = {"status": status, "trial_expires_date": None, "days_left": None, "phone_captured": None}
+    result = {"status": status, "trial_expires_date": None, "days_left": None, "phone_captured": None, "whatsapp_clicked": None}
     if status in ("trial_active", "trial_expired"):
         from utils.db import get_supabase
         row = get_supabase().from_("trial_users")\
-            .select("trial_expires_date, phone")\
+            .select("trial_expires_date, phone, whatsapp_clicked_at")\
             .eq("email", email).limit(1).execute()
         if row.data:
             exp = row.data[0]["trial_expires_date"]
             result["trial_expires_date"] = exp
             result["phone_captured"] = bool(row.data[0].get("phone"))
+            result["whatsapp_clicked"] = bool(row.data[0].get("whatsapp_clicked_at"))
             if status == "trial_active":
                 from utils.market_calendar import today_ist
                 from datetime import date
@@ -3189,6 +3190,30 @@ def me_update_phone(request: Request, payload: dict = Body(...)):
         sb.from_("beta_users").update({"mobile": digits}).eq("email", email).execute()
     else:
         raise HTTPException(status_code=403, detail="No active trial or membership found for this account")
+    return {"ok": True}
+
+
+@app.post("/me/whatsapp-clicked")
+def me_whatsapp_clicked(request: Request):
+    """Nov 23 2026: records that a trial member tapped the "Join the WhatsApp
+    trial group" button, so the in-app card stops showing for them and we can
+    see how many trial members actually reach the group. WhatsApp itself never
+    tells us who joined, so a tap is the closest signal we have. Trial users only."""
+    from services.access_gate import _verify_token, _access_status
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        raise HTTPException(status_code=401, detail="Sign in required")
+    email, err = _verify_token(token)
+    if err or not email:
+        raise HTTPException(status_code=401, detail="Sign in required")
+    if _access_status(email) not in ("trial_active", "trial_expired"):
+        return {"ok": False}
+    from utils.db import get_supabase
+    from datetime import datetime, timezone
+    get_supabase().from_("trial_users").update(
+        {"whatsapp_clicked_at": datetime.now(timezone.utc).isoformat()}
+    ).eq("email", email).is_("whatsapp_clicked_at", "null").execute()
     return {"ok": True}
 
 
