@@ -47,6 +47,21 @@ def _get_rollover_expiries(today_date):
             prev_bench.strftime('%Y-%m-%d'))
 
 
+def _trading_days_to(ref, expiry):
+    """Trading days after `ref` up to and including `expiry` (0 when ref is the expiry day or later)."""
+    from datetime import timedelta as _td
+    try:
+        from utils.market_calendar import is_trading_day
+    except Exception:
+        is_trading_day = lambda d: d.weekday() < 5
+    n, d = 0, ref
+    while d < expiry:
+        d += _td(days=1)
+        if is_trading_day(d):
+            n += 1
+    return n
+
+
 def _get_real_rollover_expiries(supabase, today_date):
     """Oct 23 2026: _get_rollover_expiries() assumes every NSE monthly F&O
     expiry falls on the last Tuesday of the month -- true since the
@@ -125,8 +140,18 @@ def get_rollover(supabase):
     # Current + previous-benchmark expiries, snapped to the real captured
     # FUT expiry calendar rather than trusting the last-Tuesday formula
     # alone (see _get_real_rollover_expiries).
+    # Nov 24 2026: use the last date that actually has data as the reference,
+    # not the calendar date. On the Tue 24 Nov holiday the calendar had moved
+    # on to the Dec/Jan series while the data was still the 23 Nov close, so
+    # the page was labelled Dec/Jan over Nov/Dec numbers and benchmarked
+    # against a day from the wrong end of the previous series.
+    from datetime import date as _d0
+    try:
+        _ref_date = min(_d0.fromisoformat(last_trading_date), datetime.now(ist).date())
+    except Exception:
+        _ref_date = datetime.now(ist).date()
     curr_expiry, next_expiry, prev_curr_expiry, prev_next_expiry, prev_bench_date = \
-        _get_real_rollover_expiries(supabase, datetime.now(ist).date())
+        _get_real_rollover_expiries(supabase, _ref_date)
 
     # ── 1. Today's OI for both expiries ───────────────────────────────────────
     try:
@@ -216,7 +241,7 @@ def get_rollover(supabase):
     prev_next = {}
     try:
         from datetime import date as _date
-        _dte = max((_date.fromisoformat(curr_expiry) - datetime.now(ist).date()).days, 0)
+        _dte = _trading_days_to(_ref_date, _date.fromisoformat(curr_expiry))
         d_res = supabase.from_("daily_oi_summary")\
             .select("trade_date")\
             .eq("symbol", "NIFTY")\
@@ -226,7 +251,7 @@ def get_rollover(supabase):
             .execute()
         dates = [str(r["trade_date"])[:10] for r in (d_res.data or [])]
         if dates:
-            # trading days to expiry ~ calendar DTE; step back that many rows
+            # same number of trading days before the previous expiry
             bench_idx = min(_dte, len(dates) - 1)
             prev_bench_date = dates[bench_idx]
             pr = supabase.from_("daily_oi_summary")\
@@ -359,7 +384,7 @@ def get_rollover(supabase):
     from datetime import date
     expiry_date = date.fromisoformat(curr_expiry)
     today_date  = datetime.now(ist).date()
-    dte = (expiry_date - today_date).days
+    dte = max((expiry_date - today_date).days, 0)  # 0 on the expiry day and while its close is still the latest data
 
     # Top rollers by rollover %
     top_rollers = sorted(results, key=lambda x: x["rollover_pct"], reverse=True)[:15]
