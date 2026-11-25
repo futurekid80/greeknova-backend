@@ -47,13 +47,19 @@ def get_eod_report(supabase, date: str = None):
         exp_totals = {}
 
     def _apply_totals(rows):
+        out = []
         for r in rows:
             t = exp_totals.get(r.get("symbol"))
             if t is not None:
                 r["fut_oi_chg_pct"] = t
                 r["fut_oi_chg_pct_next"] = None
                 r["_combined_override"] = t
-        return rows
+            elif exp_totals:
+                # Expiry day and no previous-day baseline for this symbol (e.g. a missing stored day):
+                # NSE's near-month figure is unreliable today, so leave the row out rather than show it.
+                continue
+            out.append(r)
+        return out
 
     # ── 1. FUT OI Movers ─────────────────────────────────────────────────────
     try:
