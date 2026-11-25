@@ -105,6 +105,7 @@ def get_first_hour_breakout_scan(supabase, symbols):
         # the platform. A real breakdown persists across multiple ticks;
         # a glitch doesn't.
         consecutive_below_low = 0
+        reclaimed = False
         for mins, px, ts_ist in after_ticks:
             if not broke_out and px > first_hour_high:
                 broke_out = True
@@ -117,6 +118,14 @@ def get_first_hour_breakout_scan(supabase, symbols):
                         failed = True
                 else:
                     consecutive_below_low = 0
+                    # Nov 25 2026: "failed" used to be permanent. MARICO broke the first-hour high at 11:00, dipped
+                    # under the low for two ticks at 13:00, then broke the high again at 14:25 and closed strong --
+                    # and the page still said Failed (member report). A failed breakout that later closes back above
+                    # the first-hour high is a fresh breakout, so it is Sustaining again from that time.
+                    if failed and px > first_hour_high:
+                        failed = False
+                        reclaimed = True
+                        breakout_time = ts_ist
 
         if not broke_out:
             continue
@@ -125,6 +134,7 @@ def get_first_hour_breakout_scan(supabase, symbols):
         candidates.append({
             "symbol": sym,
             "state": "failed" if failed else "sustaining",
+            "reclaimed": reclaimed,
             "first_hour_high": round(first_hour_high, 2),
             "first_hour_low": round(first_hour_low, 2),
             "breakout_time": breakout_time.strftime("%H:%M") if breakout_time else None,
