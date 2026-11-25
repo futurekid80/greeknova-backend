@@ -2,7 +2,7 @@
 eod_report.py - Premium EOD Intelligence Report
 Aggregates daily_oi_summary, iv_history, participant_flow for a given date.
 """
-from utils.oi_math import combined_oi_pct
+from utils.oi_math import combined_oi_pct, is_real_expiry_day, totals_change_pct
 from datetime import datetime, timezone, timedelta
 
 def get_eod_report(supabase, date: str = None):
@@ -22,6 +22,39 @@ def get_eod_report(supabase, date: str = None):
         except:
             date = now_ist.date().isoformat()
 
+    # Nov 25 2026: on the real monthly expiry day NSE's own near-month "change in OI" is unreliable (the
+    # expiring contract's OI collapses at the close), which made the Morning Report list false Stealth Buildups
+    # (MUTHOOTFIN +13.6% when its total OI actually fell). Same fix as the Positional page: on that day use the
+    # actual day-over-day change in TOTAL (near + next) OI from the stored closes.
+    exp_totals = {}
+    try:
+        _d = datetime.strptime(str(date)[:10], "%Y-%m-%d").date()
+        if is_real_expiry_day(_d):
+            from utils.market_calendar import get_prev_trading_day
+            _pd = get_prev_trading_day(_d)
+            _cur = supabase.from_("daily_oi_summary").select("symbol, fut_oi_close, fut_oi_close_next")\
+                .eq("trade_date", _d.isoformat()).limit(1000).execute().data or []
+            _prv = supabase.from_("daily_oi_summary").select("symbol, fut_oi_close, fut_oi_close_next")\
+                .eq("trade_date", _pd.isoformat()).limit(1000).execute().data or []
+            _prv_map = {r["symbol"]: r for r in _prv}
+            for r in _cur:
+                t = totals_change_pct(r, _prv_map.get(r["symbol"]) or {})
+                if t is not None:
+                    exp_totals[r["symbol"]] = t
+            print(f"[EOD] Expiry day {_d}: using total-OI change for {len(exp_totals)} symbols")
+    except Exception as e:
+        print(f"[EOD] Expiry-day total OI override failed (non-fatal): {e}")
+        exp_totals = {}
+
+    def _apply_totals(rows):
+        for r in rows:
+            t = exp_totals.get(r.get("symbol"))
+            if t is not None:
+                r["fut_oi_chg_pct"] = t
+                r["fut_oi_chg_pct_next"] = None
+                r["_combined_override"] = t
+        return rows
+
     # ── 1. FUT OI Movers ─────────────────────────────────────────────────────
     try:
         movers_res = supabase.from_("daily_oi_summary")\
@@ -31,7 +64,7 @@ def get_eod_report(supabase, date: str = None):
             .neq("fut_signal", "NEUTRAL")\
             .limit(500)\
             .execute()
-        all_movers = movers_res.data or []
+        all_movers = _apply_totals(movers_res.data or [])
     except Exception as e:
         print(f"[EOD] Movers fetch failed: {e}")
         all_movers = []
@@ -80,13 +113,15 @@ def get_eod_report(supabase, date: str = None):
 
     # ── 3. Stealth Buildup EOD ────────────────────────────────────────────────
     try:
-        stealth_res = supabase.from_("daily_oi_summary")\
+        _sq = supabase.from_("daily_oi_summary")\
             .select("symbol, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price, fut_signal")\
-            .eq("trade_date", date)\
-            .gte("fut_oi_chg_pct", 1.5)\
-            .limit(500)\
-            .execute()
-        stealth_raw = stealth_res.data or []
+            .eq("trade_date", date)
+        if not exp_totals:
+            _sq = _sq.gte("fut_oi_chg_pct", 1.5)
+        stealth_res = _sq.limit(1000).execute()
+        stealth_raw = _apply_totals(stealth_res.data or [])
+        if exp_totals:
+            stealth_raw = [r for r in stealth_raw if float(r.get("fut_oi_chg_pct") or 0) >= 1.5]
     except:
         stealth_raw = []
 
@@ -108,7 +143,7 @@ def get_eod_report(supabase, date: str = None):
             "symbol": r["symbol"],
             "fut_oi_chg_pct": round(oi, 2),
             "fut_oi_chg_pct_next": round(oi_next, 2) if oi_next is not None else None,
-            "fut_oi_chg_pct_combined": combined_oi_pct(r.get("fut_oi_close"), oi, r.get("fut_oi_close_next"), oi_next),
+            "fut_oi_chg_pct_combined": r.get("_combined_override") if r.get("_combined_override") is not None else combined_oi_pct(r.get("fut_oi_close"), oi, r.get("fut_oi_close_next"), oi_next),
             "fut_oi_close": r.get("fut_oi_close"),
             "fut_oi_close_next": r.get("fut_oi_close_next"),
             "price_chg_pct": round(price, 2),
@@ -142,15 +177,16 @@ def get_eod_report(supabase, date: str = None):
 
     # ── 6. Series Buildup snapshot ────────────────────────────────────────────
     try:
-        series_res = supabase.from_("daily_oi_summary")\
+        _tq = supabase.from_("daily_oi_summary")\
             .select("symbol, fut_signal, fut_oi_chg_pct, fut_oi_chg_pct_next, fut_oi_close, fut_oi_close_next, price_chg_pct, close_price")\
             .eq("trade_date", date)\
-            .in_("fut_signal", ["LONG_BUILDUP", "SHORT_BUILDUP"])\
-            .gte("fut_oi_chg_pct", 2.0)\
-            .order("fut_oi_chg_pct", desc=True)\
-            .limit(10)\
-            .execute()
-        top_signals = series_res.data or []
+            .in_("fut_signal", ["LONG_BUILDUP", "SHORT_BUILDUP"])
+        if exp_totals:
+            top_signals = _apply_totals(_tq.limit(500).execute().data or [])
+            top_signals = sorted([r for r in top_signals if float(r.get("fut_oi_chg_pct") or 0) >= 2.0],
+                                 key=lambda x: -float(x.get("fut_oi_chg_pct") or 0))[:10]
+        else:
+            top_signals = _tq.gte("fut_oi_chg_pct", 2.0).order("fut_oi_chg_pct", desc=True).limit(10).execute().data or []
     except:
         top_signals = []
 
@@ -335,7 +371,7 @@ def get_eod_report(supabase, date: str = None):
             "symbol": r.get("symbol"),
             "fut_oi_chg_pct": round(oi_now, 2),
             "fut_oi_chg_pct_next": round(oi_next, 2) if oi_next is not None else None,
-            "fut_oi_chg_pct_combined": combined_oi_pct(r.get("fut_oi_close"), oi_now, r.get("fut_oi_close_next"), oi_next),
+            "fut_oi_chg_pct_combined": r.get("_combined_override") if r.get("_combined_override") is not None else combined_oi_pct(r.get("fut_oi_close"), oi_now, r.get("fut_oi_close_next"), oi_next),
             "fut_oi_close": r.get("fut_oi_close"),
             "fut_oi_close_next": r.get("fut_oi_close_next"),
             "price_chg_pct": round(float(r.get("price_chg_pct") or 0), 2),
