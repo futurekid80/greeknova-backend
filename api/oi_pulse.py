@@ -756,7 +756,12 @@ def _compute_oi_pulse(supabase):
             if prev and prev > 0:
                 price_chg_pct = round((ltp - prev) / prev * 100, 2)
 
-        if has_futures_data and not is_index and sym in fut_oi_new:
+        # Nov 25 2026: index rows used the total OPTIONS OI of the nearest weekly chain (all strikes, calls + puts) --
+        # on the first days of a fresh weekly that ramps up hard and says nothing about direction (NIFTY showed
+        # +68% while its futures OI was +2.5%). Indices now use their near-month FUTURES OI like stocks do.
+        _use_fut = has_futures_data and sym in fut_oi_new and (
+            not is_index or (fut_oi_old.get(sym, 0) > 0 and fut_oi_new.get(sym, 0) > 0))
+        if _use_fut:
             f_old = fut_oi_old.get(sym, 0)
             f_new = fut_oi_new.get(sym, 0)
             fut_chg_pct = round((f_new - f_old) / f_old * 100, 2) if f_old > 0 else 0
@@ -768,7 +773,7 @@ def _compute_oi_pulse(supabase):
         display_oi_chg_pct = oi_chg_pct
         fut_oi_now = 0
         fut_oi_prev = 0
-        if has_futures_data and not is_index and sym in fut_oi_new:
+        if _use_fut:
             f_old = fut_oi_old.get(sym, 0)
             f_new = fut_oi_new.get(sym, 0)
             if f_old > 0:
