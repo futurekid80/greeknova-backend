@@ -41,7 +41,7 @@ def run_fut_oi_final(supabase, start="2026-10-14", end=None, dry_run=True):
         if d.weekday() >= 5 or not is_trading_day(d):
             d += timedelta(days=1)
             continue
-        fo = _fo_rows(d)
+        fo = _fo_rows(d, include_index=True)
         time.sleep(1)
         if fo is None:
             print(f"[fut_oi_final] {d}: NSE F&O file not available; skipped")

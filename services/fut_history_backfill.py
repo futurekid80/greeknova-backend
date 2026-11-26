@@ -47,7 +47,7 @@ def _get(url, tries=3):
     return None
 
 
-def _fo_rows(d: date):
+def _fo_rows(d: date, include_index: bool = False):
     """{symbol: [futures rows sorted by expiry]} for one trading day, from the F&O bhavcopy."""
     url = f"https://nsearchives.nseindia.com/content/fo/BhavCopy_NSE_FO_0_0_0_{d.strftime('%Y%m%d')}_F_0000.csv.zip"
     raw = _get(url)
@@ -62,7 +62,8 @@ def _fo_rows(d: date):
     out: dict = {}
     for r in csv.DictReader(io.StringIO(text)):
         r = {k.strip(): (v or "").strip() for k, v in r.items() if k}
-        if r.get("FinInstrmTp") != "STF":
+        # Nov 26 2026: index futures (IDF) only when asked, so the final-OI job can finalize NIFTY/BANKNIFTY etc.
+        if r.get("FinInstrmTp") != "STF" and not (include_index and r.get("FinInstrmTp") == "IDF"):
             continue
         out.setdefault(r.get("TckrSymb", "").upper(), []).append(r)
     for s in out:
