@@ -178,7 +178,7 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
 
     try:
         rows_res = supabase.from_("daily_oi_summary") \
-            .select("symbol, trade_date, fut_oi_chg_pct, price_chg_pct, fut_price_chg_pct, close_price, fut_vol, fut_oi_close, fut_oi_close_next") \
+            .select("symbol, trade_date, fut_oi_chg_pct, fut_oi_chg_pct_next, price_chg_pct, fut_price_chg_pct, close_price, fut_vol, fut_oi_close, fut_oi_close_next") \
             .gte("trade_date", lookback_start) \
             .order("trade_date", desc=False) \
             .limit(10000).execute()
@@ -228,7 +228,9 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
             # new series) instead of a 5-day window that silently spans
             # two different contracts.
             window = same_series_rows[-days:]
-            min_days = 2
+            # Nov 26 2026: in the first days of a new series, bridge across the expiry (near + next month together)
+            # so the weekly view still covers 5 real sessions instead of only the days since the new series began.
+            min_days = days if recent_series else 2
         bridged = False
         if len(window) < min_days:
             if not recent_series:
@@ -312,6 +314,15 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
                 prev_tot, last_imp = _tot(window[-2]), _implied_prev(window[-1])
                 if prev_tot and last_imp and abs(prev_tot / last_imp - 1) > 0.25 and abs(end_tot / last_imp - 1) > 0.25:
                     continue
+            if not rollover:
+                try:
+                    _li = rows_sorted.index(window[-1])
+                    if _li > 0 and (not series_start or rows_sorted[_li - 1]["trade_date"] >= series_start):
+                        _pc, _c, _chg = float(rows_sorted[_li - 1]["fut_oi_close"]), float(window[-1]["fut_oi_close"]), float(window[-1]["fut_oi_chg_pct"])
+                        if _pc > 0 and abs((_c / _pc - 1) * 100 - _chg) > max(8.0, abs(_chg) * 0.5):
+                            continue  # latest stored OI does not match its own % change: leave the symbol out rather than show a fake move
+                except (TypeError, ValueError, KeyError):
+                    pass
             cumulative_oi_pct = round((end_tot / base_tot - 1) * 100, 2)
             price_factor = 1.0
             for r in calc_rows:

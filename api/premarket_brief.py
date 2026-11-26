@@ -73,6 +73,12 @@ def _get_gift_nifty(supabase, last_trading_day: str):
 
 
 def _get_commodities():
+    # Nov 26 2026: paused. Yahoo's futures quotes gave prices 2-5% away from the real settlements and day changes of
+    # +4% to +8% when the real moves were about +2% (reported by a member). The page shows nothing for this card
+    # rather than wrong numbers. Set PREMARKET_COMMODITIES=1 to switch it back on once the source is fixed.
+    import os
+    if os.getenv("PREMARKET_COMMODITIES", "0") != "1":
+        return []
     try:
         import yfinance as yf
     except ImportError:
