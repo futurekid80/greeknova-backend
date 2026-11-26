@@ -206,6 +206,10 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
 
     net_delta_map = _get_net_delta_map(supabase)
 
+    # Earliest trading day in this look-back. A stock whose first stored day is later than this AND falls
+    # inside its own window has no real baseline (newly added to F&O, e.g. CUB / KARURVYSYA on 28 Oct).
+    earliest_date = min((r["trade_date"] for r in (rows_res.data or [])), default=None)
+
     results = []
     for sym, rows in by_symbol.items():
         rows_sorted = sorted(rows, key=lambda r: r["trade_date"])
@@ -234,6 +238,12 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
                 continue
             bridged = True
             any_bridge = True
+
+        # Nov 26 2026: a stock newly added to F&O starts from a near-zero contract, so its cumulative OI change
+        # (+3223% KARURVYSYA, +716% CUB) is growth from nothing, not a real buildup. Leave it out until it has a
+        # baseline from before the window.
+        if earliest_date and rows_sorted[0]["trade_date"] > earliest_date and rows_sorted[0]["trade_date"] >= window[0]["trade_date"]:
+            continue
 
         # BUG FIX (Oct 18 2026): reverting the Oct 15 2026 change above.
         # fut_price_chg_pct is each day's FUT open->close move only, so
@@ -350,9 +360,13 @@ def get_oi_buildup_period(supabase, period: str = "weekly") -> dict:
 
     results.sort(key=lambda x: -abs(x["cumulative_oi_pct"]))
 
+    # Days actually covered (the weekly view is shorter than 5 days right after a new series starts),
+    # so the page header says what the numbers really span.
+    shown_days = max((r["trading_days"] for r in results), default=days)
+
     return {
         "period": period,
-        "trading_days": days,
+        "trading_days": shown_days,
         "total": len(results),
         "rollover_week": rollover,
         "series_bridge": any_bridge,
