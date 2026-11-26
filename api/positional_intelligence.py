@@ -548,6 +548,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
         # a small price candle + large OI change, standalone per-day check.
         if len(history) >= 1:
             last_15 = history[-15:]
+            _no_base = False  # Nov 26 2026: new F&O listing on its first day has no previous close/OI to compare with
             # During market hours use live snapshot data, else use daily_oi_summary
             if is_market and sym in live_oi_map:
                 today_oi = live_oi_map[sym].get("fut_oi_chg_pct", 0)
@@ -588,6 +589,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                 # gap, which this bug broke on nearly any gap day.
                 _raw_price_chg = (today_data or {}).get("price_chg_pct")
                 today_price = float(_raw_price_chg) if _raw_price_chg is not None else 0.0
+                _no_base = _raw_price_chg is None
             # Combined = near + next month OI change. Genuine rollover shows
             # up as OI leaving near-month and arriving in next-month in
             # roughly equal size, so it largely cancels out here -- what's
@@ -619,7 +621,7 @@ def _get_positional_intelligence_uncached(min_consec: int = 0):
                                 _gate_oi = _t2
                 except Exception:
                     pass
-            if _gate_oi > 0 and abs(today_price) <= 1.5:
+            if _gate_oi > 0 and abs(today_price) <= 1.5 and not _no_base:
                 if True:
                     if _gate_oi >= 2.0 and abs(today_price) <= 0.5:
                         tier, tier_label = "ELITE", "Elite"
