@@ -43,15 +43,35 @@ def _get_gift_nifty(supabase, last_trading_day: str):
             return None
 
         prev_close = None
+        # Nov 27 2026 fix: GIFT Nifty is a FUTURE, so its gap must be measured against the NIFTY FUTURE's previous
+        # close (same expiry month), not the cash close. The cash close sits about 150 points below the future
+        # (cost of carry), so on 27 Nov the page said "+70 gap-up" while GIFT was really about 78 points BELOW the
+        # Nifty future close (a gap-down). Use the near-month NIFTY FUT price from the last snapshot of the last
+        # trading day (15:15-15:40 IST); fall back to the cash close only if that is missing.
         try:
-            bar_q = supabase.from_("spot_daily_bars")\
-                .select("close").eq("symbol", "NIFTY")\
-                .eq("trade_date", last_trading_day)\
-                .limit(1).execute()
-            if bar_q.data:
-                prev_close = float(bar_q.data[0]["close"])
+            snap = supabase.from_("oi_snapshots")\
+                .select("timestamp, expiry, last_price")\
+                .eq("symbol", "NIFTY").eq("option_type", "FUT")\
+                .gte("timestamp", f"{last_trading_day} 09:45:00+00")\
+                .lte("timestamp", f"{last_trading_day} 10:10:00+00")\
+                .order("timestamp", desc=True).limit(6).execute().data or []
+            if snap:
+                top_ts = snap[0]["timestamp"]
+                same = [r for r in snap if r["timestamp"] == top_ts and r.get("last_price")]
+                if same:
+                    prev_close = float(min(same, key=lambda r: r["expiry"])["last_price"])
         except Exception as e:
-            print(f"[Premarket] GIFT Nifty prev-close lookup failed: {e}")
+            print(f"[Premarket] GIFT Nifty futures prev-close lookup failed: {e}")
+        if not prev_close:
+            try:
+                bar_q = supabase.from_("spot_daily_bars")\
+                    .select("close").eq("symbol", "NIFTY")\
+                    .eq("trade_date", last_trading_day)\
+                    .limit(1).execute()
+                if bar_q.data:
+                    prev_close = float(bar_q.data[0]["close"])
+            except Exception as e:
+                print(f"[Premarket] GIFT Nifty prev-close lookup failed: {e}")
 
         if not prev_close:
             # Fall back to GIFT Nifty's own OHLC close rather than showing
