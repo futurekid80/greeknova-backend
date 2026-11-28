@@ -18,13 +18,14 @@ from datetime import datetime, timedelta, timezone
 
 from services.stealth_baseline import implied_vol, _ncdf, RISK_FREE
 
-# Tag cut-offs. First pass, tuned on a real session before this reaches members (kept private, never shown).
+# Tag cut-offs. Tuned Nov 28 2026 on Friday's 589 hits so each tag marks roughly the top 8% / next 15% (size) and the
+# easiest ~25% / hardest ~20% (move). Kept private, never shown to members.
 IV_LOW_PCT = 25.0            # at or below this percentile = cheap for this stock
 IV_HIGH_PCT = 75.0           # at or above = rich for this stock
-SIZE_LARGE_PCT = 1.0         # delta-size as % of the stock's average daily traded value
-SIZE_VERY_LARGE_PCT = 3.0
-MOVE_EASY = 0.5              # move needed / normal move: at or below = inside the normal range
-MOVE_STRETCH = 1.0           # above this = needs more than a normal move
+SIZE_LARGE_PCT = 2.5         # delta-size as % of the stock's average daily traded value
+SIZE_VERY_LARGE_PCT = 5.0
+MOVE_EASY = 0.35             # move needed / normal move: at or below = inside the normal range
+MOVE_STRETCH = 0.6           # above this = needs more than a normal move
 MIN_IV_DAYS = 30             # need at least this many days of the stock's IV history
 IV_LOOKBACK_DAYS = 185
 
