@@ -4200,6 +4200,22 @@ def option_stealth_buildup_run_now():
     threading.Thread(target=_bg, daemon=True).start()
     return {"status": "started"}
 
+@app.post("/option-stealth-buildup/restamp-confluence-now")
+def option_stealth_restamp_confluence_now(date: str = None):
+    """Manual trigger: make the saved hits' Confluence flag agree with the final futures list (background).
+    The nightly final-OI job does this by itself; this is for fixing a day that was already finalised."""
+    import threading
+    def _bg():
+        try:
+            from api.positional_intelligence import clear_positional_intelligence_cache
+            clear_positional_intelligence_cache()
+            from services.option_stealth_buildup import restamp_confluence
+            restamp_confluence(get_supabase(), date)
+        except Exception as e:
+            print(f"[OptionStealth] manual confluence re-stamp failed: {e}")
+    threading.Thread(target=_bg, daemon=True).start()
+    return {"status": "started"}
+
 @app.post("/option-stealth-buildup/close-refresh-now")
 def option_stealth_close_refresh_now():
     """Manual trigger of the after-close re-read of frozen EOD rows (background)."""

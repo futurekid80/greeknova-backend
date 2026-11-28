@@ -222,5 +222,13 @@ def refresh_eod_caches(supabase):
             done["vol_oi_breakout"] = "skipped (date mismatch)"
     except Exception as e:
         done["vol_oi_breakout"] = f"error: {e}"
+    try:
+        # Nov 28 2026: saved Strike Stealth hits carry a Confluence flag stamped from the LIVE futures list; make it
+        # agree with the final data (positional cache was cleared just above, so it now reads the final rows).
+        from services.option_stealth_buildup import restamp_confluence
+        r = restamp_confluence(supabase)
+        done["stealth_confluence"] = f"re-stamped {r.get('set_true', 0)} on / {r.get('set_false', 0)} off"
+    except Exception as e:
+        done["stealth_confluence"] = f"error: {e}"
     print(f"[fut_oi_final] cache refresh: {done}")
     return done

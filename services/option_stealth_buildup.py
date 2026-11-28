@@ -621,6 +621,50 @@ def get_saved_events(supabase, date: str = None, window: str = DEFAULT_WINDOW, z
             "zone": zone, "total": len(events), "events": events}
 
 
+def restamp_confluence(supabase, scan_date: str = None) -> dict:
+    """Nov 28 2026: the Confluence flag on a saved hit is stamped from the LIVE futures list while the market is
+    open. The nightly job then replaces the live futures OI with NSE's final figures, and a stock can drop off
+    (or join) the futures Stealth list -- LODHA on 27 Nov: stamped all day, final data showed Long Unwinding.
+    Run after the final-OI job (with the positional cache already cleared): re-read the futures list from the
+    final data and make every saved hit of that day agree with it. Only the is_confluence flag changes."""
+    day = scan_date
+    if not day:
+        latest = supabase.from_("option_stealth_events").select("scan_date").order("scan_date", desc=True).limit(1).execute().data
+        day = latest[0]["scan_date"] if latest else None
+    if not day:
+        return {"date": None, "changed": 0}
+    # Read the list directly (not via _fut_stealth_symbols, which turns a failure into an empty set): an unreadable
+    # list must never be mistaken for "no stock qualifies", or every flag would be switched off.
+    try:
+        from api.positional_intelligence import get_positional_intelligence
+        pi = get_positional_intelligence(min_consec=0)
+    except Exception as e:
+        return {"date": day, "changed": 0, "skipped": f"futures list unavailable: {e}"}
+    if not isinstance(pi, dict) or pi.get("error") or not isinstance(pi.get("stealth_buildup"), list):
+        return {"date": day, "changed": 0, "skipped": "futures list unavailable"}
+    syms = {row["symbol"] for row in pi["stealth_buildup"]}
+    rows, start = [], 0
+    while True:
+        chunk = supabase.from_("option_stealth_events").select("id,symbol,strikes_away,is_confluence")\
+            .eq("scan_date", day).range(start, start + 999).execute().data or []
+        rows.extend(chunk)
+        if len(chunk) < 1000:
+            break
+        start += 1000
+    to_true, to_false = [], []
+    for r in rows:
+        sa = r.get("strikes_away")
+        want = bool(r["symbol"] in syms and sa is not None and abs(sa) <= CONFLUENCE_MAX_STRIKES_AWAY)
+        if want != bool(r.get("is_confluence")):
+            (to_true if want else to_false).append(r["id"])
+    for ids, val in ((to_true, True), (to_false, False)):
+        for i in range(0, len(ids), 100):
+            supabase.from_("option_stealth_events").update({"is_confluence": val}).in_("id", ids[i:i + 100]).execute()
+    res = {"date": day, "rows": len(rows), "set_true": len(to_true), "set_false": len(to_false), "futures_list": len(syms)}
+    print(f"[OptionStealth] confluence re-stamped: {res}")
+    return res
+
+
 # ---------------------------------------------------------------------------
 # Oct 31 2026: intraday context for EOD-window hits (INDHOTEL 860 CE case)
 # ---------------------------------------------------------------------------
