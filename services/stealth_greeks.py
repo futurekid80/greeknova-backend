@@ -29,6 +29,8 @@ MOVE_STRETCH = 0.6           # above this = needs more than a normal move
 MIN_IV_DAYS = 30             # need at least this many days of the stock's IV history
 IV_LOOKBACK_DAYS = 185
 
+INDEX_SYMBOLS = {"NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50", "SENSEX", "BANKEX"}
+
 _CACHE: dict = {}            # (date, window) -> (time, result)
 _CACHE_TTL = 600
 
@@ -152,8 +154,10 @@ def enrich_events(supabase, events, scan_date):
                 size_rs = added * d * S
                 row["delta"] = round(d, 3)
                 row["iv_now"] = round(sigma * 100, 1)
-                row["size_rs"] = round(size_rs)
-                to = turnover.get(e["symbol"])
+                # Index option sizes are huge in rupees and we have nothing fair to compare them with yet, so no size shown.
+                if e["symbol"] not in INDEX_SYMBOLS:
+                    row["size_rs"] = round(size_rs)
+                to = None if e["symbol"] in INDEX_SYMBOLS else turnover.get(e["symbol"])
                 if to:
                     pct_to = size_rs / to * 100.0
                     row["size_pct_of_turnover"] = round(pct_to, 2)
