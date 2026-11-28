@@ -221,6 +221,7 @@ def compute(supabase, force=False):
 
     # internal history check: what happened next, by label, versus the average F&O stock over the same days
     stats = {}
+    daily = []   # Nov 28 2026: (day index, sector, label, f5, f10, market f5, market f10) for the flip-level replay
     first_i = PRIOR + RECENT + 1
     for i in range(first_i, len(dates)):
         mkt5 = _forward(all_members, i, 5, dates)
@@ -230,6 +231,7 @@ def compute(supabase, force=False):
             pri = _sector_read(members, i - RECENT, PRIOR)
             lab = _label(rec, pri)
             f5, f10 = _forward(members, i, 5, dates), _forward(members, i, 10, dates)
+            daily.append((i, sec, lab, f5, f10, mkt5, mkt10))
             s = stats.setdefault(lab, {"n": 0, "n5": 0, "x5": 0.0, "h5": 0, "n10": 0, "x10": 0.0, "h10": 0})
             s["n"] += 1
             if f5 is not None and mkt5 is not None:
@@ -243,6 +245,23 @@ def compute(supabase, force=False):
                      "beat_market_5d_pct": round(s["h5"] / s["n5"] * 100) if s["n5"] else None,
                      "n10": s["n10"], "excess_10d_pct": round(s["x10"] / s["n10"], 2) if s["n10"] else None,
                      "beat_market_10d_pct": round(s["h10"] / s["n10"] * 100) if s["n10"] else None})
+
+    # Nov 28 2026: flip-level replay. A flip = the first day a sector shows Turning up / Turning down after not
+    # showing it the day before. Internal check only (admin endpoint); outcomes are versus the average F&O stock.
+    flips = []
+    prev_lab = {}
+    per_day = {}
+    for (i, sec, lab, f5, f10, m5, m10) in daily:
+        was = prev_lab.get(sec)
+        prev_lab[sec] = lab
+        if lab in ("Turning up", "Turning down") and was != lab:
+            flips.append({"date": dates[i], "sector": sec, "label": lab,
+                          "x5": round(f5 - m5, 2) if f5 is not None and m5 is not None else None,
+                          "x10": round(f10 - m10, 2) if f10 is not None and m10 is not None else None})
+            per_day[(dates[i], lab)] = per_day.get((dates[i], lab), 0) + 1
+    for f in flips:
+        f["day_flips"] = per_day[(f["date"], f["label"])]
+        f["wave"] = f["day_flips"] >= WAVE_MIN
 
     # a market-wide bounce (several sectors flipping together) says little about any one sector
     n_up = sum(1 for x in sectors if x["label"] == "Turning up")
@@ -260,7 +279,7 @@ def compute(supabase, force=False):
     data = {
         "as_of": dates[-1], "history_days": len(dates), "window_recent": RECENT, "window_prior": PRIOR,
         "turning_up_count": n_up, "turning_down_count": n_down, "wave_min": WAVE_MIN,
-        "sectors": sectors, "history_check": hist,
+        "sectors": sectors, "history_check": hist, "flips": flips,
         "note": "Experiment, admin only. A clue from futures OI and price, not a prediction.",
     }
     _cache["t"], _cache["data"] = time.time(), data
