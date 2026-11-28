@@ -4175,6 +4175,17 @@ def option_stealth_buildup_intraday(date: str = None, symbols: str = ""):
     syms = [x.strip() for x in (symbols or "").split(",") if x.strip()]
     return {"date": date, "data": intraday_for_events(get_supabase(), date, syms)}
 
+@app.get("/option-stealth-buildup/greeks")
+def option_stealth_buildup_greeks(date: str = None, window: str = "eod"):
+    """(Nov 28 2026) PREVIEW: Greeks-based extras (size in Rs, IV cheap/rich, move needed) for the saved hits of a day.
+    Read-only; the live scan and the saved rows are untouched. The frontend merges these by event_key behind ?v=greeks."""
+    from services.stealth_greeks import greeks_for_day
+    try:
+        return greeks_for_day(get_supabase(), date, window if window in ("5min", "hourly", "eod") else "eod")
+    except Exception as e:
+        print(f"[StealthGreeks] failed: {e}")
+        return {"date": date, "window": window, "rows": {}, "error": "unavailable"}
+
 @app.post("/option-stealth-buildup/run-now")
 def option_stealth_buildup_run_now():
     """Manual trigger of the same persist tick the cron runs (background
